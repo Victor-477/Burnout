@@ -60,9 +60,19 @@ def go_type(t: str) -> str:
     if t.startswith('map<') and t.endswith('>'):
         k, v = _split_type_pair(t[4:-1])
         return f"map[{go_type(k)}]{go_type(v)}"
+    if t.startswith('future<') and t.endswith('>'):   # future -> canal
+        return f"chan {go_type(t[7:-1])}"
     if t.endswith('[]'):
         return '[]' + go_type(t[:-2])
     return GO_TYPE.get(t, t)   # structs/enums passam direto
+
+
+def is_future(t: str) -> bool:
+    return bool(t) and t.startswith('future<') and t.endswith('>')
+
+
+def future_elem(t: str) -> str:
+    return t[7:-1] if is_future(t) else 'unknown'
 
 
 def go_field(name: str) -> str:
@@ -157,7 +167,8 @@ class TypeEnv:
                        'skill_has': 'bool', 'skills_json': 'string',
                        'pyro_exec': 'string', 'pyro_env': 'string',
                        'pyro_args': 'string[]', 'pyro_time': 'int',
-                       'pyro_read': 'string'}.get(node.callee)
+                       'pyro_read': 'string', 'http_get': 'string',
+                       'http_post': 'string'}.get(node.callee)
             return builtin or self.fn_ret(node.callee)
         if isinstance(node, StructInit):
             return node.struct_name
@@ -170,6 +181,11 @@ class TypeEnv:
         if isinstance(node, UnwrapExpr):
             t = self.infer(node.operand)
             return t[:-1] if t.endswith('?') else t
+        if isinstance(node, SpawnExpr):
+            return f"future<{self.infer(node.expr)}>"
+        if isinstance(node, AwaitExpr):
+            t = self.infer(node.expr)
+            return t[7:-1] if t.startswith('future<') and t.endswith('>') else t
         if isinstance(node, FieldAccess):
             if node.field == 'length': return 'int'
             return self.struct_field(self.infer(node.obj), node.field)
@@ -355,6 +371,22 @@ class CodeGenGo:
                   "\tif prompt != \"\" { fmt.Print(prompt) }",
                   "\ts, _ := cryoStdin.ReadString('\\n')",
                   "\treturn strings.TrimRight(s, \"\\r\\n\")", "}", ""]
+        if 'httpget' in self._helpers:
+            self._imports.update(('net/http', 'io'))
+            H += ["func cryoHTTPGet(url string) string {",
+                  "\tresp, err := http.Get(url)",
+                  '\tif err != nil { return "" }',
+                  "\tdefer resp.Body.Close()",
+                  "\tb, _ := io.ReadAll(resp.Body)",
+                  "\treturn string(b)", "}", ""]
+        if 'httppost' in self._helpers:
+            self._imports.update(('net/http', 'io', 'strings'))
+            H += ["func cryoHTTPPost(url, body string) string {",
+                  '\tresp, err := http.Post(url, "application/json", strings.NewReader(body))',
+                  '\tif err != nil { return "" }',
+                  "\tdefer resp.Body.Close()",
+                  "\tb, _ := io.ReadAll(resp.Body)",
+                  "\treturn string(b)", "}", ""]
         if 'exec' in self._helpers:
             self._imports.update(('os/exec', 'runtime'))
             H += ["func cryoExec(command string) string {",
@@ -528,6 +560,9 @@ class CodeGenGo:
             self._emit(f"{name} := {gt}{{}}")
         elif is_optional(vt) and n.value is not None:
             self._emit(f"var {name} {gt} = {self._to_optional(n.value, vt)}")
+        elif is_future(vt) and isinstance(n.value, SpawnExpr):
+            # usa o tipo de elemento declarado (evita 'chan any' por inferência falha)
+            self._emit(f"var {name} {gt} = {self._spawn(n.value, future_elem(vt))}")
         elif n.value is not None:
             val = self._expr_typed(n.value, vt)
             self._emit(f"var {name} {gt} = {val}")
@@ -826,7 +861,21 @@ class CodeGenGo:
             self._helpers.add('unwrap')
             return f"cryoUnwrap({self._expr(node.operand)})"
 
+        if isinstance(node, SpawnExpr):
+            return self._spawn(node)
+
+        if isinstance(node, AwaitExpr):
+            return f"(<-{self._expr(node.expr)})"
+
         return f"/* EXPR? {type(node).__name__} */"
+
+    def _spawn(self, node: SpawnExpr, elem: Optional[str] = None) -> str:
+        # spawn e  ->  goroutine + canal bufferizado (Future<T>)
+        t = elem or self.te.infer(node.expr)
+        gt = go_type(t) if t not in ('unknown', 'null', 'array') else 'any'
+        inner = self._expr(node.expr)
+        return (f"func() chan {gt} {{ __ch := make(chan {gt}, 1); "
+                f"go func() {{ __ch <- {inner} }}(); return __ch }}()")
 
     def _map_literal(self, node: MapLiteral, map_type: Optional[str]) -> str:
         if map_type and is_map(map_type):
@@ -998,6 +1047,16 @@ class CodeGenGo:
         if c == 'pyro_read':
             self._helpers.add('input')
             return 'cryoInput("")'
+        # ── Fase 2: concorrência / HTTP ──
+        if c == 'sleep' and len(a) == 1:
+            self._imports.add('time')
+            return f"time.Sleep(time.Duration({self._expr(a[0])}) * time.Millisecond)"
+        if c == 'http_get' and len(a) == 1:
+            self._helpers.add('httpget')
+            return f"cryoHTTPGet({self._expr(a[0])})"
+        if c == 'http_post' and len(a) == 2:
+            self._helpers.add('httppost')
+            return f"cryoHTTPPost({self._expr(a[0])}, {self._expr(a[1])})"
         args = ', '.join(self._expr(x) for x in a)
         return f"{gid(c)}({args})"
 

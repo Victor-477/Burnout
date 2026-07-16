@@ -341,6 +341,24 @@ def expect_c_err(src, label):
 expect_c_err('map<string,int> m = {};', "c rejeita map")
 expect_c_err('int? x = null;', "c rejeita optional")
 
+# ── Fase 2: concorrência (async) + HTTP (backend Go) ────────
+print("[fase2] async: spawn / await / future")
+check("go future<T> -> chan", "chan int64" in gen_go("future<int> f = spawn g(); int r = await f;"))
+check("go spawn -> goroutine+canal",
+      all(s in gen_go("future<int> f = spawn h();")
+          for s in ("make(chan int64, 1)", "go func()", "<-")))
+check("go await -> receber do canal", "(<-f)" in gen_go("future<int> f = spawn h(); int r = await f;"))
+check("go future array", "[]chan int64" in gen_go("future<int>[] ts = [];"))
+check("go for-each sobre futures",
+      "range ts" in gen_go("future<int>[] ts=[]; int s=0; for (future<int> t in ts) { s += await t; }"))
+
+print("[fase2] HTTP + sleep")
+check("go http_get -> helper", "cryoHTTPGet(" in gen_go('string b = http_get("http://x");'))
+check("go http_get importa net/http+io",
+      all(imp in gen_go('string b = http_get("http://x");') for imp in ('"net/http"', '"io"')))
+check("go http_post -> helper", "cryoHTTPPost(" in gen_go('string r = http_post("http://x", "{}");'))
+check("go sleep -> time.Sleep", "time.Sleep(" in gen_go("sleep(100);"))
+
 # ── Pyro: skills nativas + acesso à máquina (backend Go) ────
 print("[pyro] skills nativas")
 SK = '''
