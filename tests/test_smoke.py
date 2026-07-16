@@ -359,6 +359,33 @@ check("go http_get importa net/http+io",
 check("go http_post -> helper", "cryoHTTPPost(" in gen_go('string r = http_post("http://x", "{}");'))
 check("go sleep -> time.Sleep", "time.Sleep(" in gen_go("sleep(100);"))
 
+# ── Fase 3: LLM nativo (schema / llm / tool) — backend Go ───
+print("[fase3] schema + schema_of")
+g = gen_go('schema Fatura { string cliente; number total; string[] itens; } string s = schema_of(Fatura); print(s);')
+check("go schema = struct", "type Fatura struct {" in g)
+check("go schema_of gera JSON Schema",
+      all(x in g for x in ('\\"type\\": \\"object\\"', '\\"cliente\\"', '\\"required\\"')))
+
+print("[fase3] llm structured output")
+g = gen_go('schema F { string nome; } F f = llm("m", "p") as F; print(f.nome);')
+check("go llm...as T -> cryoLLM + Unmarshal", "cryoLLM(" in g and "json.Unmarshal" in g)
+check("go llm...as T passa o schema", '\\"nome\\"' in g)
+check("go llm raw", 'cryoLLM("m", "p", "")' in gen_go('string r = llm("m", "p"); print(r);'))
+
+print("[fase3] tools")
+g = gen_go('tool fn buscar(string sku) -> number ={ return 1.0; } print(tools_json());')
+check("go tool registra", "var cryoTools = map[string]Tool{" in g and '"buscar"' in g)
+check("go tool params schema da assinatura", '\\"sku\\"' in g)
+check("go tools()", "cryoToolNames()" in gen_go('tool fn f() -> int ={ return 1; } string[] t = tools();'))
+check("go tools_json", "cryoJSONEncode(cryoToolList())" in g)
+
+print("[fase3] backend C rejeita")
+def _c_err3(src, label):
+    try: gen_c(src); check(label + " (deveria falhar)", False)
+    except Exception as e: check(label, "backend go" in str(e).lower())
+_c_err3('string s = schema_of(F); print(s);', "c rejeita schema_of")
+_c_err3('int x = 0; string r = llm("m","p"); print(r);', "c rejeita llm")
+
 # ── Pyro: skills nativas + acesso à máquina (backend Go) ────
 print("[pyro] skills nativas")
 SK = '''

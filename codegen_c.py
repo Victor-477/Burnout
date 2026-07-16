@@ -563,9 +563,9 @@ class CodeGenC:
     # ── expressoes ──────────────────────────────────────────
 
     def _expr(self, node: Node) -> str:
-        if isinstance(node, (MapLiteral, CastExpr, UnwrapExpr)):
+        if isinstance(node, (MapLiteral, CastExpr, UnwrapExpr, SpawnExpr, AwaitExpr)):
             raise CodeGenError(
-                f"'{type(node).__name__}' (map/JSON/opcional) ainda não é "
+                f"'{type(node).__name__}' (map/JSON/opcional/async) ainda não é "
                 f"suportado no backend C; use --backend go.")
         if isinstance(node, Literal):
             if node.kind == 'null':   return 'NULL'
@@ -668,12 +668,14 @@ class CodeGenC:
         callee = node.callee
         args   = node.args
 
-        # camada Pyro (skills/máquina): apenas backend Go
+        # recursos apenas do backend Go (Pyro/JSON, concorrência, HTTP, LLM)
         if callee.startswith('pyro_') or callee in (
-                'skills', 'skill_get', 'skill_has', 'skills_json', 'json_encode'):
+                'skills', 'skill_get', 'skill_has', 'skills_json', 'json_encode',
+                'http_get', 'http_post', 'sleep',
+                'schema_of', 'llm', 'tools', 'tool_get', 'tools_json'):
             raise CodeGenError(
-                f"'{callee}()' faz parte da camada Pyro/JSON e só existe no "
-                f"backend Go; use --backend go.")
+                f"'{callee}()' só existe no backend Go (JSON/concorrência/HTTP/LLM); "
+                f"use --backend go.")
 
         # ── built-ins ──
         if callee == 'print':

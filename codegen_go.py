@@ -8,6 +8,7 @@
 #  (O backend assembly permanece disponivel para uso futuro.)
 # ============================================================
 from ast_nodes import *
+import json
 from typing import List, Dict, Set, Optional
 
 
@@ -168,7 +169,9 @@ class TypeEnv:
                        'pyro_exec': 'string', 'pyro_env': 'string',
                        'pyro_args': 'string[]', 'pyro_time': 'int',
                        'pyro_read': 'string', 'http_get': 'string',
-                       'http_post': 'string'}.get(node.callee)
+                       'http_post': 'string', 'schema_of': 'string',
+                       'llm': 'string', 'tools': 'string[]',
+                       'tools_json': 'string', 'tool_get': 'Tool'}.get(node.callee)
             return builtin or self.fn_ret(node.callee)
         if isinstance(node, StructInit):
             return node.struct_name
@@ -215,6 +218,9 @@ class CodeGenGo:
         # ── camada Pyro: skills nativas e acesso à máquina ──
         self._skills: List[SkillDecl] = []
         self._use_skills = False
+        # ── Fase 3: LLM nativo — funções 'tool' expostas a modelos ──
+        self._tools: List[FunctionDecl] = []
+        self._use_tools = False
 
     @property
     def _safe_mode(self) -> bool:
@@ -252,10 +258,11 @@ class CodeGenGo:
         return self._assemble()
 
     def _pre_scan(self, stmts):
-        # tipo nativo 'Skill' sempre conhecido pelo type-checker
+        # tipos nativos sempre conhecidos pelo type-checker
         self.te.reg_struct('Skill', {
             'name': 'string', 'desc': 'string', 'model': 'string',
             'tools': 'string[]', 'config': 'map<string,string>'})
+        self.te.reg_struct('Tool', {'name': 'string', 'parameters': 'string'})
         for n in stmts:
             if isinstance(n, StructDecl):
                 self.te.reg_struct(n.name, {f.name: f.field_type for f in n.fields})
@@ -271,6 +278,7 @@ class CodeGenGo:
         # (fmt, bufio, sort, os/exec...) antes de montarmos o bloco de import.
         helper_lines = self._helper_defs()
         skill_lines = self._skill_defs() if (self._skills or self._use_skills) else []
+        tool_lines = self._tool_defs() if (self._tools or self._use_tools) else []
         out = [
             "// ================================================",
             "// [PYRO] Compilado de Cryo -> Go nativo  (v0.5)",
@@ -288,6 +296,8 @@ class CodeGenGo:
         out += helper_lines
         if skill_lines:
             out += skill_lines + [""]
+        if tool_lines:
+            out += tool_lines + [""]
         if self._enum_defs:   out += self._enum_defs + [""]
         if self._struct_defs: out += self._struct_defs + [""]
         if self._global_defs: out += self._global_defs + [""]
@@ -387,6 +397,33 @@ class CodeGenGo:
                   "\tdefer resp.Body.Close()",
                   "\tb, _ := io.ReadAll(resp.Body)",
                   "\treturn string(b)", "}", ""]
+        if 'llm' in self._helpers:
+            self._imports.update(('os', 'net/http', 'io', 'encoding/json', 'bytes', 'fmt'))
+            H += ["// cryoLLM: chamada de LLM com retry. Endpoint em CRYO_LLM_URL",
+                  "// (contrato: POST {model, prompt, schema?} -> corpo JSON da resposta).",
+                  "func cryoLLM(model, prompt, schema string) string {",
+                  '\turl := os.Getenv("CRYO_LLM_URL")',
+                  '\tif url == "" {',
+                  '\t\tfmt.Fprintln(os.Stderr, "[Cryo LLM] CRYO_LLM_URL não definido; retornando vazio")',
+                  '\t\treturn ""', "\t}",
+                  '\tpayload := map[string]any{"model": model, "prompt": prompt}',
+                  '\tif schema != "" {',
+                  "\t\tvar sc any",
+                  '\t\tif json.Unmarshal([]byte(schema), &sc) == nil { payload["schema"] = sc }',
+                  "\t}",
+                  "\tbody, _ := json.Marshal(payload)",
+                  "\tfor attempt := 0; attempt < 3; attempt++ {",
+                  '\t\treq, _ := http.NewRequest("POST", url, bytes.NewReader(body))',
+                  '\t\treq.Header.Set("Content-Type", "application/json")',
+                  '\t\tif key := os.Getenv("CRYO_LLM_KEY"); key != "" {',
+                  '\t\t\treq.Header.Set("Authorization", "Bearer "+key)', "\t\t}",
+                  "\t\tresp, err := http.DefaultClient.Do(req)",
+                  "\t\tif err != nil { continue }",
+                  "\t\tout, _ := io.ReadAll(resp.Body)",
+                  "\t\tresp.Body.Close()",
+                  "\t\tif resp.StatusCode < 300 { return string(out) }",
+                  "\t}",
+                  '\treturn ""', "}", ""]
         if 'exec' in self._helpers:
             self._imports.update(('os/exec', 'runtime'))
             H += ["func cryoExec(command string) string {",
@@ -474,6 +511,59 @@ class CodeGenGo:
         raise CodeGenGoError(
             "valores de config de skill devem ser literais (string/número/bool).")
 
+    # ── Fase 3: LLM nativo (schema, llm, tools) ─────────────
+
+    _JSON_PRIM = {'int': 'integer', 'number': 'number',
+                  'string': 'string', 'bool': 'boolean'}
+
+    def _schema_obj(self, typ: str):
+        """JSON Schema (dict) recursivo de um tipo Cryo."""
+        if typ in self._JSON_PRIM:
+            return {"type": self._JSON_PRIM[typ]}
+        if typ.endswith('[]'):
+            return {"type": "array", "items": self._schema_obj(typ[:-2])}
+        if is_map(typ):
+            return {"type": "object"}
+        if typ in self.te._structs:
+            fields = self.te._structs[typ]
+            props = {fn: self._schema_obj(ft) for fn, ft in fields.items()}
+            return {"type": "object", "properties": props,
+                    "required": list(fields.keys())}
+        return {}
+
+    def _json_schema(self, typ: str) -> str:
+        """Literal Go string com o JSON Schema (gerado em tempo de compilação)."""
+        return self._go_string(json.dumps(self._schema_obj(typ), ensure_ascii=False))
+
+    def _tool_params_schema(self, fn: FunctionDecl):
+        props = {pn: self._schema_obj(pt) for pt, pn in fn.params}
+        return {"type": "object", "properties": props,
+                "required": [pn for _pt, pn in fn.params]}
+
+    def _tool_defs(self) -> List[str]:
+        """Tipo Tool + registro global + helpers de introspecção."""
+        D = ["// [PYRO] Tools de LLM — schema derivado da assinatura da função",
+             "type Tool struct {",
+             '\tName       string `json:"name"`',
+             '\tParameters string `json:"parameters"`',  # JSON Schema (string)
+             "}", "",
+             "var cryoTools = map[string]Tool{"]
+        for fn in self._tools:
+            sch = json.dumps(self._tool_params_schema(fn), ensure_ascii=False)
+            D.append(f'\t{self._go_string(fn.name)}: {{Name: {self._go_string(fn.name)}, '
+                     f'Parameters: {self._go_string(sch)}}},')
+        D += ["}", ""]
+        self._imports.add('sort')
+        D += ["func cryoToolNames() []string {",
+              "\tns := make([]string, 0, len(cryoTools))",
+              "\tfor n := range cryoTools {", "\t\tns = append(ns, n)", "\t}",
+              "\tsort.Strings(ns)", "\treturn ns", "}", "",
+              "func cryoToolList() []Tool {",
+              "\tout := make([]Tool, 0, len(cryoTools))",
+              "\tfor _, n := range cryoToolNames() {", "\t\tout = append(out, cryoTools[n])", "\t}",
+              "\treturn out", "}", ""]
+        return D
+
     # ── declaracoes ─────────────────────────────────────────
 
     def _enum(self, n: EnumDecl):
@@ -494,6 +584,8 @@ class CodeGenGo:
         self._struct_defs.append("}")
 
     def _fn(self, n: FunctionDecl):
+        if getattr(n, 'is_tool', False):
+            self._tools.append(n)          # registra como tool exposta a LLMs
         params = ', '.join(f"{gid(pn)} {go_type(pt)}" for pt, pn in n.params)
         ret = go_type(n.return_type or 'void')
         ret_s = f" {ret}" if ret else ""
@@ -895,6 +987,16 @@ class CodeGenGo:
             src = self._expr(inner.args[0]) if inner.args else '""'
             return (f"func() {gt} {{ var _v {gt}; "
                     f"_ = json.Unmarshal([]byte({src}), &_v); return _v }}()")
+        # llm("modelo", prompt) as T  ->  structured output tipado (Fase 3)
+        if isinstance(inner, CallExpr) and inner.callee == 'llm':
+            self._imports.add('encoding/json')
+            self._helpers.add('llm')
+            model = self._expr(inner.args[0]) if inner.args else '""'
+            prompt = self._expr(inner.args[1]) if len(inner.args) > 1 else '""'
+            schema = self._json_schema(target)
+            return (f"func() {gt} {{ var _v {gt}; "
+                    f"_ = json.Unmarshal([]byte(cryoLLM({model}, {prompt}, {schema})), &_v); "
+                    f"return _v }}()")
         # conversões numéricas
         if target in ('int', 'number'):
             return f"{gt}({self._expr(inner)})"
@@ -1057,6 +1159,24 @@ class CodeGenGo:
         if c == 'http_post' and len(a) == 2:
             self._helpers.add('httppost')
             return f"cryoHTTPPost({self._expr(a[0])}, {self._expr(a[1])})"
+        # ── Fase 3: LLM nativo ──
+        if c == 'schema_of' and len(a) == 1 and isinstance(a[0], Identifier):
+            return self._json_schema(a[0].name)
+        if c == 'llm':
+            self._helpers.add('llm')
+            model  = self._expr(a[0]) if a else '""'
+            prompt = self._expr(a[1]) if len(a) > 1 else '""'
+            return f'cryoLLM({model}, {prompt}, "")'   # sem schema (completion cru)
+        if c == 'tools':
+            self._use_tools = True
+            return "cryoToolNames()"
+        if c == 'tool_get' and len(a) == 1:
+            self._use_tools = True
+            return f"cryoTools[{self._expr(a[0])}]"
+        if c == 'tools_json':
+            self._use_tools = True
+            self._imports.add('encoding/json'); self._helpers.add('jsonenc')
+            return "cryoJSONEncode(cryoToolList())"
         args = ', '.join(self._expr(x) for x in a)
         return f"{gid(c)}({args})"
 
