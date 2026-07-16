@@ -139,6 +139,7 @@ def compile_file(input_path: str,
                  show_ast: bool = False,
                  audit: bool = False,
                  emit_only: bool = False,
+                 dis: bool = False,
                  run: bool = False) -> str:
 
     if abi is None:
@@ -201,10 +202,16 @@ def compile_file(input_path: str,
     if emit_only:
         return output_path
 
-    # ── backend pyro: executa o bytecode na VM Pyro (Go) ──
+    # ── backend pyro: desassembla e/ou executa na VM Pyro ──
     if backend == 'pyro':
-        _run_pyro(output_path, compiler_dir=os.path.dirname(os.path.abspath(__file__)),
-                  run=run, verbose=verbose)
+        if dis:
+            import disasm_pyro
+            print("\n── Desassembly (.pyro) ──────────────────────")
+            print(disasm_pyro.disassemble(code))
+        if run or not dis:
+            _run_pyro(output_path,
+                      compiler_dir=os.path.dirname(os.path.abspath(__file__)),
+                      run=run, verbose=verbose)
         return output_path
 
     # ── montar/compilar binário ──
@@ -259,7 +266,9 @@ def main() -> None:
     ap.add_argument('--audit', action='store_true',
                     help='Executa auditoria de segurança estática e sai')
     ap.add_argument('--emit-only', action='store_true',
-                    help='Apenas gera o fonte (.pyro/.s); não invoca o gcc')
+                    help='Apenas gera o fonte (.pyro/.s); não invoca o toolchain')
+    ap.add_argument('--dis', action='store_true',
+                    help='Desassembla o bytecode Pyro gerado (backend pyro)')
     ap.add_argument('--tokens', action='store_true', help='Imprime tokens')
     ap.add_argument('--ast',    action='store_true', help='Imprime AST')
     ap.add_argument('-v', '--verbose', action='store_true', help='Saída detalhada')
@@ -282,6 +291,7 @@ def main() -> None:
             show_ast    = args.ast,
             audit       = args.audit,
             emit_only   = args.emit_only,
+            dis         = args.dis,
             run         = args.run,
         )
     except LexerError     as e:

@@ -60,13 +60,22 @@ OP_CALL  = 0x40   # u16 funcidx, u8 argc
 OP_RET   = 0x41
 OP_PRINT = 0x50   # pop e imprime (com \n) conforme o tipo em runtime
 OP_PRINTLN = 0x52 # imprime \n
-OP_ASSERT = 0x51  # pop msg(const via topo?) ... usamos: pop cond; se falso aborta
+OP_ASSERT = 0x51  # pop cond, pop msg; se cond falso aborta
+# ── containers: arrays, maps e structs (struct = map de chaves string) ──
+OP_NEWARR = 0x60  # u16 count -> array a partir dos 'count' valores do topo
+OP_NEWMAP = 0x61  # u16 count -> map a partir de 'count' pares (chave,valor)
+OP_INDEX  = 0x62  # pop key, pop cont -> empilha cont[key]
+OP_SETIDX = 0x63  # pop val, pop key, pop cont -> cont[key] = val
+OP_LEN    = 0x64  # pop cont -> empilha tamanho (string/array/map)
+OP_APPEND = 0x65  # pop val, pop arr -> arr.push(val); empilha novo tamanho
+OP_HAS    = 0x66  # pop key, pop map -> empilha bool (existe)
+OP_KEYS   = 0x67  # pop map -> empilha array de chaves
 
 # tamanho do operando por opcode (bytes após o opcode)
 _OPERAND = {
     OP_CONST: 2, OP_LOAD: 2, OP_STORE: 2,
     OP_JMP: 2, OP_JMPF: 2, OP_JMPT: 2,
-    OP_CALL: 3,
+    OP_CALL: 3, OP_NEWARR: 2, OP_NEWMAP: 2,
 }
 
 def _isize(op: int) -> int:
@@ -108,6 +117,8 @@ class CodeGenPyro:
         self._cur: Optional[_Func] = None
         self._nlabels = 0
         self._loop_stack: List = []        # (break_label, continue_label)
+        self._structs: Dict[str, List[str]] = {}
+        self._ntmp = 0
 
     # ── constantes ──────────────────────────────────────────
 
@@ -152,12 +163,15 @@ class CodeGenPyro:
         for n in program.statements:
             if isinstance(n, FunctionDecl):
                 user_fns.append(n)
+            elif isinstance(n, StructDecl):
+                # struct = map de chaves string; registramos os campos
+                self._structs[n.name] = [f.name for f in n.fields]
             elif isinstance(n, (Import, Library)):
                 pass
-            elif isinstance(n, (StructDecl, EnumDecl, SkillDecl, ForeignBlock)):
+            elif isinstance(n, (EnumDecl, SkillDecl, ForeignBlock)):
                 raise CodeGenPyroError(
                     f"'{type(n).__name__}' ainda não é suportado no backend pyro "
-                    f"(bytecode v1: int/number/bool/string, funções e controle de fluxo).")
+                    f"(bytecode: escalares, arrays, maps, structs, funções e fluxo).")
             else:
                 top.append(n)
 
@@ -191,6 +205,7 @@ class CodeGenPyro:
     def _stmt(self, n: Node):
         if   isinstance(n, VarDecl):            self._var(n)
         elif isinstance(n, Assignment):         self._assign(n)
+        elif isinstance(n, IndexAssignment):    self._index_assign(n)
         elif isinstance(n, CompoundAssignment): self._compound(n)
         elif isinstance(n, Increment):          self._incr(n)
         elif isinstance(n, Return):             self._return(n)
@@ -198,6 +213,7 @@ class CodeGenPyro:
         elif isinstance(n, While):              self._while(n)
         elif isinstance(n, DoWhile):            self._do_while(n)
         elif isinstance(n, For):                self._for(n)
+        elif isinstance(n, ForEach):            self._foreach(n)
         elif isinstance(n, Switch):             self._switch(n)
         elif isinstance(n, Break):              self._break()
         elif isinstance(n, Continue):           self._continue()
@@ -221,6 +237,43 @@ class CodeGenPyro:
     def _assign(self, n: Assignment):
         self._expr(n.value)
         self._emit(OP_STORE, self._get_slot(n.name))
+
+    def _index_assign(self, n: IndexAssignment):
+        # cont[key] = val
+        self._expr(n.obj)
+        self._expr(n.index)
+        self._expr(n.value)
+        self._emit(OP_SETIDX)
+
+    def _foreach(self, n: ForEach):
+        # for (T x in iter): itera por índice (arrays; maps via keys(m))
+        #   __it = iter; __i = 0
+        #   while (__i < len(__it)) { x = __it[__i]; <body>; __i++ }
+        self._ntmp += 1
+        it = self._slot(f"__it{self._ntmp}")
+        ix = self._slot(f"__i{self._ntmp}")
+        xs = self._slot(n.var_name)
+        self._expr(n.iterable); self._emit(OP_STORE, it)
+        self._emit(OP_CONST, self._const(TAG_INT, 0)); self._emit(OP_STORE, ix)
+        l_cond = self._label(); l_cont = self._label(); l_end = self._label()
+        self._place(l_cond)
+        self._emit(OP_LOAD, ix)
+        self._emit(OP_LOAD, it); self._emit(OP_LEN)
+        self._emit(OP_LT)
+        self._emit(OP_JMPF, l_end)
+        # x = __it[__i]
+        self._emit(OP_LOAD, it); self._emit(OP_LOAD, ix); self._emit(OP_INDEX)
+        self._emit(OP_STORE, xs)
+        self._loop_stack.append((l_end, l_cont))
+        for s in n.body: self._stmt(s)
+        self._loop_stack.pop()
+        self._place(l_cont)
+        # __i++
+        self._emit(OP_LOAD, ix)
+        self._emit(OP_CONST, self._const(TAG_INT, 1)); self._emit(OP_ADD)
+        self._emit(OP_STORE, ix)
+        self._emit(OP_JMP, l_cond)
+        self._place(l_end)
 
     def _compound(self, n: CompoundAssignment):
         base = n.op[:-1]                       # '+=' -> '+'
@@ -363,8 +416,42 @@ class CodeGenPyro:
             return
         if isinstance(n, CallExpr):
             self._call(n); return
+        if isinstance(n, ArrayLiteral):
+            for e in n.elements: self._expr(e)
+            self._emit(OP_NEWARR, len(n.elements)); return
+        if isinstance(n, MapLiteral):
+            for k, v in n.pairs:
+                self._expr(k); self._expr(v)
+            self._emit(OP_NEWMAP, len(n.pairs)); return
+        if isinstance(n, StructInit):
+            # struct = map de chaves string (nome do campo)
+            for fname, val in n.fields:
+                self._emit(OP_CONST, self._const(TAG_STR, fname))
+                self._expr(val)
+            self._emit(OP_NEWMAP, len(n.fields)); return
+        if isinstance(n, IndexAccess):
+            self._expr(n.obj); self._expr(n.index); self._emit(OP_INDEX); return
+        if isinstance(n, FieldAccess):
+            if n.field == 'length':
+                self._expr(n.obj); self._emit(OP_LEN); return
+            self._expr(n.obj)
+            self._emit(OP_CONST, self._const(TAG_STR, n.field))
+            self._emit(OP_INDEX); return
+        if isinstance(n, MethodCallExpr):
+            self._method(n); return
         raise CodeGenPyroError(
             f"expressão '{type(n).__name__}' não suportada no backend pyro.")
+
+    def _method(self, n: MethodCallExpr):
+        m = n.method
+        if m == 'push':
+            self._expr(n.obj)
+            self._expr(n.args[0] if n.args else Literal('null', None))
+            self._emit(OP_APPEND); return       # empilha novo tamanho
+        if m in ('length', 'size'):
+            self._expr(n.obj); self._emit(OP_LEN); return
+        raise CodeGenPyroError(
+            f"método '.{m}()' não suportado no backend pyro.")
 
     def _literal(self, n: Literal):
         if n.kind == 'int':    self._emit(OP_CONST, self._const(TAG_INT, int(n.value)))
@@ -415,6 +502,12 @@ class CodeGenPyro:
             self._emit(OP_PRINT)
             self._emit(OP_NULL)
             return
+        if n.callee == 'len' and len(n.args) == 1:
+            self._expr(n.args[0]); self._emit(OP_LEN); return
+        if n.callee == 'has' and len(n.args) == 2:
+            self._expr(n.args[0]); self._expr(n.args[1]); self._emit(OP_HAS); return
+        if n.callee == 'keys' and len(n.args) == 1:
+            self._expr(n.args[0]); self._emit(OP_KEYS); return
         # função do usuário
         fi = self._fnindex.get(n.callee)
         if fi is None:
@@ -448,7 +541,7 @@ class CodeGenPyro:
         code = bytearray()
         for (op, arg, off) in flat:
             code.append(op)
-            if op in (OP_CONST, OP_LOAD, OP_STORE):
+            if op in (OP_CONST, OP_LOAD, OP_STORE, OP_NEWARR, OP_NEWMAP):
                 code += struct.pack('<H', arg)
             elif op in (OP_JMP, OP_JMPF, OP_JMPT):
                 rel = label_off[arg.id] - (off + 3)

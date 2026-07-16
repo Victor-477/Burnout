@@ -408,9 +408,26 @@ def expect_pyro_err(src, label):
         gen_pyro(src); check(label + " (deveria falhar)", False)
     except _PErr:
         check(label, True)
-expect_pyro_err('struct P { int x; }', "pyro rejeita struct")
-expect_pyro_err('int[] a = [1,2];', "pyro rejeita array")
-expect_pyro_err('map<string,int> m = {};', "pyro rejeita map")
+expect_pyro_err('enum E { A, B }', "pyro rejeita enum")
+expect_pyro_err('skill s { desc: "x"; }', "pyro rejeita skill")
+
+print("[pyro-bc] containers (arrays/maps/structs)")
+# opcodes esperados no código (usa encode=False p/ ler os bytes em claro)
+import disasm_pyro
+def _pyro_code_ops(src):
+    return disasm_pyro.disassemble(gen_pyro(src, encode=False))
+check("pyro array (NEWARR/APPEND)",
+      "NEWARR" in _pyro_code_ops('int[] a = [1,2,3]; a.push(4);'))
+check("pyro index (INDEX/SETIDX)",
+      "SETIDX" in _pyro_code_ops('int[] a=[1]; a[0]=9; int x=a[0];') and
+      "INDEX" in _pyro_code_ops('int[] a=[1]; int x=a[0];'))
+check("pyro map (NEWMAP/HAS/KEYS)",
+      all(op in _pyro_code_ops('map<string,int> m={"a":1}; bool b=has(m,"a"); print(len(m));')
+          for op in ("NEWMAP", "HAS", "LEN")))
+check("pyro struct = map + field access (INDEX)",
+      "NEWMAP" in _pyro_code_ops('struct P{int x;} P p=new P{x:1}; int y=p.x;'))
+check("pyro for-each gera", isinstance(
+      gen_pyro('int[] a=[1,2]; int s=0; for (int v in a) { s+=v; }'), (bytes, bytearray)))
 
 # ── auditoria estatica ──────────────────────────────────────
 print("[audit] regras")
