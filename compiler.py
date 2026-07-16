@@ -25,19 +25,20 @@ for _stream in ('stdout', 'stderr'):
         except Exception:
             pass
 
-# Burnout (motor) importa o front-end de CRYO e os backends de PYRO.
+# Burnout (compilador) importa o front-end de CRYO; os backends (codegens)
+# vivem aqui mesmo (Burnout = o compilador). A VM Pyro fica em pyro/vm.
 _here = os.path.dirname(os.path.abspath(__file__))   # burnout/
 _root = os.path.dirname(_here)
-for _p in ('cryo', 'pyro'):
-    sys.path.insert(0, os.path.join(_root, _p))
-sys.path.insert(0, _here)
+sys.path.insert(0, os.path.join(_root, 'cryo'))      # front-end (CRYO)
+sys.path.insert(0, _here)                            # backends (Burnout)
 
-from lexer      import Lexer,     LexerError        # CRYO
-from parser     import Parser,    ParseError        # CRYO
-from security   import audit_ast, format_audit      # CRYO
-from codegen_c  import CodeGenC,  CodeGenError       # PYRO
-from codegen_go import CodeGenGo, CodeGenGoError     # PYRO
-from codegen_asm import CodeGenAsm, CodeGenAsmError  # PYRO
+from lexer       import Lexer,      LexerError        # CRYO
+from parser      import Parser,     ParseError        # CRYO
+from security    import audit_ast,  format_audit      # CRYO
+from codegen_c    import CodeGenC,    CodeGenError       # backend C
+from codegen_go   import CodeGenGo,   CodeGenGoError     # backend Go
+from codegen_asm  import CodeGenAsm,  CodeGenAsmError    # backend x86-64
+from codegen_pyro import CodeGenPyro, CodeGenPyroError   # backend bytecode Pyro
 
 
 BANNER = r"""
@@ -57,13 +58,16 @@ def default_abi() -> str:
 
 
 def compile_source(source: str, backend: str, safe: bool,
-                   abi: str = 'sysv') -> str:
+                   abi: str = 'sysv'):
+    """Retorna str (go/c/asm) ou bytes (pyro = bytecode)."""
     tokens = Lexer(source).tokenize()
     ast    = Parser(tokens).parse()
     if backend == 'asm':
         return CodeGenAsm(safe=safe, abi=abi).generate(ast)
     if backend == 'go':
         return CodeGenGo(safe=safe).generate(ast)
+    if backend == 'pyro':
+        return CodeGenPyro(safe=safe).generate(ast)   # bytes
     return CodeGenC(safe=safe).generate(ast)
 
 
@@ -83,6 +87,38 @@ def _gcc_c_flags(compiler_dir: str, output_path: str, runtime: str,
         ]
     flags += ['-x', 'c', output_path, runtime, '-lm', '-o', bin_path]
     return flags
+
+
+def _run_pyro(pyro_path: str, compiler_dir: str, run: bool, verbose: bool):
+    """Compila a VM Pyro (Go) uma vez e executa o bytecode .pyro."""
+    root    = os.path.dirname(compiler_dir)                 # raiz do projeto
+    vm_dir  = os.path.join(root, 'pyro', 'vm')
+    os.makedirs(os.path.join(root, 'build'), exist_ok=True)
+    pyrovm  = os.path.join(root, 'build', 'pyrovm')
+    if sys.platform == 'win32':
+        pyrovm += '.exe'
+
+    # (re)compila a VM se ainda não existe ou se o fonte é mais novo
+    src = os.path.join(vm_dir, 'main.go')
+    need = (not os.path.isfile(pyrovm) or
+            (os.path.isfile(src) and os.path.getmtime(src) > os.path.getmtime(pyrovm)))
+    try:
+        if need:
+            if verbose:
+                print(f"→ Compilando VM Pyro: go build -o {pyrovm}  (em {vm_dir})")
+            r = subprocess.run(['go', 'build', '-o', pyrovm, '.'],
+                               cwd=vm_dir, capture_output=True, text=True)
+            if r.returncode != 0:
+                print(f"[go] Erro ao compilar a VM Pyro:\n{r.stderr}", file=sys.stderr)
+                return
+        if verbose:
+            print(f"✓ VM Pyro: {pyrovm}")
+        if run:
+            print(f"\n── Executando (VM Pyro): {pyro_path} ───────────────────")
+            subprocess.run([pyrovm, pyro_path])
+    except FileNotFoundError:
+        if verbose:
+            print("⚠  go não encontrado — .pyro gerado, mas a VM não foi compilada/executada")
 
 
 def _gcc_asm_flags(output_path: str, runtime: str, bin_path: str, abi: str):
@@ -137,7 +173,7 @@ def compile_file(input_path: str,
     # ── geracao de codigo ──
     code = compile_source(source, backend, safe, abi)
 
-    ext = {'asm': '.s', 'go': '.go'}.get(backend, '.pyro')
+    ext = {'asm': '.s', 'go': '.go', 'pyro': '.pyro', 'c': '.c'}.get(backend, '.c')
     if output_path is None:
         # separa fontes (.cryo) de artefatos gerados: saída vai para build/
         os.makedirs('build', exist_ok=True)
@@ -147,16 +183,28 @@ def compile_file(input_path: str,
     out_dir = os.path.dirname(output_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
-    with open(output_path, 'w', encoding='utf-8') as f:
-        f.write(code)
+    if isinstance(code, (bytes, bytearray)):        # .pyro = bytecode binário
+        with open(output_path, 'wb') as f:
+            f.write(code)
+    else:
+        with open(output_path, 'w', encoding='utf-8') as f:
+            f.write(code)
 
     modo = 'SEGURO' if safe else 'UNSAFE'
     if verbose:
-        alvo = {'asm': f'x86-64 asm/{abi}', 'go': 'Go nativo'}.get(backend, 'C nativo')
-        print(f"✓ [{alvo} / {modo}] gerado: {input_path}  →  {output_path}")
+        alvo = {'asm': f'x86-64 asm/{abi}', 'go': 'Go nativo',
+                'pyro': 'bytecode Pyro', 'c': 'C nativo'}.get(backend, 'C nativo')
+        tam = f"  ({len(code)} bytes)" if isinstance(code, (bytes, bytearray)) else ""
+        print(f"✓ [{alvo} / {modo}] gerado: {input_path}  →  {output_path}{tam}")
 
     # ── emit-only: gera fonte e para (o build script cuida do toolchain) ──
     if emit_only:
+        return output_path
+
+    # ── backend pyro: executa o bytecode na VM Pyro (Go) ──
+    if backend == 'pyro':
+        _run_pyro(output_path, compiler_dir=os.path.dirname(os.path.abspath(__file__)),
+                  run=run, verbose=verbose)
         return output_path
 
     # ── montar/compilar binário ──
@@ -164,7 +212,7 @@ def compile_file(input_path: str,
     if sys.platform == 'win32':
         bin_path += '.exe'
     compiler_dir = os.path.dirname(os.path.abspath(__file__))   # burnout/
-    runtime_dir  = os.path.join(compiler_dir, '..', 'pyro', 'runtime')
+    runtime_dir  = os.path.join(compiler_dir, 'runtime')
     runtime      = os.path.join(runtime_dir, 'cryo_runtime.c')
 
     if backend == 'asm':
@@ -202,8 +250,8 @@ def main() -> None:
     )
     ap.add_argument('input',           help='Arquivo de entrada (.cryo)')
     ap.add_argument('-o', '--output',  help='Arquivo de saída (.go/.pyro/.s)')
-    ap.add_argument('--backend', choices=('go', 'c', 'asm'), default='go',
-                    help='Backend de geração de código (padrão: go)')
+    ap.add_argument('--backend', choices=('go', 'c', 'asm', 'pyro'), default='go',
+                    help='Backend: go (padrão), c, asm, ou pyro (bytecode próprio + VM)')
     ap.add_argument('--abi', choices=('sysv', 'win64'), default=None,
                     help='ABI do backend asm (padrão: win64 no Windows, senão sysv)')
     ap.add_argument('--unsafe', action='store_true',
@@ -244,6 +292,8 @@ def main() -> None:
         print(f"\n[Erro CodeGen ASM] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenGoError as e:
         print(f"\n[Erro CodeGen Go] {e}", file=sys.stderr); sys.exit(1)
+    except CodeGenPyroError as e:
+        print(f"\n[Erro CodeGen Pyro] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenError   as e:
         print(f"\n[Erro CodeGen]   {e}", file=sys.stderr); sys.exit(1)
     except Exception      as e:

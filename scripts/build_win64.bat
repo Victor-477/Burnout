@@ -76,7 +76,7 @@ set "OUTDIR=%HERE%..\..\build"
 if not exist "%OUTDIR%" mkdir "%OUTDIR%"
 set "ASM=%OUTDIR%\%~n1.s"
 set "EXE=%OUTDIR%\%~n1.exe"
-set "RUNTIME=%HERE%..\..\pyro\runtime\cryo_runtime.c"
+set "RUNTIME=%HERE%..\runtime\cryo_runtime.c"
 
 echo.
 echo === Cryo build (Win64) =========================================

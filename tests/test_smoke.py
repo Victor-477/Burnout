@@ -5,16 +5,18 @@
 #      python burnout/tests/test_smoke.py
 # ============================================================
 import sys, os
-_root = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
-sys.path.insert(0, os.path.join(_root, 'cryo'))   # front-end
-sys.path.insert(0, os.path.join(_root, 'pyro'))   # backends
+_root    = os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', '..')
+_burnout = os.path.join(_root, 'burnout')
+sys.path.insert(0, os.path.join(_root, 'cryo'))   # front-end (CRYO)
+sys.path.insert(0, _burnout)                      # backends (Burnout)
 
-from lexer       import Lexer          # CRYO
-from parser      import Parser         # CRYO
-from security    import audit_ast      # CRYO
-from codegen_c   import CodeGenC        # PYRO
-from codegen_go  import CodeGenGo       # PYRO
-from codegen_asm import CodeGenAsm, CodeGenAsmError  # PYRO
+from lexer        import Lexer          # CRYO
+from parser       import Parser         # CRYO
+from security     import audit_ast      # CRYO
+from codegen_c    import CodeGenC        # Burnout / backend C
+from codegen_go   import CodeGenGo       # Burnout / backend Go
+from codegen_asm  import CodeGenAsm, CodeGenAsmError  # Burnout / backend asm
+from codegen_pyro import CodeGenPyro     # Burnout / backend bytecode Pyro
 
 _passed = 0
 _failed = 0
@@ -36,6 +38,9 @@ def gen_asm(src, safe=True, abi='sysv'):
 
 def gen_go(src, safe=True):
     return CodeGenGo(safe=safe).generate(Parser(Lexer(src).tokenize()).parse())
+
+def gen_pyro(src, safe=True, encode=True):
+    return CodeGenPyro(safe=safe, encode=encode).generate(Parser(Lexer(src).tokenize()).parse())
 
 def ast_of(src):
     return Parser(Lexer(src).tokenize()).parse()
@@ -379,6 +384,33 @@ def expect_c_err2(src, label):
         check(label, "backend go" in str(e).lower())
 expect_c_err2('skill s { desc: "x"; }', "c rejeita skill")
 expect_c_err2('string o = pyro_exec("x");', "c rejeita pyro_exec")
+
+# ── Pyro: bytecode próprio (.pyro) ──────────────────────────
+print("[pyro-bc] bytecode e formato")
+from codegen_pyro import CodeGenPyroError as _PErr
+bc = gen_pyro('fn f(int n) -> int ={ return n * 2; } int x = f(21); print(x);')
+check("pyro é bytes", isinstance(bc, (bytes, bytearray)))
+check("pyro magic PYRO", bc[:4] == b'PYRO')
+check("pyro versão 1", bc[4] == 1)
+check("pyro flag codificado (XOR)", (bc[5] & 0x01) == 1)
+check("pyro const pool tem nomes de função", b'main' in bc and b'f' in bc)
+check("pyro sem encode = flag 0", (gen_pyro('print(1);', encode=False)[5] & 0x01) == 0)
+
+print("[pyro-bc] cobertura e erros")
+check("pyro if/while/for geram", isinstance(
+    gen_pyro('int s=0; for(int i=0;i<3;i++){ s+=i; } while(s>0){ s--; } if(s==0){ print(s); }'),
+    (bytes, bytearray)))
+check("pyro ternario/do-while geram", isinstance(
+    gen_pyro('int a = true ? 1 : 2; do { a++; } while (a < 3); print(a);'),
+    (bytes, bytearray)))
+def expect_pyro_err(src, label):
+    try:
+        gen_pyro(src); check(label + " (deveria falhar)", False)
+    except _PErr:
+        check(label, True)
+expect_pyro_err('struct P { int x; }', "pyro rejeita struct")
+expect_pyro_err('int[] a = [1,2];', "pyro rejeita array")
+expect_pyro_err('map<string,int> m = {};', "pyro rejeita map")
 
 # ── auditoria estatica ──────────────────────────────────────
 print("[audit] regras")

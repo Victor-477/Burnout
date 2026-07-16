@@ -61,7 +61,7 @@ if (-not (Test-Path $outdir)) { New-Item -ItemType Directory -Path $outdir | Out
 $name    = [System.IO.Path]::GetFileNameWithoutExtension($src)
 $asm     = Join-Path $outdir "$name.s"
 $exe     = Join-Path $outdir "$name.exe"
-$runtime = Join-Path $root 'pyro\runtime\cryo_runtime.c'
+$runtime = Join-Path $burnout 'runtime\cryo_runtime.c'
 $unsafeArg = if ($Unsafe) { '--unsafe' } else { $null }
 
 Write-Host ''
