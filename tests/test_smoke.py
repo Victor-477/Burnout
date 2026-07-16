@@ -422,10 +422,10 @@ check("pyro index (INDEX/SETIDX)",
       "SETIDX" in _pyro_code_ops('int[] a=[1]; a[0]=9; int x=a[0];') and
       "INDEX" in _pyro_code_ops('int[] a=[1]; int x=a[0];'))
 check("pyro map (NEWMAP/HAS/KEYS)",
-      all(op in _pyro_code_ops('map<string,int> m={"a":1}; bool b=has(m,"a"); print(len(m));')
+      all(op in _pyro_code_ops('map<string,int> m = {"a":1}; bool b = has(m,"a"); print(len(m));')
           for op in ("NEWMAP", "HAS", "LEN")))
 check("pyro struct = map + field access (INDEX)",
-      "NEWMAP" in _pyro_code_ops('struct P{int x;} P p=new P{x:1}; int y=p.x;'))
+      "NEWMAP" in _pyro_code_ops('struct P{int x;} P p = new P{x:1}; int y = p.x;'))
 check("pyro for-each gera", isinstance(
       gen_pyro('int[] a=[1,2]; int s=0; for (int v in a) { s+=v; }'), (bytes, bytearray)))
 
