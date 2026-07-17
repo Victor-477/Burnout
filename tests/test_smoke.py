@@ -256,6 +256,13 @@ check("go sub overflow", "cryoSubOvf" in g)
 g = gen_go("int q = 10 % 3; int d = 8 / 2;")
 check("go div check", "cryoIDivChk" in g)
 check("go mod check", "cryoIModChk" in g)
+# divisao INT64_MIN/-1 aborta (como no runtime C); modulo retorna 0
+check("go idiv guarda INT64_MIN/-1", "a == -1<<63 && b == -1" in g and "INT64_MIN / -1" in g)
+check("go imod INT64_MIN%-1 -> 0 (nao aborta)",
+      "a == -1<<63 && b == -1" in g and "return 0" in g and "INT64_MIN modulo" not in g)
+check("go mul guarda INT64_MIN*-1",
+      "a == -1<<63 && b == -1 || b == -1<<63 && a == -1" in
+      gen_go("fn f(int a, int b) -> int ={ return a * b; }"))
 gu = gen_go("int x = 0; unsafe { x = 5 * 5; }")
 check("go unsafe sem overflow", "cryoMulOvf" not in gu)
 check("go --unsafe global", "cryoMulOvf" not in gen_go("fn f(int a)->int ={ return a*a; }", safe=False))
@@ -586,6 +593,19 @@ f = audit_ast(ast_of("int x = 5; unsafe { x = 1; }"))
 check("unsafe-block MEDIO", any(x.rule == 'unsafe-block' for x in f))
 f = audit_ast(ast_of("int x = 5 / 0;"))
 check("div-by-zero ALTO", any(x.rule == 'div-by-zero' for x in f))
+# operacoes sensiveis (maquina / rede / LLM)
+f = audit_ast(ast_of('string s = pyro_exec("ls");'))
+check("command-exec ALTO",
+      any(x.rule == 'command-exec' and x.level == 'ALTO' for x in f))
+f = audit_ast(ast_of('bool ok = pyro_write_file("a.txt", "x");'))
+check("file-write MEDIO",
+      any(x.rule == 'file-write' and x.level == 'MEDIO' for x in f))
+f = audit_ast(ast_of('string s = http_get("http://x");'))
+check("net-egress MEDIO",
+      any(x.rule == 'net-egress' and x.level == 'MEDIO' for x in f))
+f = audit_ast(ast_of('string r = agent("m", "p");'))
+check("llm-egress BAIXO",
+      any(x.rule == 'llm-egress' for x in f))
 
 # ── resultado ───────────────────────────────────────────────
 print(f"\n{_passed} passaram, {_failed} falharam")

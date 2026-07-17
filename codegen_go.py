@@ -347,6 +347,8 @@ class CodeGenGo:
         if 'mulovf' in self._helpers:
             H += ["func cryoMulOvf(a, b int64) int64 {",
                   "\tif a == 0 || b == 0 {", "\t\treturn 0", "\t}",
+                  "\tif a == -1<<63 && b == -1 || b == -1<<63 && a == -1 {",
+                  '\t\tpanic("[Cryo Seguranca] Overflow: multiplicacao de inteiros")', "\t}",
                   "\ts := a * b",
                   "\tif s/b != a {",
                   '\t\tpanic("[Cryo Seguranca] Overflow: multiplicacao de inteiros")', "\t}",
@@ -355,11 +357,16 @@ class CodeGenGo:
             H += ["func cryoIDivChk(a, b int64) int64 {",
                   "\tif b == 0 {",
                   '\t\tpanic("[Cryo Seguranca] DivisaoPorZero: divisao inteira")', "\t}",
+                  "\tif a == -1<<63 && b == -1 {",
+                  '\t\tpanic("[Cryo Seguranca] Overflow: INT64_MIN / -1")', "\t}",
                   "\treturn a / b", "}", ""]
         if 'imod' in self._helpers:
+            # INT64_MIN % -1 é 0 (bem-definido em Go); só a divisão estoura.
             H += ["func cryoIModChk(a, b int64) int64 {",
                   "\tif b == 0 {",
                   '\t\tpanic("[Cryo Seguranca] DivisaoPorZero: modulo")', "\t}",
+                  "\tif a == -1<<63 && b == -1 {",
+                  "\t\treturn 0", "\t}",
                   "\treturn a % b", "}", ""]
         if 'absi' in self._helpers:
             H += ["func cryoAbsI(x int64) int64 { if x < 0 { return -x }; return x }", ""]
