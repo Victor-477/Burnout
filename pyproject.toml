@@ -1,0 +1,55 @@
+# ============================================================
+#  Empacotamento do Burnout — o compilador da linguagem Cryo.
+#
+#  Instalação (a partir da pasta Burnout, dentro do monorepo Cryo):
+#      pip install -e .
+#
+#  Isso torna o compilador importável em qualquer projeto:
+#      import burnout
+#      burnout.compile_file("app.cryo", backend="go", run=True)
+#
+#  e disponível como comando de linha:
+#      cryoc app.cryo --run
+#      python -m burnout app.cryo --run
+#
+#  O front-end CRYO (pasta ../cryo) e a VM PYRO (../pyro) precisam
+#  estar presentes ao lado do Burnout — a instalação editável (-e)
+#  mantém os arquivos no lugar, então o shim de sys.path em
+#  __init__.py resolve os módulos irmãos automaticamente.
+# ============================================================
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "burnout"
+version = "0.9.0"
+description = "Burnout — o compilador da linguagem Cryo (.cryo → Pyro bytecode, Go, C, x86-64)."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "Victor-477" }]
+keywords = ["cryo", "pyro", "burnout", "compiler", "bytecode", "language"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Software Development :: Compilers",
+    "License :: OSI Approved :: MIT License",
+]
+
+[project.urls]
+Homepage = "https://github.com/Victor-477/Burnout"
+"Cryo (front-end)" = "https://github.com/Victor-477/Cryo"
+"Pyro (VM)" = "https://github.com/Victor-477/pyro"
+
+[project.scripts]
+cryoc = "burnout:main"
+
+[tool.setuptools]
+# A própria pasta Burnout é o pacote `burnout`. Os módulos flat
+# (compiler, codegen_*, disasm_pyro) são resolvidos via sys.path em
+# tempo de import — veja burnout/__init__.py.
+packages = ["burnout"]
+package-dir = { "burnout" = "." }
+
+[tool.setuptools.package-data]
+burnout = ["runtime/*.c", "runtime/*.h", "scripts/*.py"]
