@@ -35,6 +35,7 @@ sys.path.insert(0, _here)                            # backends (Burnout)
 from lexer       import Lexer,      LexerError        # CRYO
 from parser      import Parser,     ParseError        # CRYO
 from security    import audit_ast,  format_audit      # CRYO
+from foreign     import verify as verify_foreign, ForeignError   # CRYO
 from codegen_c    import CodeGenC,    CodeGenError       # backend C
 from codegen_go   import CodeGenGo,   CodeGenGoError     # backend Go
 from codegen_asm  import CodeGenAsm,  CodeGenAsmError    # backend x86-64
@@ -62,6 +63,7 @@ def compile_source(source: str, backend: str, safe: bool,
     """Retorna str (go/c/asm) ou bytes (pyro = bytecode)."""
     tokens = Lexer(source).tokenize()
     ast    = Parser(tokens).parse()
+    verify_foreign(ast)   # blocos estrangeiros/libraries exigem `import >Lang<`
     if backend == 'asm':
         return CodeGenAsm(safe=safe, abi=abi).generate(ast)
     if backend == 'go':
@@ -298,6 +300,8 @@ def main() -> None:
         print(f"\n[Erro Léxico]    {e}", file=sys.stderr); sys.exit(1)
     except ParseError     as e:
         print(f"\n[Erro Sintático] {e}", file=sys.stderr); sys.exit(1)
+    except ForeignError   as e:
+        print(f"\n[Erro Estrangeiro] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenAsmError as e:
         print(f"\n[Erro CodeGen ASM] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenGoError as e:

@@ -267,7 +267,7 @@ check("go switch",
       "switch d {" in gen_go("fn f(int d)->int ={ switch(d){ case 1: return 1; default: return 0; } }"))
 check("go while->for", "for (" in gen_go("int i=0; while(i<3){ i++; }"))
 check("go bloco C omitido",
-      "omitido no backend Go" in gen_go('>C( printf("x"); )'))
+      "omitido no backend Go" in gen_go('import >C< >C( printf("x"); )'))
 
 # ── novos recursos v0.6 (ternario, do-while, for-each, etc.) ─
 print("[v0.6] novos recursos — frontend")
@@ -496,6 +496,46 @@ check("pyro struct = map + field access (INDEX)",
       "NEWMAP" in _pyro_code_ops('struct P{int x;} P p = new P{x:1}; int y = p.x;'))
 check("pyro for-each gera", isinstance(
       gen_pyro('int[] a=[1,2]; int s=0; for (int v in a) { s+=v; }'), (bytes, bytearray)))
+
+# ── blocos estrangeiros verificados + libraries ─────────────
+print("[foreign] verificacao de blocos estrangeiros + libraries")
+from foreign import verify as _verify, ForeignError as _ForeignError, \
+    resolve_library_lang as _resolve_lib
+
+def _verify_raises(src):
+    try:
+        _verify(ast_of(src)); return False
+    except _ForeignError:
+        return True
+
+# bloco sem import -> rejeitado
+check("bloco >C< sem import falha", _verify_raises('>C( printf("x"); )'))
+check("bloco >Go< sem import falha", _verify_raises('>Go( fmt.Println("x") )'))
+# bloco com import -> ok
+check("bloco >C< com import passa",
+      _verify(ast_of('import >C< >C( printf("x"); )')) == {'c'})
+# import case-insensitive
+check("import >C< cobre bloco >c<",
+      not _verify_raises('import >C< >c( printf("x"); )'))
+# library nao qualificada exige import; ambigua com 2 langs
+check("library sem import falha", _verify_raises('library >math<'))
+check("library ambigua (2 langs) falha",
+      _verify_raises('import >c< import >go< library >math<'))
+check("library qualificada exige seu import",
+      _verify_raises('import >go< library >c math<'))
+check("library qualificada ok com import",
+      not _verify_raises('import >c< library >c math<'))
+# resolucao de linguagem da library
+from ast_nodes import Library as _Lib
+check("resolve library explicita", _resolve_lib(_Lib(name='fmt', lang='go'), {'go'}) == 'go')
+check("resolve library por unica importada", _resolve_lib(_Lib(name='math', lang=''), {'c'}) == 'c')
+# codegen: library vira import Go / include C
+check("go library >go strings< -> import \"strings\"",
+      '"strings"' in gen_go('import >go< library >go strings< >Go( _ = strings.ToUpper("a") )'))
+check("c library >c math< -> include math.h",
+      '#include <math.h>' in gen_c('import >c< library >c math< >C( double r = sqrt(2.0); )'))
+check("c bloco >C< emitido com import",
+      'sqrt(2.0)' in gen_c('import >c< >C( double r = sqrt(2.0); )'))
 
 # ── auditoria estatica ──────────────────────────────────────
 print("[audit] regras")

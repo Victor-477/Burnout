@@ -3,6 +3,7 @@
 #  .cryo  ->  .pyro  (C nativo, compilavel com gcc/clang)
 # ============================================================
 from ast_nodes import *
+from foreign import collect_imports, resolve_library_lang
 from typing import List, Dict, Optional, Set
 
 
@@ -150,6 +151,7 @@ class CodeGenC:
 
     def generate(self, program: Program) -> str:
         self._pre_scan(program.statements)
+        self._imported_langs = collect_imports(program)
 
         for node in program.statements:
             if isinstance(node, (StructDecl, EnumDecl)):
@@ -548,8 +550,14 @@ class CodeGenC:
         self._emit(f"/* [CRYO] import >{n.lang}< */")
 
     def _library(self, n: Library):
-        lib = n.name.lower()
-        self._emit(f'#include <{lib}.h>  /* [CRYO] library >{n.name}< */')
+        # só inclui a library se ela pertencer à linguagem C
+        lang = resolve_library_lang(n, getattr(self, "_imported_langs", set()))
+        if lang == 'c':
+            lib = n.name.lower()
+            self._emit(f'#include <{lib}.h>  /* [CRYO] library >c {n.name}< */')
+        else:
+            self._emit(f'/* [CRYO] library >{n.name}< (linguagem {lang or "?"}) '
+                       f'ignorada no backend C */')
 
     def _foreign(self, n: ForeignBlock):
         if n.lang.lower() == 'c':

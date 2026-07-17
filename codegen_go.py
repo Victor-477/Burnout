@@ -8,6 +8,7 @@
 #  (O backend assembly permanece disponivel para uso futuro.)
 # ============================================================
 from ast_nodes import *
+from foreign import collect_imports, resolve_library_lang
 import json
 from typing import List, Dict, Set, Optional
 
@@ -238,6 +239,7 @@ class CodeGenGo:
 
     def generate(self, program: Program) -> str:
         self._pre_scan(program.statements)
+        self._imported_langs = collect_imports(program)
         for node in program.statements:
             if isinstance(node, EnumDecl):
                 self._cur, self._indent = self._enum_defs, 0
@@ -253,8 +255,12 @@ class CodeGenGo:
                 self._const(node)
             elif isinstance(node, SkillDecl):
                 self._skills.append(node)   # registrada; emitida em _assemble
-            elif isinstance(node, (Import, Library)):
-                pass  # dependencias de outras linguagens: ignoradas no Go
+            elif isinstance(node, Library):
+                # library >go pkg< -> adiciona o pacote aos imports Go
+                if resolve_library_lang(node, self._imported_langs) == 'go':
+                    self._imports.add(node.name)
+            elif isinstance(node, Import):
+                pass  # habilita a linguagem; sem código a emitir aqui
             else:
                 self._cur, self._indent = self._main, 1
                 self._gen(node)
