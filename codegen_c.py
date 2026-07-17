@@ -672,7 +672,7 @@ class CodeGenC:
         if callee.startswith('pyro_') or callee in (
                 'skills', 'skill_get', 'skill_has', 'skills_json', 'json_encode',
                 'http_get', 'http_post', 'sleep',
-                'schema_of', 'llm', 'tools', 'tool_get', 'tools_json'):
+                'schema_of', 'llm', 'tools', 'tool_get', 'tools_json', 'agent'):
             raise CodeGenError(
                 f"'{callee}()' só existe no backend Go (JSON/concorrência/HTTP/LLM); "
                 f"use --backend go.")

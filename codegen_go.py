@@ -171,7 +171,8 @@ class TypeEnv:
                        'pyro_read': 'string', 'http_get': 'string',
                        'http_post': 'string', 'schema_of': 'string',
                        'llm': 'string', 'tools': 'string[]',
-                       'tools_json': 'string', 'tool_get': 'Tool'}.get(node.callee)
+                       'tools_json': 'string', 'tool_get': 'Tool',
+                       'agent': 'string'}.get(node.callee)
             return builtin or self.fn_ret(node.callee)
         if isinstance(node, StructInit):
             return node.struct_name
@@ -399,18 +400,12 @@ class CodeGenGo:
                   "\treturn string(b)", "}", ""]
         if 'llm' in self._helpers:
             self._imports.update(('os', 'net/http', 'io', 'encoding/json', 'bytes', 'fmt'))
-            H += ["// cryoLLM: chamada de LLM com retry. Endpoint em CRYO_LLM_URL",
-                  "// (contrato: POST {model, prompt, schema?} -> corpo JSON da resposta).",
-                  "func cryoLLM(model, prompt, schema string) string {",
+            H += ["// cryoLLMPost: POST do payload p/ CRYO_LLM_URL com 3 retries.",
+                  "func cryoLLMPost(payload map[string]any) string {",
                   '\turl := os.Getenv("CRYO_LLM_URL")',
                   '\tif url == "" {',
                   '\t\tfmt.Fprintln(os.Stderr, "[Cryo LLM] CRYO_LLM_URL não definido; retornando vazio")',
                   '\t\treturn ""', "\t}",
-                  '\tpayload := map[string]any{"model": model, "prompt": prompt}',
-                  '\tif schema != "" {',
-                  "\t\tvar sc any",
-                  '\t\tif json.Unmarshal([]byte(schema), &sc) == nil { payload["schema"] = sc }',
-                  "\t}",
                   "\tbody, _ := json.Marshal(payload)",
                   "\tfor attempt := 0; attempt < 3; attempt++ {",
                   '\t\treq, _ := http.NewRequest("POST", url, bytes.NewReader(body))',
@@ -422,6 +417,38 @@ class CodeGenGo:
                   "\t\tout, _ := io.ReadAll(resp.Body)",
                   "\t\tresp.Body.Close()",
                   "\t\tif resp.StatusCode < 300 { return string(out) }",
+                  "\t}",
+                  '\treturn ""', "}", "",
+                  "// cryoLLM: contrato POST {model, prompt, schema?} -> corpo JSON.",
+                  "func cryoLLM(model, prompt, schema string) string {",
+                  '\tpayload := map[string]any{"model": model, "prompt": prompt}',
+                  '\tif schema != "" {',
+                  "\t\tvar sc any",
+                  '\t\tif json.Unmarshal([]byte(schema), &sc) == nil { payload["schema"] = sc }',
+                  "\t}",
+                  "\treturn cryoLLMPost(payload)", "}", ""]
+        if 'agent' in self._helpers:
+            # laço de agente: LLM pede tool -> runtime executa -> devolve -> repete
+            H += ["// cryoAgent: laço de tool-calling. Contrato POST",
+                  "// {model, messages, tools} -> {\"tool_call\":{name,arguments}} | {\"content\":...}.",
+                  "func cryoAgent(model, prompt string) string {",
+                  '\tmessages := []map[string]any{{"role": "user", "content": prompt}}',
+                  "\tfor step := 0; step < 8; step++ {",
+                  '\t\tresp := cryoLLMPost(map[string]any{"model": model, "messages": messages, "tools": cryoToolList()})',
+                  "\t\tvar dec struct {",
+                  "\t\t\tToolCall *struct {",
+                  '\t\t\t\tName      string          `json:"name"`',
+                  '\t\t\t\tArguments json.RawMessage `json:"arguments"`',
+                  '\t\t\t} `json:"tool_call"`',
+                  '\t\t\tContent string `json:"content"`',
+                  "\t\t}",
+                  "\t\tjson.Unmarshal([]byte(resp), &dec)",
+                  "\t\tif dec.ToolCall == nil {",
+                  "\t\t\treturn dec.Content", "\t\t}",
+                  "\t\tresult := cryoToolCall(dec.ToolCall.Name, string(dec.ToolCall.Arguments))",
+                  "\t\tmessages = append(messages,",
+                  '\t\t\tmap[string]any{"role": "assistant", "tool_call": dec.ToolCall},',
+                  '\t\t\tmap[string]any{"role": "tool", "name": dec.ToolCall.Name, "content": result})',
                   "\t}",
                   '\treturn ""', "}", ""]
         if 'exec' in self._helpers:
@@ -562,6 +589,27 @@ class CodeGenGo:
               "\tout := make([]Tool, 0, len(cryoTools))",
               "\tfor _, n := range cryoToolNames() {", "\t\tout = append(out, cryoTools[n])", "\t}",
               "\treturn out", "}", ""]
+        # despachante: recebe (nome, argsJSON) -> chama a tool real -> resultado
+        self._imports.add('encoding/json')
+        D += ["// cryoToolCall: executa a tool 'name' com argumentos JSON e devolve o resultado.",
+              "func cryoToolCall(name, args string) string {",
+              "\tswitch name {"]
+        for fn in self._tools:
+            D.append(f"\tcase {self._go_string(fn.name)}:")
+            # struct de argumentos (campos exportados + tag json = nome do parâmetro)
+            fields = '; '.join(
+                f'{go_field(pn)} {go_type(pt)} `json:"{pn}"`' for pt, pn in fn.params)
+            D.append(f"\t\tvar _a struct {{ {fields} }}")
+            D.append("\t\tjson.Unmarshal([]byte(args), &_a)")
+            call_args = ', '.join(f"_a.{go_field(pn)}" for _pt, pn in fn.params)
+            if fn.return_type and fn.return_type != 'void':
+                D.append(f"\t\t_r := {gid(fn.name)}({call_args})")
+                D.append("\t\t_b, _ := json.Marshal(_r)")
+                D.append("\t\treturn string(_b)")
+            else:
+                D.append(f"\t\t{gid(fn.name)}({call_args})")
+                D.append('\t\treturn "null"')
+        D += ["\t}", '\treturn ""', "}", ""]
         return D
 
     # ── declaracoes ─────────────────────────────────────────
@@ -1177,6 +1225,12 @@ class CodeGenGo:
             self._use_tools = True
             self._imports.add('encoding/json'); self._helpers.add('jsonenc')
             return "cryoJSONEncode(cryoToolList())"
+        if c == 'agent':
+            self._use_tools = True
+            self._helpers.add('llm'); self._helpers.add('agent')
+            model  = self._expr(a[0]) if a else '""'
+            prompt = self._expr(a[1]) if len(a) > 1 else '""'
+            return f"cryoAgent({model}, {prompt})"
         args = ', '.join(self._expr(x) for x in a)
         return f"{gid(c)}({args})"
 

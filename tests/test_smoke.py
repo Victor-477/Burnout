@@ -379,6 +379,14 @@ check("go tool params schema da assinatura", '\\"sku\\"' in g)
 check("go tools()", "cryoToolNames()" in gen_go('tool fn f() -> int ={ return 1; } string[] t = tools();'))
 check("go tools_json", "cryoJSONEncode(cryoToolList())" in g)
 
+print("[fase3] agent (laço de tool-calling)")
+g = gen_go('tool fn buscar(string sku) -> number ={ return 1.0; } string r = agent("m","p"); print(r);')
+check("go agent -> cryoAgent", "cryoAgent(" in g)
+check("go agent emite laço", "func cryoAgent(model, prompt string) string {" in g and "tool_call" in g)
+check("go dispatcher cryoToolCall", "func cryoToolCall(name, args string) string {" in g)
+check("go dispatcher chama a tool real", "buscar(_a.Sku)" in g)
+check("go dispatcher desempacota args", 'Sku string `json:"sku"`' in g)
+
 print("[fase3] backend C rejeita")
 def _c_err3(src, label):
     try: gen_c(src); check(label + " (deveria falhar)", False)
