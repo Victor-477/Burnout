@@ -17,6 +17,7 @@ from codegen_c    import CodeGenC        # Burnout / backend C
 from codegen_go   import CodeGenGo       # Burnout / backend Go
 from codegen_asm  import CodeGenAsm, CodeGenAsmError  # Burnout / backend asm
 from codegen_pyro import CodeGenPyro     # Burnout / backend bytecode Pyro
+from codegen_node import CodeGenNode, CodeGenNodeError  # Burnout / backend Node/JS
 
 _passed = 0
 _failed = 0
@@ -41,6 +42,9 @@ def gen_go(src, safe=True):
 
 def gen_pyro(src, safe=True, encode=True):
     return CodeGenPyro(safe=safe, encode=encode).generate(Parser(Lexer(src).tokenize()).parse())
+
+def gen_node(src, safe=True):
+    return CodeGenNode(safe=safe).generate(Parser(Lexer(src).tokenize()).parse())
 
 def ast_of(src):
     return Parser(Lexer(src).tokenize()).parse()
@@ -496,6 +500,43 @@ check("pyro struct = map + field access (INDEX)",
       "NEWMAP" in _pyro_code_ops('struct P{int x;} P p = new P{x:1}; int y = p.x;'))
 check("pyro for-each gera", isinstance(
       gen_pyro('int[] a=[1,2]; int s=0; for (int v in a) { s+=v; }'), (bytes, bytearray)))
+
+# ── backend Node.js / JavaScript ────────────────────────────
+print("[node] backend JavaScript (CommonJS)")
+check("node use strict + console.log", gen_node('print("oi");').startswith('"use strict"')
+      and 'console.log("oi")' in gen_node('print("oi");'))
+check("node funcao + return",
+      "function quad(n)" in gen_node("fn quad(int n)->int ={ return n*n; }"))
+check("node for-each -> of",
+      "of nums" in gen_node("int[] nums=[1,2]; int s=0; for (int v in nums){ s+=v; }"))
+check("node struct -> objeto literal",
+      "{x: 3, y: 4}" in gen_node("struct P{int x; int y;} P p = new P{x:3,y:4};"))
+check("node map -> objeto + has/keys",
+      'Object.prototype.hasOwnProperty' in gen_node(
+          'map<string,int> m = {"a":1}; bool h = has(m,"a");'))
+check("node enum -> const idx",
+      "const Cor_VERDE = 1" in gen_node("enum Cor{VERMELHO,VERDE,AZUL} Cor c = Cor_VERDE;"))
+check("node div segura (cryoDiv)", "cryoDiv(" in gen_node("int x = 10 / 2;"))
+check("node len -> cryoLen", "cryoLen(" in gen_node('int n = len("abc");'))
+check("node switch com break automatico",
+      "break;" in gen_node("fn f(int d)->int ={ switch(d){ case 1: print(\"um\"); default: print(\"x\"); } }"))
+# library node -> require; bloco Node emitido; bloco Go omitido
+check("node library >node fs< -> require",
+      'const fs = require("fs");' in gen_node('import >node< library >node fs< >Node( fs.stat("x"); )'))
+check("node bloco >Node< emitido",
+      "os.platform()" in gen_node('import >node< >Node( console.log(os.platform()); )'))
+check("node bloco >Go< omitido",
+      "omitido no backend Node" in gen_node('import >go< import >node< >Go( fmt.Println(1) )'))
+# rejeita recursos fora do nucleo
+def _node_raises(src):
+    try:
+        gen_node(src); return False
+    except CodeGenNodeError:
+        return True
+check("node rejeita tool fn", _node_raises("tool fn t()->int ={ return 1; }"))
+check("node rejeita llm", _node_raises('string r = llm("m","p");'))
+check("node rejeita spawn/await", _node_raises("future<int> f = spawn g(1); int r = await f;"))
+check("node rejeita pyro_exec", _node_raises('string s = pyro_exec("x");'))
 
 # ── blocos estrangeiros verificados + libraries ─────────────
 print("[foreign] verificacao de blocos estrangeiros + libraries")

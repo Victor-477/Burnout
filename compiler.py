@@ -40,6 +40,7 @@ from codegen_c    import CodeGenC,    CodeGenError       # backend C
 from codegen_go   import CodeGenGo,   CodeGenGoError     # backend Go
 from codegen_asm  import CodeGenAsm,  CodeGenAsmError    # backend x86-64
 from codegen_pyro import CodeGenPyro, CodeGenPyroError   # backend bytecode Pyro
+from codegen_node import CodeGenNode, CodeGenNodeError   # backend Node.js / JS
 
 
 BANNER = r"""
@@ -68,6 +69,8 @@ def compile_source(source: str, backend: str, safe: bool,
         return CodeGenAsm(safe=safe, abi=abi).generate(ast)
     if backend == 'go':
         return CodeGenGo(safe=safe).generate(ast)
+    if backend == 'node':
+        return CodeGenNode(safe=safe).generate(ast)
     if backend == 'pyro':
         return CodeGenPyro(safe=safe).generate(ast)   # bytes
     return CodeGenC(safe=safe).generate(ast)
@@ -176,7 +179,8 @@ def compile_file(input_path: str,
     # ── geracao de codigo ──
     code = compile_source(source, backend, safe, abi)
 
-    ext = {'asm': '.s', 'go': '.go', 'pyro': '.pyro', 'c': '.c'}.get(backend, '.c')
+    ext = {'asm': '.s', 'go': '.go', 'pyro': '.pyro',
+           'node': '.js', 'c': '.c'}.get(backend, '.c')
     if output_path is None:
         # separa fontes (.cryo) de artefatos gerados: saída vai para build/
         os.makedirs('build', exist_ok=True)
@@ -196,7 +200,8 @@ def compile_file(input_path: str,
     modo = 'SEGURO' if safe else 'UNSAFE'
     if verbose:
         alvo = {'asm': f'x86-64 asm/{abi}', 'go': 'Go nativo',
-                'pyro': 'bytecode Pyro', 'c': 'C nativo'}.get(backend, 'C nativo')
+                'pyro': 'bytecode Pyro', 'node': 'JavaScript (Node)',
+                'c': 'C nativo'}.get(backend, 'C nativo')
         tam = f"  ({len(code)} bytes)" if isinstance(code, (bytes, bytearray)) else ""
         print(f"✓ [{alvo} / {modo}] gerado: {input_path}  →  {output_path}{tam}")
 
@@ -214,6 +219,17 @@ def compile_file(input_path: str,
             _run_pyro(output_path,
                       compiler_dir=os.path.dirname(os.path.abspath(__file__)),
                       run=run, verbose=verbose)
+        return output_path
+
+    # ── backend node: executa o .js com o Node.js ──
+    if backend == 'node':
+        if run:
+            try:
+                print(f"\n── Executando (Node): {output_path} ───────────────────")
+                subprocess.run(['node', output_path])
+            except FileNotFoundError:
+                print("⚠  node não encontrado — .js gerado, mas não executado",
+                      file=sys.stderr)
         return output_path
 
     # ── montar/compilar binário ──
@@ -259,8 +275,8 @@ def main() -> None:
     )
     ap.add_argument('input',           help='Arquivo de entrada (.cryo)')
     ap.add_argument('-o', '--output',  help='Arquivo de saída (.go/.pyro/.s)')
-    ap.add_argument('--backend', choices=('go', 'c', 'asm', 'pyro'), default='go',
-                    help='Backend: go (padrão), c, asm, ou pyro (bytecode próprio + VM)')
+    ap.add_argument('--backend', choices=('go', 'c', 'asm', 'pyro', 'node'), default='go',
+                    help='Backend: go (padrão), c, asm, pyro (bytecode + VM) ou node (JavaScript)')
     ap.add_argument('--abi', choices=('sysv', 'win64'), default=None,
                     help='ABI do backend asm (padrão: win64 no Windows, senão sysv)')
     ap.add_argument('--unsafe', action='store_true',
@@ -308,6 +324,8 @@ def main() -> None:
         print(f"\n[Erro CodeGen Go] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenPyroError as e:
         print(f"\n[Erro CodeGen Pyro] {e}", file=sys.stderr); sys.exit(1)
+    except CodeGenNodeError as e:
+        print(f"\n[Erro CodeGen Node] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenError   as e:
         print(f"\n[Erro CodeGen]   {e}", file=sys.stderr); sys.exit(1)
     except Exception      as e:
