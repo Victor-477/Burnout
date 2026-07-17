@@ -169,6 +169,7 @@ class TypeEnv:
                        'pyro_exec': 'string', 'pyro_env': 'string',
                        'pyro_args': 'string[]', 'pyro_time': 'int',
                        'pyro_read': 'string', 'pyro_write_file': 'bool',
+                       'pyro_open': 'bool',
                        'http_get': 'string',
                        'http_post': 'string', 'schema_of': 'string',
                        'llm': 'string', 'tools': 'string[]',
@@ -461,6 +462,20 @@ class CodeGenGo:
                   '\t\t\tmap[string]any{"role": "tool", "name": dec.ToolCall.Name, "content": result})',
                   "\t}",
                   '\treturn ""', "}", ""]
+        if 'open' in self._helpers:
+            self._imports.update(('os/exec', 'runtime'))
+            H += ["// cryoOpen: abre um arquivo/URL no app padrão do SO (navegador).",
+                  "func cryoOpen(target string) bool {",
+                  "\tvar c *exec.Cmd",
+                  "\tswitch runtime.GOOS {",
+                  '\tcase "windows":',
+                  '\t\tc = exec.Command("cmd", "/c", "start", "", target)',
+                  '\tcase "darwin":',
+                  '\t\tc = exec.Command("open", target)',
+                  "\tdefault:",
+                  '\t\tc = exec.Command("xdg-open", target)',
+                  "\t}",
+                  "\treturn c.Start() == nil", "}", ""]
         if 'exec' in self._helpers:
             self._imports.update(('os/exec', 'runtime'))
             H += ["func cryoExec(command string) string {",
@@ -1219,6 +1234,9 @@ class CodeGenGo:
             self._imports.add('os')
             return (f"func() bool {{ return os.WriteFile({self._expr(a[0])}, "
                     f"[]byte({self._expr(a[1])}), 0644) == nil }}()")
+        if c == 'pyro_open' and len(a) == 1:
+            self._helpers.add('open')
+            return f"cryoOpen({self._expr(a[0])})"
         # ── Fase 2: concorrência / HTTP ──
         if c == 'sleep' and len(a) == 1:
             self._imports.add('time')

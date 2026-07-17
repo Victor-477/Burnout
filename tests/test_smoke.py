@@ -387,6 +387,10 @@ check("go agent emite laço", "func cryoAgent(model, prompt string, only []strin
 check("go agent subconjunto de tools + passos",
       '[]string{"buscar"}' in gen_go('tool fn buscar(string s)->int ={ return 1; } string r = agent("m","p",["buscar"],3);'))
 check("go pyro_write_file", "os.WriteFile(" in gen_go('bool ok = pyro_write_file("a.txt", "oi");'))
+_po = gen_go('bool ok = pyro_open("build/x.html");')
+check("go pyro_open chama helper", "cryoOpen(" in _po)
+check("go pyro_open emite cryoOpen + start", "func cryoOpen(target string) bool {" in _po
+      and 'exec.Command("cmd", "/c", "start"' in _po and 'exec.Command("xdg-open"' in _po)
 check("go dispatcher cryoToolCall", "func cryoToolCall(name, args string) string {" in g)
 check("go dispatcher chama a tool real", "buscar(_a.Sku)" in g)
 check("go dispatcher desempacota args", 'Sku string `json:"sku"`' in g)
