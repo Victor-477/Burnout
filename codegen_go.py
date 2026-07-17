@@ -1077,6 +1077,14 @@ class CodeGenGo:
         if op in ('&', '|', '^', '<<', '>>'):
             return f"({l} {op} {r})"
 
+        # coerção int<->number: Go não mistura int64 e float64. Se um lado é
+        # 'number' e o outro 'int', converte o inteiro para float64.
+        if op in ('+', '-', '*', '/', '%', '<', '>', '<=', '>=', '==', '!=') \
+                and {lt, rt} == {'int', 'number'}:
+            if lt == 'int': l = f"float64({l})"
+            if rt == 'int': r = f"float64({r})"
+            return f"({l} {op} {r})"
+
         # instrumentacao de seguranca (inteiros)
         both_int = (lt == 'int' and rt == 'int')
         if both_int and op in ('+', '-', '*') and self._safe_mode:

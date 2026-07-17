@@ -386,6 +386,13 @@ check("go agent emite laço", "func cryoAgent(model, prompt string) string {" in
 check("go dispatcher cryoToolCall", "func cryoToolCall(name, args string) string {" in g)
 check("go dispatcher chama a tool real", "buscar(_a.Sku)" in g)
 check("go dispatcher desempacota args", 'Sku string `json:"sku"`' in g)
+check("go dispatcher com retorno struct", "json.Marshal(_r)" in gen_go(
+      'struct P{int x;} tool fn t()->P ={ return new P{x:1}; } string j = agent("m","p"); print(j);'))
+
+print("[fase3] coerção int/float em aritmética mista")
+check("go int*float coage p/ float64",
+      "float64(" in gen_go("fn f(int q) -> number ={ return 12.5 + q * 6.0; }"))
+check("go int<float coage", "float64(" in gen_go("bool b = 3 < 3.5;"))
 
 print("[fase3] backend C rejeita")
 def _c_err3(src, label):
