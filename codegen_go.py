@@ -168,7 +168,8 @@ class TypeEnv:
                        'skill_has': 'bool', 'skills_json': 'string',
                        'pyro_exec': 'string', 'pyro_env': 'string',
                        'pyro_args': 'string[]', 'pyro_time': 'int',
-                       'pyro_read': 'string', 'http_get': 'string',
+                       'pyro_read': 'string', 'pyro_write_file': 'bool',
+                       'http_get': 'string',
                        'http_post': 'string', 'schema_of': 'string',
                        'llm': 'string', 'tools': 'string[]',
                        'tools_json': 'string', 'tool_get': 'Tool',
@@ -429,12 +430,21 @@ class CodeGenGo:
                   "\treturn cryoLLMPost(payload)", "}", ""]
         if 'agent' in self._helpers:
             # laço de agente: LLM pede tool -> runtime executa -> devolve -> repete
+            # 'only' filtra as tools expostas; maxSteps limita as iterações.
             H += ["// cryoAgent: laço de tool-calling. Contrato POST",
                   "// {model, messages, tools} -> {\"tool_call\":{name,arguments}} | {\"content\":...}.",
-                  "func cryoAgent(model, prompt string) string {",
+                  "func cryoAgent(model, prompt string, only []string, maxSteps int) string {",
+                  "\ttools := cryoToolList()",
+                  "\tif len(only) > 0 {",
+                  "\t\tset := map[string]bool{}",
+                  "\t\tfor _, n := range only { set[n] = true }",
+                  "\t\tf := []Tool{}",
+                  "\t\tfor _, t := range tools { if set[t.Name] { f = append(f, t) } }",
+                  "\t\ttools = f", "\t}",
+                  "\tif maxSteps <= 0 { maxSteps = 8 }",
                   '\tmessages := []map[string]any{{"role": "user", "content": prompt}}',
-                  "\tfor step := 0; step < 8; step++ {",
-                  '\t\tresp := cryoLLMPost(map[string]any{"model": model, "messages": messages, "tools": cryoToolList()})',
+                  "\tfor step := 0; step < maxSteps; step++ {",
+                  '\t\tresp := cryoLLMPost(map[string]any{"model": model, "messages": messages, "tools": tools})',
                   "\t\tvar dec struct {",
                   "\t\t\tToolCall *struct {",
                   '\t\t\t\tName      string          `json:"name"`',
@@ -1205,6 +1215,10 @@ class CodeGenGo:
         if c == 'pyro_read':
             self._helpers.add('input')
             return 'cryoInput("")'
+        if c == 'pyro_write_file' and len(a) == 2:
+            self._imports.add('os')
+            return (f"func() bool {{ return os.WriteFile({self._expr(a[0])}, "
+                    f"[]byte({self._expr(a[1])}), 0644) == nil }}()")
         # ── Fase 2: concorrência / HTTP ──
         if c == 'sleep' and len(a) == 1:
             self._imports.add('time')
@@ -1238,7 +1252,16 @@ class CodeGenGo:
             self._helpers.add('llm'); self._helpers.add('agent')
             model  = self._expr(a[0]) if a else '""'
             prompt = self._expr(a[1]) if len(a) > 1 else '""'
-            return f"cryoAgent({model}, {prompt})"
+            # 3o arg opcional: subconjunto de tools (string[]); 4o: limite de passos
+            if len(a) > 2 and isinstance(a[2], ArrayLiteral):
+                elems = ', '.join(self._expr(e) for e in a[2].elements)
+                tools_arg = f"[]string{{{elems}}}"
+            elif len(a) > 2:
+                tools_arg = self._expr(a[2])
+            else:
+                tools_arg = "[]string{}"
+            steps_arg = f"int({self._expr(a[3])})" if len(a) > 3 else "8"
+            return f"cryoAgent({model}, {prompt}, {tools_arg}, {steps_arg})"
         args = ', '.join(self._expr(x) for x in a)
         return f"{gid(c)}({args})"
 

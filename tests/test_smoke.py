@@ -382,7 +382,11 @@ check("go tools_json", "cryoJSONEncode(cryoToolList())" in g)
 print("[fase3] agent (laço de tool-calling)")
 g = gen_go('tool fn buscar(string sku) -> number ={ return 1.0; } string r = agent("m","p"); print(r);')
 check("go agent -> cryoAgent", "cryoAgent(" in g)
-check("go agent emite laço", "func cryoAgent(model, prompt string) string {" in g and "tool_call" in g)
+check("go agent emite laço", "func cryoAgent(model, prompt string, only []string, maxSteps int) string {" in g and "tool_call" in g)
+# agent configurável: subconjunto de tools + limite de passos
+check("go agent subconjunto de tools + passos",
+      '[]string{"buscar"}' in gen_go('tool fn buscar(string s)->int ={ return 1; } string r = agent("m","p",["buscar"],3);'))
+check("go pyro_write_file", "os.WriteFile(" in gen_go('bool ok = pyro_write_file("a.txt", "oi");'))
 check("go dispatcher cryoToolCall", "func cryoToolCall(name, args string) string {" in g)
 check("go dispatcher chama a tool real", "buscar(_a.Sku)" in g)
 check("go dispatcher desempacota args", 'Sku string `json:"sku"`' in g)
