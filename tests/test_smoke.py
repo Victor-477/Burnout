@@ -530,6 +530,14 @@ check("node number/number -> cryoDiv (float)",
 check("node array index bounds-check", "cryoIndex(" in gen_node("int[] a=[1,2]; int v = a[0];"))
 check("node map[k] sem bounds-check",
       "cryoIndex(" not in gen_node('map<string,int> m = {"a":1}; int v = m["a"];'))
+check("node string index bounds-check",
+      "cryoIndex(" in gen_node('string s = "abc"; string c = s[1];'))
+check("node escrita aninhada bounds-check (interna+externa)",
+      "cryoSetIndex(cryoIndex(" in gen_node("int[][] m = [[1]]; m[0][0] = 9;"))
+check("node leitura aninhada bounds-check",
+      "cryoIndex(cryoIndex(" in gen_node("int[][] m = [[1]]; int v = m[0][0];"))
+check("node campo-array write bounds-check",
+      "cryoSetIndex(" in gen_node("struct S{int[] xs;} S s = new S{xs:[1]}; s.xs[0] = 9;"))
 check("node len -> cryoLen", "cryoLen(" in gen_node('int n = len("abc");'))
 check("node switch com break automatico",
       "break;" in gen_node("fn f(int d)->int ={ switch(d){ case 1: print(\"um\"); default: print(\"x\"); } }"))

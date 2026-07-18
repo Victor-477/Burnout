@@ -461,7 +461,10 @@ class CodeGenNode:
                 return f"{self._expr(n.obj)}.length"
             return f"{self._expr(n.obj)}.{n.field}"
         if isinstance(n, IndexAccess):
-            if self.safe and self._t.is_array(n.obj):
+            ot = self._t.infer(n.obj)
+            # bounds-check em arrays E strings (ambos têm .length e [i]);
+            # maps ficam de fora (chave ausente -> undefined é esperado)
+            if self.safe and (ot.endswith('[]') or ot == 'string'):
                 self._helpers.add('index')
                 return f"cryoIndex({self._expr(n.obj)}, {self._expr(n.index)})"
             return f"{self._expr(n.obj)}[{self._expr(n.index)}]"
