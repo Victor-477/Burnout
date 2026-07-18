@@ -523,7 +523,13 @@ check("node map -> objeto + has/keys",
           'map<string,int> m = {"a":1}; bool h = has(m,"a");'))
 check("node enum -> const idx",
       "const Cor_VERDE = 1" in gen_node("enum Cor{VERMELHO,VERDE,AZUL} Cor c = Cor_VERDE;"))
-check("node div segura (cryoDiv)", "cryoDiv(" in gen_node("int x = 10 / 2;"))
+# inferência de tipos: int/int -> divisão inteira; number -> float
+check("node int/int -> cryoIDiv (divisão inteira)", "cryoIDiv(" in gen_node("int x = 10 / 2;"))
+check("node number/number -> cryoDiv (float)",
+      "cryoDiv(" in gen_node("number x = 10.0 / 2.0;"))
+check("node array index bounds-check", "cryoIndex(" in gen_node("int[] a=[1,2]; int v = a[0];"))
+check("node map[k] sem bounds-check",
+      "cryoIndex(" not in gen_node('map<string,int> m = {"a":1}; int v = m["a"];'))
 check("node len -> cryoLen", "cryoLen(" in gen_node('int n = len("abc");'))
 check("node switch com break automatico",
       "break;" in gen_node("fn f(int d)->int ={ switch(d){ case 1: print(\"um\"); default: print(\"x\"); } }"))
@@ -584,6 +590,27 @@ check("c library >c math< -> include math.h",
       '#include <math.h>' in gen_c('import >c< library >c math< >C( double r = sqrt(2.0); )'))
 check("c bloco >C< emitido com import",
       'sqrt(2.0)' in gen_c('import >c< >C( double r = sqrt(2.0); )'))
+
+# ── seleção automática de backend ───────────────────────────
+print("[auto] seleção de backend por análise de recursos")
+from backends import select_backend as _select
+def _sel(src):
+    return _select(ast_of(src))[0]
+check("auto núcleo puro -> pyro", _sel("int s=0; for(int i=0;i<3;i++){s+=i;} print(s);") == 'pyro')
+check("auto arrays/maps/struct -> pyro",
+      _sel('struct P{int x;} int[] a=[1]; map<string,int> m = {"k":1}; print(len(a));') == 'pyro')
+check("auto enum -> go", _sel("enum E{A,B} E e = E_A;") == 'go')
+check("auto optional/json -> go",
+      _sel('number? x = null; string j = json_encode(x);') == 'go')
+check("auto llm -> go", _sel('string r = agent("m","p");') == 'go')
+check("auto machine (pyro_exec) -> go", _sel('string s = pyro_exec("x");') == 'go')
+check("auto to_string (convfn) -> go (pyro nao suporta)",
+      _sel("int n=5; string s = to_string(n);") == 'go')
+check("auto bloco Go -> go", _sel('import >go< >Go( fmt.Println(1) )') == 'go')
+check("auto bloco Node -> node", _sel('import >node< >Node( console.log(1); )') == 'node')
+check("auto bloco C -> c", _sel('import >c< >C( printf("x"); )') == 'c')
+check("auto conflito (Go+C) -> go fallback",
+      _sel('import >go< import >c< >Go( x )\n>C( y )') == 'go')
 
 # ── auditoria estatica ──────────────────────────────────────
 print("[audit] regras")

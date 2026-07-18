@@ -36,6 +36,7 @@ from lexer       import Lexer,      LexerError        # CRYO
 from parser      import Parser,     ParseError        # CRYO
 from security    import audit_ast,  format_audit      # CRYO
 from foreign     import verify as verify_foreign, ForeignError   # CRYO
+from backends     import select_backend                          # CRYO
 from codegen_c    import CodeGenC,    CodeGenError       # backend C
 from codegen_go   import CodeGenGo,   CodeGenGoError     # backend Go
 from codegen_asm  import CodeGenAsm,  CodeGenAsmError    # backend x86-64
@@ -176,8 +177,26 @@ def compile_file(input_path: str,
         if any(f.level == 'ALTO' for f in findings):
             print("[Auditoria] Achados de nível ALTO encontrados.", file=sys.stderr)
 
+    # ── seleção automática de backend ──
+    auto = (backend == 'auto')
+    if auto:
+        backend, motivo = select_backend(parse_ast(source))
+        print(f"→ backend automático: {backend}  ({motivo})")
+
     # ── geracao de codigo ──
-    code = compile_source(source, backend, safe, abi)
+    try:
+        code = compile_source(source, backend, safe, abi)
+    except (CodeGenError, CodeGenGoError, CodeGenAsmError,
+            CodeGenPyroError, CodeGenNodeError) as e:
+        # rede de segurança: se o auto escolheu um backend que falhou,
+        # recompila em go (superconjunto) em vez de abortar.
+        if auto and backend != 'go':
+            print(f"⚠  backend {backend} não suportou o programa ({e}); "
+                  f"recompilando com go", file=sys.stderr)
+            backend = 'go'
+            code = compile_source(source, backend, safe, abi)
+        else:
+            raise
 
     ext = {'asm': '.s', 'go': '.go', 'pyro': '.pyro',
            'node': '.js', 'c': '.c'}.get(backend, '.c')
@@ -275,8 +294,10 @@ def main() -> None:
     )
     ap.add_argument('input',           help='Arquivo de entrada (.cryo)')
     ap.add_argument('-o', '--output',  help='Arquivo de saída (.go/.pyro/.s)')
-    ap.add_argument('--backend', choices=('go', 'c', 'asm', 'pyro', 'node'), default='go',
-                    help='Backend: go (padrão), c, asm, pyro (bytecode + VM) ou node (JavaScript)')
+    ap.add_argument('--backend', choices=('auto', 'go', 'c', 'asm', 'pyro', 'node'),
+                    default='go',
+                    help='Backend: go (padrão), c, asm, pyro, node, ou auto '
+                         '(escolhe o melhor pelo programa)')
     ap.add_argument('--abi', choices=('sysv', 'win64'), default=None,
                     help='ABI do backend asm (padrão: win64 no Windows, senão sysv)')
     ap.add_argument('--unsafe', action='store_true',

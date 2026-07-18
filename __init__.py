@@ -59,6 +59,7 @@ from compiler import (          # noqa: E402
 from lexer import Lexer, LexerError          # noqa: E402
 from parser import Parser, ParseError        # noqa: E402
 from foreign import verify as verify_foreign, ForeignError, collect_imports  # noqa: E402
+from backends import select_backend                                          # noqa: E402
 from codegen_c import CodeGenError           # noqa: E402
 from codegen_go import CodeGenGoError        # noqa: E402
 from codegen_asm import CodeGenAsmError      # noqa: E402
@@ -89,6 +90,8 @@ def compile_source(source, backend="go", safe=True, abi=None):
     """
     if abi is None:
         abi = default_abi()
+    if backend == "auto":
+        backend = select_backend(parse_ast(source))[0]
     if backend not in BACKENDS:
         raise ValueError(f"backend inválido: {backend!r} (use um de {BACKENDS})")
     return _compile_source(source, backend=backend, safe=safe, abi=abi)
@@ -108,7 +111,7 @@ __all__ = [
     "__version__", "BACKENDS",
     "compile_source", "compile_string", "compile_file", "run",
     "parse_ast", "tokenize", "disassemble", "default_abi", "main",
-    "verify_foreign", "collect_imports",
+    "verify_foreign", "collect_imports", "select_backend",
     "Lexer", "Parser",
     "LexerError", "ParseError", "ForeignError",
     "CodeGenError", "CodeGenGoError", "CodeGenAsmError", "CodeGenPyroError",

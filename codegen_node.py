@@ -51,9 +51,101 @@ _UNSUPPORTED = {
 }
 
 
+class _Types:
+    """Inferência de tipos leve para o backend Node: distingue int/number
+    (divisão inteira vs. float) e array/map (bounds-check de índice)."""
+
+    def __init__(self):
+        self.scopes: List[dict] = [{}]
+        self.fns: dict = {}
+        self.structs: dict = {}
+        self.enums: Set[str] = set()
+
+    def push(self):
+        self.scopes.append({})
+
+    def pop(self):
+        if len(self.scopes) > 1:
+            self.scopes.pop()
+
+    def set(self, name, typ):
+        if typ:
+            self.scopes[-1][name] = typ
+
+    def get(self, name):
+        for s in reversed(self.scopes):
+            if name in s:
+                return s[name]
+        return 'unknown'
+
+    def infer(self, node) -> str:
+        if node is None:
+            return 'unknown'
+        if isinstance(node, Literal):
+            return {'int': 'int', 'float': 'number', 'string': 'string',
+                    'bool': 'bool', 'null': 'null'}.get(node.kind, 'unknown')
+        if isinstance(node, Identifier):
+            return self.get(node.name)
+        if isinstance(node, BinaryExpr):
+            if node.op in ('==', '!=', '<', '>', '<=', '>=', '&&', '||'):
+                return 'bool'
+            lt = self.infer(node.left)
+            rt = self.infer(node.right)
+            if node.op == '??':
+                return lt if lt not in ('null', 'unknown') else rt
+            if lt == 'string' or rt == 'string':
+                return 'string'
+            if lt == 'number' or rt == 'number':
+                return 'number'
+            if lt == 'int' and rt == 'int':
+                return 'int'
+            return lt if lt != 'unknown' else rt
+        if isinstance(node, UnaryExpr):
+            return 'bool' if node.op == '!' else self.infer(node.operand)
+        if isinstance(node, TernaryExpr):
+            t = self.infer(node.then_value)
+            return t if t not in ('unknown', 'null') else self.infer(node.else_value)
+        if isinstance(node, CallExpr):
+            b = {'len': 'int', 'to_int': 'int', 'to_string': 'string',
+                 'to_number': 'number', 'sqrt': 'number', 'pow': 'number',
+                 'abs': 'number', 'floor': 'number', 'ceil': 'number',
+                 'round': 'number', 'min': 'number', 'max': 'number',
+                 'json_encode': 'string', 'has': 'bool',
+                 'keys': 'string[]'}.get(node.callee)
+            return b or self.fns.get(node.callee, 'unknown')
+        if isinstance(node, StructInit):
+            return node.struct_name
+        if isinstance(node, ArrayLiteral):
+            et = self.infer(node.elements[0]) if node.elements else 'unknown'
+            return (et + '[]') if et != 'unknown' else 'array'
+        if isinstance(node, MapLiteral):
+            return 'map'
+        if isinstance(node, CastExpr):
+            return node.target_type
+        if isinstance(node, UnwrapExpr):
+            t = self.infer(node.operand)
+            return t[:-1] if t.endswith('?') else t
+        if isinstance(node, FieldAccess):
+            if node.field == 'length':
+                return 'int'
+            return self.structs.get(self.infer(node.obj), {}).get(node.field, 'unknown')
+        if isinstance(node, IndexAccess):
+            ot = self.infer(node.obj)
+            if ot.endswith('[]'):
+                return ot[:-2]
+            if ot == 'string':
+                return 'string'
+            return 'unknown'
+        return 'unknown'
+
+    def is_array(self, node) -> bool:
+        return self.infer(node).endswith('[]')
+
+
 class CodeGenNode:
     def __init__(self, safe: bool = True):
         self.safe = safe
+        self._t = _Types()
         self._requires: List[str] = []
         self._enums:    List[str] = []
         self._funcs:    List[str] = []
@@ -71,8 +163,18 @@ class CodeGenNode:
         raise CodeGenNodeError(msg)
 
     # ── entrada principal ───────────────────────────────────
+    def _prescan(self, program: Program):
+        for n in program.statements:
+            if isinstance(n, FunctionDecl):
+                self._t.fns[n.name] = n.return_type or 'void'
+            elif isinstance(n, StructDecl):
+                self._t.structs[n.name] = {f.name: f.field_type for f in n.fields}
+            elif isinstance(n, EnumDecl):
+                self._t.enums.add(n.name)
+
     def generate(self, program: Program) -> str:
         self._imported_langs = collect_imports(program)
+        self._prescan(program)
 
         for node in program.statements:
             if isinstance(node, FunctionDecl):
@@ -136,6 +238,23 @@ class CodeGenNode:
                   "  if (b === 0) throw new Error('[Cryo Seguranca] DivisaoPorZero');",
                   "  return a / b;",
                   "}", ""]
+        if 'idiv' in self._helpers:
+            H += ["function cryoIDiv(a, b) {",
+                  "  if (b === 0) throw new Error('[Cryo Seguranca] DivisaoPorZero');",
+                  "  return Math.trunc(a / b);   // divisão inteira (trunca p/ zero)",
+                  "}", ""]
+        if 'index' in self._helpers:
+            H += ["function cryoIndex(a, i) {",
+                  "  if (i < 0 || i >= a.length)",
+                  "    throw new Error('[Cryo Seguranca] IndexError: índice ' + i + ' fora dos limites (len=' + a.length + ')');",
+                  "  return a[i];",
+                  "}", ""]
+        if 'setindex' in self._helpers:
+            H += ["function cryoSetIndex(a, i, v) {",
+                  "  if (i < 0 || i >= a.length)",
+                  "    throw new Error('[Cryo Seguranca] IndexError: índice ' + i + ' fora dos limites (len=' + a.length + ')');",
+                  "  a[i] = v;",
+                  "}", ""]
         if 'mod' in self._helpers:
             H += ["function cryoMod(a, b) {",
                   "  if (b === 0) throw new Error('[Cryo Seguranca] DivisaoPorZero');",
@@ -152,9 +271,13 @@ class CodeGenNode:
     def _function(self, n: FunctionDecl):
         params = ', '.join(jsid(p[1]) for p in n.params)
         self._emit(f"function {jsid(n.name)}({params}) {{")
+        self._t.push()
+        for p in n.params:
+            self._t.set(p[1], p[0])   # p = (tipo, nome)
         self._indent += 1
         self._block(n.body)
         self._indent -= 1
+        self._t.pop()
         self._emit("}")
         self._emit("")
 
@@ -169,12 +292,19 @@ class CodeGenNode:
                 self._emit(f"let {jsid(n.name)};")
             else:
                 self._emit(f"let {jsid(n.name)} = {self._expr(n.value)};")
+            self._t.set(n.name, n.var_type)
         elif isinstance(n, ConstDecl):
             self._emit(f"const {jsid(n.name)} = {self._expr(n.value)};")
+            self._t.set(n.name, n.var_type)
         elif isinstance(n, Assignment):
             self._emit(f"{jsid(n.name)} = {self._expr(n.value)};")
         elif isinstance(n, IndexAssignment):
-            self._emit(f"{self._expr(n.obj)}[{self._expr(n.index)}] = {self._expr(n.value)};")
+            if self.safe and self._t.is_array(n.obj):
+                self._helpers.add('setindex')
+                self._emit(f"cryoSetIndex({self._expr(n.obj)}, {self._expr(n.index)}, "
+                           f"{self._expr(n.value)});")
+            else:
+                self._emit(f"{self._expr(n.obj)}[{self._expr(n.index)}] = {self._expr(n.value)};")
         elif isinstance(n, CompoundAssignment):
             self._emit(f"{jsid(n.name)} {n.op} {self._expr(n.value)};")
         elif isinstance(n, Increment):
@@ -192,6 +322,8 @@ class CodeGenNode:
             self._indent += 1; self._block(n.body); self._indent -= 1
             self._emit(f"}} while ({self._expr(n.condition)});")
         elif isinstance(n, For):
+            if isinstance(n.init, VarDecl):
+                self._t.set(n.init.name, n.init.var_type)
             init = self._inline(n.init) if n.init else ''
             cond = self._expr(n.condition) if n.condition else ''
             upd  = self._inline(n.update) if n.update else ''
@@ -199,6 +331,7 @@ class CodeGenNode:
             self._indent += 1; self._block(n.body); self._indent -= 1
             self._emit("}")
         elif isinstance(n, ForEach):
+            self._t.set(n.var_name, n.var_type)
             self._emit(f"for (const {jsid(n.var_name)} of {self._expr(n.iterable)}) {{")
             self._indent += 1; self._block(n.body); self._indent -= 1
             self._emit("}")
@@ -328,6 +461,9 @@ class CodeGenNode:
                 return f"{self._expr(n.obj)}.length"
             return f"{self._expr(n.obj)}.{n.field}"
         if isinstance(n, IndexAccess):
+            if self.safe and self._t.is_array(n.obj):
+                self._helpers.add('index')
+                return f"cryoIndex({self._expr(n.obj)}, {self._expr(n.index)})"
             return f"{self._expr(n.obj)}[{self._expr(n.index)}]"
         if isinstance(n, ArrayLiteral):
             return "[" + ", ".join(self._expr(e) for e in n.elements) + "]"
@@ -366,9 +502,13 @@ class CodeGenNode:
             return f"({l} === {r})"
         if op == '!=':
             return f"({l} !== {r})"
-        if op == '/' and self.safe:
-            self._helpers.add('div')
-            return f"cryoDiv({l}, {r})"
+        if op == '/':
+            int_div = (self._t.infer(n.left) == 'int' and self._t.infer(n.right) == 'int')
+            if self.safe:
+                if int_div:
+                    self._helpers.add('idiv'); return f"cryoIDiv({l}, {r})"
+                self._helpers.add('div'); return f"cryoDiv({l}, {r})"
+            return f"Math.trunc({l} / {r})" if int_div else f"({l} / {r})"
         if op == '%' and self.safe:
             self._helpers.add('mod')
             return f"cryoMod({l}, {r})"
