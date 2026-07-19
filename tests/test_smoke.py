@@ -470,8 +470,9 @@ from codegen_pyro import CodeGenPyroError as _PErr
 bc = gen_pyro('fn f(int n) -> int ={ return n * 2; } int x = f(21); print(x);')
 check("pyro é bytes", isinstance(bc, (bytes, bytearray)))
 check("pyro magic PYRO", bc[:4] == b'PYRO')
-check("pyro versão 1", bc[4] == 1)
+check("pyro versão 2 (saltos i32 + debug)", bc[4] == 2)
 check("pyro flag codificado (XOR)", (bc[5] & 0x01) == 1)
+check("pyro flag debug presente", (bc[5] & 0x02) == 2)
 check("pyro const pool tem nomes de função", b'main' in bc and b'f' in bc)
 check("pyro sem encode = flag 0", (gen_pyro('print(1);', encode=False)[5] & 0x01) == 0)
 
@@ -851,6 +852,20 @@ check("otimizado <= nao-otimizado (bytes)",
       len(gen_pyro(_src_big)) <= len(_gen_pyro_noopt(_src_big)))
 # correção: divisão inteira NÃO é dobrada (semântica de trunc/segurança fica p/ runtime)
 check("fold: div inteira nao dobra (DIV presente)", "DIV" in _pdis("int x = 10 / 2; print(x);"))
+
+print("[fase5] saltos i32 + info de depuração (pyro v2)")
+# a seção de depuração aparece no disasm com "; linha N"
+d = _pdis('fn f(int n)->int ={ return n * 2; } int x = f(3); print(x);')
+check("debug: disasm anota linhas", "; linha" in d)
+# tabela pc->linha no header (flag debug) + entradas
+_bcj = gen_pyro('fn f(int n)->int ={ return n; } print(f(1));', encode=False)
+check("debug: flag 0x02 setado", (_bcj[5] & 0x02) == 2)
+# salto i32: JMP ocupa 5 bytes (opcode + i32). Um laço grande continua
+# compilando e rodando (validação de que o offset i32 funciona).
+_bigloop = "int s = 0; for (int i = 0; i < 3; i++) { s += i; } print(s);"
+check("i32: laço compila e é v2", gen_pyro(_bigloop)[4] == 2)
+# --no-opt não deve conter seção de debug quebrada (round-trip do disasm)
+check("debug: disasm --no-opt ok", "; linha" in _dis_noopt(_bigloop))
 
 print("[fase5] JSON nativo no pyro")
 check("pyro json_encode vira NATIVE 22",

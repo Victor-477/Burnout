@@ -68,10 +68,17 @@ def load(data: bytes) -> dict:
     entryfn = rd('<H')
     codelen = rd('<I')
     code = data[pos:pos+codelen]
+    pos += codelen
     if flags & 0x01:
         code = _xor_decode(code)
+    dbg = {}
+    if flags & 0x02:
+        ndbg = rd('<I')
+        for _ in range(ndbg):
+            off = rd('<I'); line = rd('<I')
+            dbg[off] = line
     return {'version': version, 'flags': flags, 'consts': consts,
-            'funcs': funcs, 'entryfn': entryfn, 'code': code}
+            'funcs': funcs, 'entryfn': entryfn, 'code': code, 'dbg': dbg}
 
 
 def _const_str(consts, idx):
@@ -104,10 +111,13 @@ def disassemble(data: bytes) -> str:
                    f"params={f['nparams']} locals={f['nlocals']}")
     out.append("")
 
+    dbg = p.get('dbg', {})
     i = 0
     while i < len(code):
         if i in entry_at:
             out.append(f"\n{entry_at[i]}:")
+        if i in dbg:
+            out.append(f"  ; linha {dbg[i]}")
         op = code[i]
         name = _OPNAMES.get(op, f"?0x{op:02X}")
         size = 1 + bc._OPERAND.get(op, 0)
@@ -121,7 +131,7 @@ def disassemble(data: bytes) -> str:
         elif op in (bc.OP_NEWARR, bc.OP_NEWMAP):
             text += f" {struct.unpack('<H', operand)[0]}"
         elif op in (bc.OP_JMP, bc.OP_JMPF, bc.OP_JMPT):
-            rel = struct.unpack('<h', operand)[0]
+            rel = struct.unpack('<i', operand)[0]
             text += f" {rel:+d}   ; -> {i + size + rel}"
         elif op == bc.OP_CALL:
             fi = struct.unpack('<H', operand[:2])[0]
@@ -133,8 +143,8 @@ def disassemble(data: bytes) -> str:
             nname = next((k for k, v in bc.NATIVES.items() if v[0] == nid), '?')
             text += f" {nid} {argc}  ; {nname}(argc={argc})"
         elif op == bc.OP_TRYPUSH:
-            rel = struct.unpack('<h', operand[:2])[0]
-            slot = struct.unpack('<H', operand[2:4])[0]
+            rel = struct.unpack('<i', operand[:4])[0]
+            slot = struct.unpack('<H', operand[4:6])[0]
             slot_s = 'sem var' if slot == 0xFFFF else f'slot {slot}'
             text += f" {rel:+d} {slot}  ; catch -> {i + size + rel} ({slot_s})"
         out.append(text)

@@ -78,11 +78,12 @@ OP_COALESCE = 0x74 # pop b, a -> a se a != null, senão b  (operador ??)
 OP_UNWRAP  = 0x75 # pop a -> a se a != null, senão aborta  (unwrap x!)
 
 # tamanho do operando por opcode (bytes após o opcode)
+#  v2: saltos usam i32 (antes i16) -> sem limite de ±32KB por função.
 _OPERAND = {
     OP_CONST: 2, OP_LOAD: 2, OP_STORE: 2,
-    OP_JMP: 2, OP_JMPF: 2, OP_JMPT: 2,
+    OP_JMP: 4, OP_JMPF: 4, OP_JMPT: 4,
     OP_CALL: 3, OP_NEWARR: 2, OP_NEWMAP: 2,
-    OP_NATIVE: 2, OP_TRYPUSH: 4,
+    OP_NATIVE: 2, OP_TRYPUSH: 6,   # i32 rel + u16 slot
 }
 
 _NO_SLOT = 0xFFFF   # TRYPUSH sem variável de catch
@@ -113,7 +114,9 @@ TAG_STR = 3
 TAG_BOOL = 4
 
 _MAGIC = b"PYRO"
-_VERSION = 1
+_VERSION = 2         # v2: saltos i32 + seção opcional de depuração (pc->linha)
+_FLAG_ENCODED = 0x01
+_FLAG_DEBUG   = 0x02
 
 
 class _Label:
@@ -156,6 +159,7 @@ class CodeGenPyro:
         self._enum_consts: Dict[str, int] = {}   # 'Nivel_ALTO' -> 2
         self._global_consts: Dict[str, Literal] = {}  # const global -> literal inlined
         self._ntmp = 0
+        self._cur_line = 0            # última linha marcada (evita marcadores repetidos)
 
     # ── constantes ──────────────────────────────────────────
 
@@ -235,6 +239,7 @@ class CodeGenPyro:
         f.index = self._fnindex[name]
         self._cur = f
         self._loop_stack = []
+        self._cur_line = 0
         for _pt, pn in params:
             self._slot(pn)
         for s in body:
@@ -247,7 +252,15 @@ class CodeGenPyro:
 
     # ── statements ──────────────────────────────────────────
 
+    def _mark_line(self, line):
+        # marcador de linha (pseudo-instrução de tamanho zero, como um label).
+        # A montagem transforma em entradas pc->linha da seção de depuração.
+        if line and line != self._cur_line:
+            self._cur_line = line
+            self._cur.code.append((-2, line))
+
     def _stmt(self, n: Node):
+        self._mark_line(getattr(n, 'line', 0))
         if   isinstance(n, ConstDecl):
             # const não-literal (ou local): tratada como variável imutável
             slot = self._slot(n.name)
@@ -763,8 +776,8 @@ class CodeGenPyro:
                 tgt = code[i][1]
                 j = i + 1
                 hit = False
-                while j < n and code[j][0] == -1:
-                    if code[j][1] is tgt:
+                while j < n and code[j][0] in (-1, -2):
+                    if code[j][0] == -1 and code[j][1] is tgt:
                         hit = True; break
                     j += 1
                 if hit:
@@ -780,8 +793,9 @@ class CodeGenPyro:
         # registra os nomes das funções no pool ANTES de serializar as consts
         for f in self._funcs:
             self._const(TAG_STR, f.name)
-        # layout: offsets de instruções e labels
+        # layout: offsets de instruções, labels e marcadores de linha
         label_off: Dict[int, int] = {}
+        debug = []     # (offset, line) — seção de depuração
         flat = []      # (op, arg, offset)
         offset = 0
         for f in self._funcs:
@@ -789,6 +803,9 @@ class CodeGenPyro:
             for (op, arg) in f.code:
                 if op == -1:                    # LABEL
                     label_off[arg.id] = offset
+                elif op == -2:                  # marcador de linha (0 bytes)
+                    if not debug or debug[-1][0] != offset:
+                        debug.append((offset, arg))
                 else:
                     flat.append((op, arg, offset))
                     offset += _isize(op)
@@ -800,8 +817,8 @@ class CodeGenPyro:
             if op in (OP_CONST, OP_LOAD, OP_STORE, OP_NEWARR, OP_NEWMAP):
                 code += struct.pack('<H', arg)
             elif op in (OP_JMP, OP_JMPF, OP_JMPT):
-                rel = label_off[arg.id] - (off + 3)
-                code += struct.pack('<h', rel)
+                rel = label_off[arg.id] - (off + 5)   # 1 opcode + 4 (i32)
+                code += struct.pack('<i', rel)
             elif op == OP_CALL:
                 fi, argc = arg
                 code += struct.pack('<H', fi)
@@ -812,15 +829,17 @@ class CodeGenPyro:
                 code.append(argc & 0xFF)
             elif op == OP_TRYPUSH:
                 lbl, slot = arg
-                rel = label_off[lbl.id] - (off + 5)   # 1 opcode + 4 operando
-                code += struct.pack('<h', rel)
+                rel = label_off[lbl.id] - (off + 7)   # 1 opcode + 6 (i32 + u16)
+                code += struct.pack('<i', rel)
                 code += struct.pack('<H', slot)
         assert len(code) == code_len
 
         flags = 0
         if self.encode:
-            flags |= 0x01
+            flags |= _FLAG_ENCODED
             code = self._xor_encode(code)
+        if debug:
+            flags |= _FLAG_DEBUG
 
         out = bytearray()
         out += _MAGIC
@@ -849,6 +868,12 @@ class CodeGenPyro:
         # code
         out += struct.pack('<I', code_len)
         out += code
+        # seção de depuração (pc -> linha), se houver
+        if debug:
+            out += struct.pack('<I', len(debug))
+            for pc, line in debug:
+                out += struct.pack('<I', pc)
+                out += struct.pack('<I', line)
         return bytes(out)
 
     @staticmethod
