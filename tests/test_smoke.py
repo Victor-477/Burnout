@@ -890,6 +890,29 @@ check("pyro json cobre backend (backends.py)",
 check("auto json -> pyro (agora suportado)",
       _sel('struct P{int x;} string s = json_encode(new P{x:1});') == 'pyro')
 
+# ── Fase 6: Language Server (LSP) ───────────────────────────
+print("[fase6] language server (lsp)")
+import lsp as _lsp
+_src_ok = 'fn quad(int n) -> int ={ return n * n; }\nint s = quad(3);\nprint(s);\n'
+_src_bad = 'fn add(int a, int b) -> int ={ return a+b; }\nprint(add(1));\nprint(zzz);\n'
+check("lsp: programa válido sem diagnósticos",
+      _lsp.compute_diagnostics("file:///x.cryo", _src_ok) == [])
+_d = _lsp.compute_diagnostics("file:///x.cryo", _src_bad)
+check("lsp: dois diagnósticos (aridade + não-declarada)", len(_d) == 2)
+check("lsp: diagnóstico traz range/linha 0-based",
+      all('range' in x and x['range']['start']['line'] >= 0 for x in _d))
+check("lsp: erro léxico vira diagnóstico com coluna",
+      _lsp.compute_diagnostics("file:///x.cryo", "int x = @;")[0]['range']['start']['character'] >= 0)
+check("lsp: hover de builtin", "print" in (_lsp.hover("print(1);", 0, 1) or ""))
+check("lsp: hover de função do usuário", "quad" in (_lsp.hover(_src_ok, 1, 9) or ""))
+check("lsp: hover de palavra-chave", _lsp.hover("fn f()->int ={ return 1; }", 0, 0) is not None)
+check("lsp: definição aponta p/ a declaração",
+      _lsp.definition("file:///x.cryo", _src_ok, 1, 9)['range']['start']['line'] == 0)
+_syms = _lsp.document_symbols("struct P{int x;}\nenum E{A,B}\nfn g()->int ={ return 1; }\n")
+check("lsp: documentSymbol lista struct/enum/fn",
+      {s['name'] for s in _syms} == {'P', 'E', 'g'})
+check("lsp: word_at extrai identificador", _lsp._word_at("abc def", 0, 1) == 'abc')
+
 # ── auditoria estatica ──────────────────────────────────────
 print("[audit] regras")
 f = audit_ast(ast_of(">C( printf(\"x\"); )"))

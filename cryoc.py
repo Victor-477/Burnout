@@ -22,4 +22,9 @@ sys.path.insert(0, _here)                             # burnout/ (compiler)
 from compiler import main   # noqa: E402
 
 if __name__ == '__main__':
-    main()
+    # atalho: `python burnout/cryoc.py --lsp` inicia o Language Server (stdio)
+    if len(sys.argv) > 1 and sys.argv[1] == '--lsp':
+        import lsp
+        lsp.main()
+    else:
+        main()
