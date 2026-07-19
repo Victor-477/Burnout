@@ -192,6 +192,8 @@ def compile_file(input_path: str,
                       f"{' e '.join(partes)}.")
                 print(f"            Use --backend auto (escolheria '{chosen}') "
                       f"ou --backend {chosen}.")
+        # a auditoria é um passo próprio: relata e encerra (não compila).
+        return output_path
 
     # ── seleção automática de backend ──
     auto = (backend == 'auto')
