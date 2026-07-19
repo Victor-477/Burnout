@@ -660,8 +660,10 @@ check("auto arrays/maps/struct -> pyro",
 check("auto enum -> pyro (agora suportado)", _sel("enum E{A,B} E e = E_A;") == 'pyro')
 check("auto optional/json -> pyro (agora suportado)",
       _sel('number? x = null; string j = json_encode(x);') == 'pyro')
-check("auto http -> go (pyro nao suporta)",
-      _sel('string r = http_get("http://x");') == 'go')
+check("auto http -> pyro (agora suportado)",
+      _sel('string r = http_get("http://x");') == 'pyro')
+check("auto concorrencia -> go (pyro nao suporta spawn/await)",
+      _sel('future<int> f = spawn g(1); int r = await f;') == 'go')
 check("auto llm -> go", _sel('string r = agent("m","p");') == 'go')
 check("auto machine (pyro_exec) -> go", _sel('string s = pyro_exec("x");') == 'go')
 check("auto to_string/strings -> pyro (agora suportado)",
@@ -866,6 +868,13 @@ _bigloop = "int s = 0; for (int i = 0; i < 3; i++) { s += i; } print(s);"
 check("i32: laço compila e é v2", gen_pyro(_bigloop)[4] == 2)
 # --no-opt não deve conter seção de debug quebrada (round-trip do disasm)
 check("debug: disasm --no-opt ok", "; linha" in _dis_noopt(_bigloop))
+
+print("[fase5] HTTP/sleep nativos no pyro")
+check("pyro http_get vira NATIVE 24", "NATIVE 24 1" in _pdis('string c = http_get("http://x");'))
+check("pyro http_post vira NATIVE 25", "NATIVE 25 2" in _pdis('string c = http_post("http://x", "b");'))
+check("pyro sleep vira NATIVE 26", "NATIVE 26 1" in _pdis("sleep(5);"))
+check("pyro http cobre backend (backends.py)",
+      _mt('string c = http_get("http://x");', 'pyro') == (set(), set()))
 
 print("[fase5] JSON nativo no pyro")
 check("pyro json_encode vira NATIVE 22",
