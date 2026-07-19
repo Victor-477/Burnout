@@ -894,6 +894,21 @@ class CodeGenGo:
     def _foreach(self, n: ForEach):
         self.te.push()
         self.te.set(n.var_name, n.var_type)
+        it_t = self.te.infer(n.iterable)
+        if it_t == 'string':
+            # itera caracteres: Go dá runes; converte cada um p/ string
+            v = gid(n.var_name)
+            self._emit(f"for _, _r_{v} := range {self._expr(n.iterable)} {{")
+            self._indent += 1
+            self._loop_depth += 1
+            self._emit(f"{v} := string(_r_{v})")
+            self._emit(f"_ = {v}")
+            for s in n.body: self._gen(s)
+            self._loop_depth -= 1
+            self._indent -= 1
+            self.te.pop()
+            self._emit("}")
+            return
         self._emit(f"for _, {gid(n.var_name)} := range {self._expr(n.iterable)} {{")
         self._indent += 1
         self._loop_depth += 1

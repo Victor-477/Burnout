@@ -61,6 +61,7 @@ from parser import Parser, ParseError        # noqa: E402
 from foreign import verify as verify_foreign, ForeignError, collect_imports  # noqa: E402
 from backends import select_backend, missing_capabilities                    # noqa: E402
 from modules import resolve_modules, ModuleError                             # noqa: E402
+from semantic import check as semantic_check, SemanticError                  # noqa: E402
 from compiler import load_ast                                                # noqa: E402
 from codegen_c import CodeGenError           # noqa: E402
 from codegen_go import CodeGenGoError        # noqa: E402
@@ -117,6 +118,7 @@ __all__ = [
     "parse_ast", "tokenize", "disassemble", "default_abi", "main",
     "verify_foreign", "collect_imports", "select_backend", "missing_capabilities",
     "resolve_modules", "load_ast", "ModuleError",
+    "semantic_check", "SemanticError",
     "Lexer", "Parser",
     "LexerError", "ParseError", "ForeignError",
     "CodeGenError", "CodeGenGoError", "CodeGenAsmError", "CodeGenPyroError",

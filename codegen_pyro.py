@@ -71,14 +71,21 @@ OP_APPEND = 0x65  # pop val, pop arr -> arr.push(val); empilha novo tamanho
 OP_HAS    = 0x66  # pop key, pop map -> empilha bool (existe)
 OP_KEYS   = 0x67  # pop map -> empilha array de chaves
 OP_NATIVE = 0x70  # u8 id, u8 argc -> chama builtin nativo da VM (tabela NATIVES)
+OP_TRYPUSH = 0x71 # i16 rel (catch), u16 slot (var do catch; 0xFFFF = nenhuma)
+OP_TRYPOP  = 0x72 # remove o handler de exceção do topo (try concluído)
+OP_THROW   = 0x73 # pop valor -> desenrola até o handler mais próximo
+OP_COALESCE = 0x74 # pop b, a -> a se a != null, senão b  (operador ??)
+OP_UNWRAP  = 0x75 # pop a -> a se a != null, senão aborta  (unwrap x!)
 
 # tamanho do operando por opcode (bytes após o opcode)
 _OPERAND = {
     OP_CONST: 2, OP_LOAD: 2, OP_STORE: 2,
     OP_JMP: 2, OP_JMPF: 2, OP_JMPT: 2,
     OP_CALL: 3, OP_NEWARR: 2, OP_NEWMAP: 2,
-    OP_NATIVE: 2,
+    OP_NATIVE: 2, OP_TRYPUSH: 4,
 }
+
+_NO_SLOT = 0xFFFF   # TRYPUSH sem variável de catch
 
 # builtins nativos da VM: nome -> (id, argc). A VM espelha esta tabela.
 NATIVES = {
@@ -91,6 +98,8 @@ NATIVES = {
     'upper':     (12, 1), 'lower':    (13, 1), 'trim':   (14, 1),
     'contains':  (15, 2), 'find':     (16, 2), 'replace': (17, 3),
     'substr':    (18, 3), 'split':    (19, 2), 'join':   (20, 2),
+    # ── E/S (Fase 5) ──
+    'input':     (21, 1),
 }
 
 def _isize(op: int) -> int:
@@ -248,8 +257,12 @@ class CodeGenPyro:
         elif isinstance(n, Break):              self._break()
         elif isinstance(n, Continue):           self._continue()
         elif isinstance(n, Assert):             self._assert(n)
+        elif isinstance(n, TryCatch):           self._try(n)
         elif isinstance(n, SafetyBlock):
             for s in n.body: self._stmt(s)
+        elif isinstance(n, CallExpr) and n.callee == 'throw':
+            arg = n.args[0] if n.args else Literal('null', None)
+            self._expr(arg); self._emit(OP_THROW)
         elif isinstance(n, (CallExpr, MethodCallExpr)):
             self._expr(n); self._emit(OP_POP)   # descarta resultado
         else:
@@ -421,6 +434,25 @@ class CodeGenPyro:
         self._expr(n.condition)                            # cond acima da msg
         self._emit(OP_ASSERT)
 
+    def _try(self, n: TryCatch):
+        # TRYPUSH -> catch; <try>; TRYPOP; JMP finally; catch:; <catch>; finally:
+        l_catch = self._label()
+        l_finally = self._label()
+        slot = self._slot(n.catch_name) if n.catch_name else _NO_SLOT
+        self._emit(OP_TRYPUSH, (l_catch, slot))
+        for s in n.try_body:
+            self._stmt(s)
+        self._emit(OP_TRYPOP)
+        self._emit(OP_JMP, l_finally)
+        self._place(l_catch)             # o valor lançado já foi guardado no slot
+        if n.catch_body:
+            for s in n.catch_body:
+                self._stmt(s)
+        self._place(l_finally)
+        if n.finally_body:
+            for s in n.finally_body:
+                self._stmt(s)
+
     # ── expressoes ──────────────────────────────────────────
 
     def _expr(self, n: Node):
@@ -443,6 +475,17 @@ class CodeGenPyro:
             elif n.op == '~': self._emit(OP_BNOT)
             else: raise CodeGenPyroError(f"unário '{n.op}' não suportado")
             return
+        if isinstance(n, UnwrapExpr):
+            # x! : aborta se nulo, senão devolve o valor (COALESCE c/ THROW)
+            self._expr(n.operand)
+            self._emit(OP_UNWRAP); return
+        if isinstance(n, CastExpr):
+            # tipos são dinâmicos na VM: 'expr as T' é identidade
+            # (json_decode as T não é suportado no pyro)
+            if isinstance(n.expr, CallExpr) and n.expr.callee == 'json_decode':
+                raise CodeGenPyroError(
+                    "json_decode(...) as T não é suportado no backend pyro; use --backend go.")
+            self._expr(n.expr); return
         if isinstance(n, BinaryExpr):
             self._binary(n); return
         if isinstance(n, TernaryExpr):
@@ -521,8 +564,10 @@ class CodeGenPyro:
             self._place(l_true); self._emit(OP_TRUE)
             self._place(l_end); return
         if n.op == '??':
-            # inteiros/valores nunca nulos aqui: resultado = esquerda
-            self._expr(n.left); return
+            # a ?? b : a se a != null, senão b (avaliação simples de ambos)
+            self._expr(n.left)
+            self._expr(n.right)
+            self._emit(OP_COALESCE); return
         op = self._BINOP.get(n.op)
         if op is None:
             raise CodeGenPyroError(f"operador '{n.op}' não suportado no backend pyro")
@@ -603,6 +648,11 @@ class CodeGenPyro:
                 nid, argc = arg
                 code.append(nid & 0xFF)
                 code.append(argc & 0xFF)
+            elif op == OP_TRYPUSH:
+                lbl, slot = arg
+                rel = label_off[lbl.id] - (off + 5)   # 1 opcode + 4 operando
+                code += struct.pack('<h', rel)
+                code += struct.pack('<H', slot)
         assert len(code) == code_len
 
         flags = 0

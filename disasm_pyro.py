@@ -132,6 +132,11 @@ def disassemble(data: bytes) -> str:
             nid, argc = operand[0], operand[1]
             nname = next((k for k, v in bc.NATIVES.items() if v[0] == nid), '?')
             text += f" {nid} {argc}  ; {nname}(argc={argc})"
+        elif op == bc.OP_TRYPUSH:
+            rel = struct.unpack('<h', operand[:2])[0]
+            slot = struct.unpack('<H', operand[2:4])[0]
+            slot_s = 'sem var' if slot == 0xFFFF else f'slot {slot}'
+            text += f" {rel:+d} {slot}  ; catch -> {i + size + rel} ({slot_s})"
         out.append(text)
         i += size
     return '\n'.join(out) + '\n'

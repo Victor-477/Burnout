@@ -663,8 +663,10 @@ check("auto llm -> go", _sel('string r = agent("m","p");') == 'go')
 check("auto machine (pyro_exec) -> go", _sel('string s = pyro_exec("x");') == 'go')
 check("auto to_string/strings -> pyro (agora suportado)",
       _sel('int n=5; string s = upper(to_string(n));') == 'pyro')
-check("auto try/catch -> go (pyro nao suporta)",
-      _sel('try { print(1); } catch (string e) { print(e); }') == 'go')
+check("auto try/catch -> pyro (agora suportado)",
+      _sel('try { print(1); } catch (string e) { print(e); }') == 'pyro')
+check("auto concorrencia -> go (pyro nao suporta)",
+      _sel('future<int> f = spawn g(1); int r = await f;') == 'go')
 check("auto bloco Go -> go", _sel('import >go< >Go( fmt.Println(1) )') == 'go')
 check("auto bloco Node -> node", _sel('import >node< >Node( console.log(1); )') == 'node')
 check("auto bloco C -> c", _sel('import >c< >C( printf("x"); )') == 'c')
@@ -675,10 +677,10 @@ from backends import missing_capabilities as _miss
 def _mt(src, b):
     return _miss(ast_of(src), b)
 check("miss: map em c -> {map}", 'map' in _mt('map<string,int> m = {"a":1};', 'c')[0])
-check("miss: try/catch em pyro -> {trycatch}",
-      'trycatch' in _mt('try { print(1); } catch (string e) { print(e); }', 'pyro')[0])
-check("miss: enum em pyro agora coberto",
-      _mt('enum E{A} E e = E_A;', 'pyro') == (set(), set()))
+check("miss: concorrencia em pyro -> {concurrency}",
+      'concurrency' in _mt('future<int> f = spawn g(1); int r = await f;', 'pyro')[0])
+check("miss: enum/try em pyro agora cobertos",
+      _mt('enum E{A} try { print(1); } catch (string e) { print(e); }', 'pyro') == (set(), set()))
 check("miss: bloco C em go -> {c}", 'c' in _mt('import >c< >C( x )', 'go')[1])
 check("miss: go cobre map (sem faltas)",
       _mt('map<string,int> m = {"a":1};', 'go') == (set(), set()))
@@ -762,6 +764,56 @@ check("pyro const global inlined em fn", isinstance(
       (bytes, bytearray)))
 d = _pyro_dis('const int K = 7\nfn f() -> int ={ return K; }\nprint(f());')
 check("pyro const global vira CONST (sem LOAD)", "; 7" in d)
+
+# ── Fase 4/5: semântica, try/catch, opcionais, char, input ──
+print("[fase4] analise semantica")
+from semantic import check as _sem_check, SemanticError as _SemErr
+def _sem_err(src):
+    try:
+        _sem_check(ast_of(src)); return False
+    except _SemErr:
+        return True
+check("sem: variavel nao declarada", _sem_err("print(y);"))
+check("sem: funcao desconhecida", _sem_err("foo(1);"))
+check("sem: aridade errada",
+      _sem_err("fn add(int a, int b)->int ={ return a+b; } print(add(1));"))
+check("sem: atribuicao a nao declarada", _sem_err("x = 5;"))
+check("sem: break fora de laco", _sem_err("break;"))
+check("sem: declaracao duplicada",
+      _sem_err("fn f()->int ={ return 1; } fn f()->int ={ return 2; }"))
+check("sem: programa valido passa",
+      not _sem_err("fn q(int n)->int ={ return n*n; } int s=0; for(int i=0;i<3;i++){ s+=q(i); } print(s);"))
+check("sem: tipo usado em schema_of ok",
+      not _sem_err("schema F { int x; } print(schema_of(F));"))
+check("sem: enum membro ok", not _sem_err("enum E{A,B} E e = E_A; print(e == E_B);"))
+check("sem: recursao/forward-ref ok",
+      not _sem_err("fn par(int n)->bool ={ if(n==0){return true;} return impar(n-1); } "
+                   "fn impar(int n)->bool ={ if(n==0){return false;} return par(n-1); } print(par(4));"))
+
+print("[fase4] try/catch + opcionais no pyro")
+def _pdis(src):
+    import disasm_pyro
+    return disasm_pyro.disassemble(gen_pyro(src, encode=False))
+check("pyro try/catch compila", isinstance(
+      gen_pyro('try { throw("x"); } catch (string e) { print(e); }'), (bytes, bytearray)))
+d = _pdis('try { throw("x"); } catch (string e) { print(e); } finally { print("f"); }')
+check("pyro emite TRYPUSH/TRYPOP/THROW", "TRYPUSH" in d and "TRYPOP" in d and "THROW" in d)
+check("pyro ?? emite COALESCE", "COALESCE" in _pdis('int? x = null; int y = x ?? 5; print(y);'))
+check("pyro x! emite UNWRAP", "UNWRAP" in _pdis('int? x = 3; int y = x!; print(y);'))
+check("pyro const global inlined (CONST, sem LOAD do nome)",
+      isinstance(gen_pyro('const int K = 9\nfn f()->int ={ return K + 1; } print(f());'),
+                 (bytes, bytearray)))
+# go/node continuam suportando (nao devem quebrar)
+check("go try/catch ok", "recover()" in gen_go('try { throw("e"); } catch (string x) { print(x); }'))
+
+print("[fase4] iteracao de caracteres")
+check("go for-char converte rune->string", "string(_r_" in gen_go('for (string c in "ab") { print(c); }'))
+check("node for-char usa of", "of " in gen_node('for (string c in "ab") { print(c); }'))
+check("pyro for-char compila", isinstance(
+      gen_pyro('for (string c in "ab") { print(c); }'), (bytes, bytearray)))
+
+print("[fase5] input nativo no pyro")
+check("pyro input vira NATIVE 21", "NATIVE 21 1" in _pdis('string s = input("? ");'))
 
 # ── auditoria estatica ──────────────────────────────────────
 print("[audit] regras")

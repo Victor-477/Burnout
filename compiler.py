@@ -38,6 +38,7 @@ from security    import audit_ast,  format_audit      # CRYO
 from foreign     import verify as verify_foreign, ForeignError   # CRYO
 from backends     import select_backend, missing_capabilities   # CRYO
 from modules      import resolve_modules, ModuleError           # CRYO
+from semantic     import check as semantic_check, SemanticError  # CRYO
 from codegen_c    import CodeGenC,    CodeGenError       # backend C
 from codegen_go   import CodeGenGo,   CodeGenGoError     # backend Go
 from codegen_asm  import CodeGenAsm,  CodeGenAsmError    # backend x86-64
@@ -65,6 +66,7 @@ def compile_source(source: str, backend: str, safe: bool,
                    abi: str = 'sysv', base_dir: str | None = None):
     """Retorna str (go/c/asm) ou bytes (pyro = bytecode)."""
     ast = load_ast(source, base_dir)
+    semantic_check(ast)   # variável/função/aridade/break — erros cedo, com linha
     verify_foreign(ast)   # blocos estrangeiros/libraries exigem `import >Lang<`
     if backend == 'asm':
         return CodeGenAsm(safe=safe, abi=abi).generate(ast)
@@ -371,6 +373,8 @@ def main() -> None:
         print(f"\n[Erro Estrangeiro] {e}", file=sys.stderr); sys.exit(1)
     except ModuleError    as e:
         print(f"\n[Erro de Módulo] {e}", file=sys.stderr); sys.exit(1)
+    except SemanticError  as e:
+        print(f"\n[Erro Semântico] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenAsmError as e:
         print(f"\n[Erro CodeGen ASM] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenGoError as e:
