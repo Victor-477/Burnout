@@ -37,6 +37,7 @@ from parser      import Parser,     ParseError        # CRYO
 from security    import audit_ast,  format_audit      # CRYO
 from foreign     import verify as verify_foreign, ForeignError   # CRYO
 from backends     import select_backend, missing_capabilities   # CRYO
+from modules      import resolve_modules, ModuleError           # CRYO
 from codegen_c    import CodeGenC,    CodeGenError       # backend C
 from codegen_go   import CodeGenGo,   CodeGenGoError     # backend Go
 from codegen_asm  import CodeGenAsm,  CodeGenAsmError    # backend x86-64
@@ -61,10 +62,9 @@ def default_abi() -> str:
 
 
 def compile_source(source: str, backend: str, safe: bool,
-                   abi: str = 'sysv'):
+                   abi: str = 'sysv', base_dir: str | None = None):
     """Retorna str (go/c/asm) ou bytes (pyro = bytecode)."""
-    tokens = Lexer(source).tokenize()
-    ast    = Parser(tokens).parse()
+    ast = load_ast(source, base_dir)
     verify_foreign(ast)   # blocos estrangeiros/libraries exigem `import >Lang<`
     if backend == 'asm':
         return CodeGenAsm(safe=safe, abi=abi).generate(ast)
@@ -79,6 +79,12 @@ def compile_source(source: str, backend: str, safe: bool,
 
 def parse_ast(source: str):
     return Parser(Lexer(source).tokenize()).parse()
+
+
+def load_ast(source: str, base_dir: str | None = None):
+    """Parse + resolução de módulos (import \"arquivo.cryo\")."""
+    ast = parse_ast(source)
+    return resolve_modules(ast, base_dir or os.getcwd())
 
 
 def _gcc_c_flags(compiler_dir: str, output_path: str, runtime: str,
@@ -158,6 +164,7 @@ def compile_file(input_path: str,
 
     with open(input_path, 'r', encoding='utf-8') as f:
         source = f.read()
+    base_dir = os.path.dirname(os.path.abspath(input_path))
 
     if show_tokens:
         print("\n── Tokens ──────────────────────────────────")
@@ -173,7 +180,7 @@ def compile_file(input_path: str,
 
     # ── auditoria de seguranca ──
     if audit or audit_only:
-        audit_ast_obj = parse_ast(source)
+        audit_ast_obj = load_ast(source, base_dir)
         findings = audit_ast(audit_ast_obj)
         print(format_audit(findings, input_path))
         if any(f.level == 'ALTO' for f in findings):
@@ -200,12 +207,12 @@ def compile_file(input_path: str,
     # ── seleção automática de backend ──
     auto = (backend == 'auto')
     if auto:
-        backend, motivo = select_backend(parse_ast(source))
+        backend, motivo = select_backend(load_ast(source, base_dir))
         print(f"→ backend automático: {backend}  ({motivo})")
 
     # ── geracao de codigo ──
     try:
-        code = compile_source(source, backend, safe, abi)
+        code = compile_source(source, backend, safe, abi, base_dir=base_dir)
     except (CodeGenError, CodeGenGoError, CodeGenAsmError,
             CodeGenPyroError, CodeGenNodeError) as e:
         # rede de segurança: se o auto escolheu um backend que falhou,
@@ -214,7 +221,7 @@ def compile_file(input_path: str,
             print(f"⚠  backend {backend} não suportou o programa ({e}); "
                   f"recompilando com go", file=sys.stderr)
             backend = 'go'
-            code = compile_source(source, backend, safe, abi)
+            code = compile_source(source, backend, safe, abi, base_dir=base_dir)
         else:
             raise
 
@@ -362,6 +369,8 @@ def main() -> None:
         print(f"\n[Erro Sintático] {e}", file=sys.stderr); sys.exit(1)
     except ForeignError   as e:
         print(f"\n[Erro Estrangeiro] {e}", file=sys.stderr); sys.exit(1)
+    except ModuleError    as e:
+        print(f"\n[Erro de Módulo] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenAsmError as e:
         print(f"\n[Erro CodeGen ASM] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenGoError as e:

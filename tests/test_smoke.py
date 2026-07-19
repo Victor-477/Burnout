@@ -683,6 +683,86 @@ check("miss: bloco C em go -> {c}", 'c' in _mt('import >c< >C( x )', 'go')[1])
 check("miss: go cobre map (sem faltas)",
       _mt('map<string,int> m = {"a":1};', 'go') == (set(), set()))
 
+# ── Fase 4: módulos + interpolação + const global no pyro ───
+print("[fase4] modulos (import \"arquivo.cryo\")")
+import tempfile, shutil
+from modules import resolve_modules, ModuleError
+from ast_nodes import ModuleImport as _MI, FunctionDecl as _FD
+
+_tmp = tempfile.mkdtemp(prefix="cryo_mod_")
+def _w(name, content):
+    p = os.path.join(_tmp, name)
+    with open(p, 'w', encoding='utf-8') as f:
+        f.write(content)
+    return p
+
+_w("util.cryo", 'const int BASE = 10\nfn dobro(int x) -> int ={ return x * 2; }\nprint("nao deve rodar");\n')
+_w("fundo.cryo", 'fn triplo(int x) -> int ={ return x * 3; }\n')
+_w("meio.cryo", 'import "fundo.cryo"\nfn quad(int x) -> int ={ return triplo(x) + x; }\n')
+_w("ciclo_a.cryo", 'import "ciclo_b.cryo"\nfn fa() -> int ={ return 1; }\n')
+_w("ciclo_b.cryo", 'import "ciclo_a.cryo"\nfn fb() -> int ={ return 2; }\n')
+_w("colide.cryo", 'fn dobro(int x) -> int ={ return x; }\n')
+
+# parser reconhece a forma de módulo
+ast = ast_of('import "util.cryo" print(dobro(4));')
+check("parser: import \"...\" -> ModuleImport", isinstance(ast.statements[0], _MI))
+# resolução: declarações entram, statements executáveis do módulo não
+r = resolve_modules(ast, _tmp)
+fns = [s.name for s in r.statements if isinstance(s, _FD)]
+check("resolve: fn do modulo incorporada", 'dobro' in fns)
+check("resolve: sem ModuleImport no resultado",
+      not any(isinstance(s, _MI) for s in r.statements))
+from ast_nodes import CallExpr as _CE
+check("resolve: print de topo do modulo ignorado",
+      sum(1 for s in r.statements if isinstance(s, _CE) and s.callee == 'print') == 1)
+# aninhado + dedup (mesmo arquivo por 2 caminhos)
+r2 = resolve_modules(ast_of('import "meio.cryo" import "fundo.cryo" print(quad(2));'), _tmp)
+fns2 = [s.name for s in r2.statements if isinstance(s, _FD)]
+check("resolve: import aninhado", 'triplo' in fns2 and 'quad' in fns2)
+check("resolve: dedup (fundo 1x)", fns2.count('triplo') == 1)
+# erros: ciclo, colisão, ausente
+def _mod_err(src):
+    try:
+        resolve_modules(ast_of(src), _tmp); return False
+    except ModuleError:
+        return True
+check("resolve: ciclo detectado", _mod_err('import "ciclo_a.cryo"'))
+check("resolve: colisao de nome detectada",
+      _mod_err('import "util.cryo" import "colide.cryo"'))
+check("resolve: modulo ausente", _mod_err('import "nao_existe.cryo"'))
+check("resolve: colisao com o programa principal",
+      _mod_err('import "util.cryo" fn dobro(int x) -> int ={ return x; }'))
+# codegen ponta-a-ponta com módulo (via compile_source do compiler)
+import compiler as _comp
+g = _comp.compile_source('import "util.cryo" print(dobro(21));', 'go', True, base_dir=_tmp)
+check("compile_source resolve modulo (go)", "func dobro(" in g)
+bc = _comp.compile_source('import "util.cryo" print(dobro(21) + BASE);', 'pyro', True, base_dir=_tmp)
+check("compile_source resolve modulo (pyro)", isinstance(bc, (bytes, bytearray)))
+shutil.rmtree(_tmp, ignore_errors=True)
+
+print("[fase4] interpolacao de strings")
+g = gen_go('int n = 3; print("n vale ${n}!");')
+check("interp vira concat + to_string", "cryoStr" in g and '"n vale "' in g)
+g = gen_go('print("${1 + 1}");')
+check("interp no inicio ganha contexto string", '"" +' in g.replace("  ", " ") or '""+' in g)
+check("interp expressao aninhada", isinstance(
+      gen_pyro('map<string,int> m = {"a":1}; print("a=${m[\\"a\\"]}");'), (bytes, bytearray)))
+check("string sem ${} intacta", '"sem interp"' in gen_go('print("sem interp");'))
+def _interp_err(src):
+    try:
+        ast_of(src); return False
+    except Exception:
+        return True
+check("interp sem fechamento falha", _interp_err('print("x ${aberto");'))
+check("interp vazia falha", _interp_err('print("x ${}");'))
+
+print("[fase4] const global no backend pyro")
+check("pyro const global inlined em fn", isinstance(
+      gen_pyro('const number PI = 3.14\nfn area(number r) -> number ={ return PI * r * r; }\nprint(area(2.0));'),
+      (bytes, bytearray)))
+d = _pyro_dis('const int K = 7\nfn f() -> int ={ return K; }\nprint(f());')
+check("pyro const global vira CONST (sem LOAD)", "; 7" in d)
+
 # ── auditoria estatica ──────────────────────────────────────
 print("[audit] regras")
 f = audit_ast(ast_of(">C( printf(\"x\"); )"))

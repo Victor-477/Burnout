@@ -60,6 +60,8 @@ from lexer import Lexer, LexerError          # noqa: E402
 from parser import Parser, ParseError        # noqa: E402
 from foreign import verify as verify_foreign, ForeignError, collect_imports  # noqa: E402
 from backends import select_backend, missing_capabilities                    # noqa: E402
+from modules import resolve_modules, ModuleError                             # noqa: E402
+from compiler import load_ast                                                # noqa: E402
 from codegen_c import CodeGenError           # noqa: E402
 from codegen_go import CodeGenGoError        # noqa: E402
 from codegen_asm import CodeGenAsmError      # noqa: E402
@@ -81,20 +83,22 @@ def tokenize(source):
     return Lexer(source).tokenize()
 
 
-def compile_source(source, backend="go", safe=True, abi=None):
+def compile_source(source, backend="go", safe=True, abi=None, base_dir=None):
     """Compila um fonte `.cryo` e devolve o código-alvo.
 
     Devolve ``str`` para os alvos ``go``/``c``/``asm`` e ``bytes`` para o alvo
     ``pyro`` (bytecode). ``safe`` liga a instrumentação de segurança (padrão);
-    ``abi`` só afeta o backend ``asm`` (padrão: da plataforma).
+    ``abi`` só afeta o backend ``asm``; ``base_dir`` é a pasta usada para
+    resolver ``import "arquivo.cryo"`` (padrão: diretório atual).
     """
     if abi is None:
         abi = default_abi()
     if backend == "auto":
-        backend = select_backend(parse_ast(source))[0]
+        backend = select_backend(load_ast(source, base_dir))[0]
     if backend not in BACKENDS:
         raise ValueError(f"backend inválido: {backend!r} (use um de {BACKENDS})")
-    return _compile_source(source, backend=backend, safe=safe, abi=abi)
+    return _compile_source(source, backend=backend, safe=safe, abi=abi,
+                           base_dir=base_dir)
 
 
 # Alias histórico
@@ -112,6 +116,7 @@ __all__ = [
     "compile_source", "compile_string", "compile_file", "run",
     "parse_ast", "tokenize", "disassemble", "default_abi", "main",
     "verify_foreign", "collect_imports", "select_backend", "missing_capabilities",
+    "resolve_modules", "load_ast", "ModuleError",
     "Lexer", "Parser",
     "LexerError", "ParseError", "ForeignError",
     "CodeGenError", "CodeGenGoError", "CodeGenAsmError", "CodeGenPyroError",

@@ -134,6 +134,7 @@ class CodeGenPyro:
         self._loop_stack: List = []        # (break_label, continue_label)
         self._structs: Dict[str, List[str]] = {}
         self._enum_consts: Dict[str, int] = {}   # 'Nivel_ALTO' -> 2
+        self._global_consts: Dict[str, Literal] = {}  # const global -> literal inlined
         self._ntmp = 0
 
     # ── constantes ──────────────────────────────────────────
@@ -186,6 +187,10 @@ class CodeGenPyro:
                 # enum = constantes inteiras em tempo de compilação
                 for i, m in enumerate(n.members):
                     self._enum_consts[f"{n.name}_{m}"] = i
+            elif isinstance(n, ConstDecl) and isinstance(n.value, Literal):
+                # const global com valor literal: inlined em todo uso
+                # (visível dentro de funções, sem precisar de globais na VM)
+                self._global_consts[n.name] = n.value
             elif isinstance(n, (Import, Library)):
                 pass
             elif isinstance(n, (SkillDecl, ForeignBlock)):
@@ -223,7 +228,12 @@ class CodeGenPyro:
     # ── statements ──────────────────────────────────────────
 
     def _stmt(self, n: Node):
-        if   isinstance(n, VarDecl):            self._var(n)
+        if   isinstance(n, ConstDecl):
+            # const não-literal (ou local): tratada como variável imutável
+            slot = self._slot(n.name)
+            self._expr(n.value)
+            self._emit(OP_STORE, slot)
+        elif isinstance(n, VarDecl):            self._var(n)
         elif isinstance(n, Assignment):         self._assign(n)
         elif isinstance(n, IndexAssignment):    self._index_assign(n)
         elif isinstance(n, CompoundAssignment): self._compound(n)
@@ -419,6 +429,11 @@ class CodeGenPyro:
         if isinstance(n, Identifier):
             if n.name in self._enum_consts:      # membro de enum -> const int
                 self._emit(OP_CONST, self._const(TAG_INT, self._enum_consts[n.name]))
+                return
+            # const global inlined (visível em qualquer função), exceto se
+            # houver uma variável local com o mesmo nome (sombra)
+            if n.name in self._global_consts and n.name not in self._cur.locals:
+                self._literal(self._global_consts[n.name])
                 return
             self._emit(OP_LOAD, self._get_slot(n.name)); return
         if isinstance(n, UnaryExpr):
