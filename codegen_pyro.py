@@ -98,8 +98,9 @@ NATIVES = {
     'upper':     (12, 1), 'lower':    (13, 1), 'trim':   (14, 1),
     'contains':  (15, 2), 'find':     (16, 2), 'replace': (17, 3),
     'substr':    (18, 3), 'split':    (19, 2), 'join':   (20, 2),
-    # ── E/S (Fase 5) ──
+    # ── E/S e JSON (Fase 5) ──
     'input':     (21, 1),
+    'json_encode': (22, 1), 'json_decode': (23, 1),
 }
 
 def _isize(op: int) -> int:
@@ -480,11 +481,9 @@ class CodeGenPyro:
             self._expr(n.operand)
             self._emit(OP_UNWRAP); return
         if isinstance(n, CastExpr):
-            # tipos são dinâmicos na VM: 'expr as T' é identidade
-            # (json_decode as T não é suportado no pyro)
-            if isinstance(n.expr, CallExpr) and n.expr.callee == 'json_decode':
-                raise CodeGenPyroError(
-                    "json_decode(...) as T não é suportado no backend pyro; use --backend go.")
+            # tipos são dinâmicos na VM: 'expr as T' é identidade.
+            # json_decode(s) as T -> decodifica p/ valor dinâmico (structs
+            # são maps, então acesso a campo funciona por indexação).
             self._expr(n.expr); return
         if isinstance(n, BinaryExpr):
             self._binary(n); return

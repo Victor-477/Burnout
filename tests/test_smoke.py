@@ -657,8 +657,10 @@ check("auto núcleo puro -> pyro", _sel("int s=0; for(int i=0;i<3;i++){s+=i;} pr
 check("auto arrays/maps/struct -> pyro",
       _sel('struct P{int x;} int[] a=[1]; map<string,int> m = {"k":1}; print(len(a));') == 'pyro')
 check("auto enum -> pyro (agora suportado)", _sel("enum E{A,B} E e = E_A;") == 'pyro')
-check("auto optional/json -> go",
-      _sel('number? x = null; string j = json_encode(x);') == 'go')
+check("auto optional/json -> pyro (agora suportado)",
+      _sel('number? x = null; string j = json_encode(x);') == 'pyro')
+check("auto http -> go (pyro nao suporta)",
+      _sel('string r = http_get("http://x");') == 'go')
 check("auto llm -> go", _sel('string r = agent("m","p");') == 'go')
 check("auto machine (pyro_exec) -> go", _sel('string s = pyro_exec("x");') == 'go')
 check("auto to_string/strings -> pyro (agora suportado)",
@@ -814,6 +816,20 @@ check("pyro for-char compila", isinstance(
 
 print("[fase5] input nativo no pyro")
 check("pyro input vira NATIVE 21", "NATIVE 21 1" in _pdis('string s = input("? ");'))
+
+print("[fase5] JSON nativo no pyro")
+check("pyro json_encode vira NATIVE 22",
+      "NATIVE 22 1" in _pdis('struct P{int x;} P p = new P{x:1}; string s = json_encode(p);'))
+check("pyro json_decode vira NATIVE 23",
+      "NATIVE 23 1" in _pdis('struct P{int x;} P p = json_decode("{}") as P; print(p.x);'))
+check("pyro json compila (struct round-trip)", isinstance(
+      gen_pyro('struct P{string a; int b;} P p = new P{a:"x", b:2}; '
+               'string s = json_encode(p); P q = json_decode(s) as P; print(q.a);'),
+      (bytes, bytearray)))
+check("pyro json cobre backend (backends.py)",
+      _mt('struct P{int x;} string s = json_encode(new P{x:1});', 'pyro') == (set(), set()))
+check("auto json -> pyro (agora suportado)",
+      _sel('struct P{int x;} string s = json_encode(new P{x:1});') == 'pyro')
 
 # ── auditoria estatica ──────────────────────────────────────
 print("[audit] regras")
