@@ -36,7 +36,7 @@ from lexer       import Lexer,      LexerError        # CRYO
 from parser      import Parser,     ParseError        # CRYO
 from security    import audit_ast,  format_audit      # CRYO
 from foreign     import verify as verify_foreign, ForeignError   # CRYO
-from backends     import select_backend                          # CRYO
+from backends     import select_backend, missing_capabilities   # CRYO
 from codegen_c    import CodeGenC,    CodeGenError       # backend C
 from codegen_go   import CodeGenGo,   CodeGenGoError     # backend Go
 from codegen_asm  import CodeGenAsm,  CodeGenAsmError    # backend x86-64
@@ -172,10 +172,26 @@ def compile_file(input_path: str,
 
     # ── auditoria de seguranca ──
     if audit:
-        findings = audit_ast(parse_ast(source))
+        audit_ast_obj = parse_ast(source)
+        findings = audit_ast(audit_ast_obj)
         print(format_audit(findings, input_path))
         if any(f.level == 'ALTO' for f in findings):
             print("[Auditoria] Achados de nível ALTO encontrados.", file=sys.stderr)
+        # sugestão de backend: se o backend escolhido não cobre algum
+        # recurso usado, aponta --backend auto (evita erro/omissão silenciosa).
+        if backend != 'auto':
+            miss_tags, miss_foreign = missing_capabilities(audit_ast_obj, backend)
+            if miss_tags or miss_foreign:
+                chosen, _motivo = select_backend(audit_ast_obj)
+                partes = []
+                if miss_tags:
+                    partes.append("recursos [" + ", ".join(sorted(miss_tags)) + "]")
+                if miss_foreign:
+                    partes.append("blocos estrangeiros [" + ", ".join(sorted(miss_foreign)) + "]")
+                print(f"\n[Auditoria] O backend '{backend}' não cobre "
+                      f"{' e '.join(partes)}.")
+                print(f"            Use --backend auto (escolheria '{chosen}') "
+                      f"ou --backend {chosen}.")
 
     # ── seleção automática de backend ──
     auto = (backend == 'auto')

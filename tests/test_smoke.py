@@ -619,6 +619,15 @@ check("auto bloco Node -> node", _sel('import >node< >Node( console.log(1); )') 
 check("auto bloco C -> c", _sel('import >c< >C( printf("x"); )') == 'c')
 check("auto conflito (Go+C) -> go fallback",
       _sel('import >go< import >c< >Go( x )\n>C( y )') == 'go')
+# capacidades faltando por backend (base da sugestão do --audit)
+from backends import missing_capabilities as _miss
+def _mt(src, b):
+    return _miss(ast_of(src), b)
+check("miss: map em c -> {map}", 'map' in _mt('map<string,int> m = {"a":1};', 'c')[0])
+check("miss: enum em pyro -> {enum}", 'enum' in _mt('enum E{A} E e = E_A;', 'pyro')[0])
+check("miss: bloco C em go -> {c}", 'c' in _mt('import >c< >C( x )', 'go')[1])
+check("miss: go cobre map (sem faltas)",
+      _mt('map<string,int> m = {"a":1};', 'go') == (set(), set()))
 
 # ── auditoria estatica ──────────────────────────────────────
 print("[audit] regras")

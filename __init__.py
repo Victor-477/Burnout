@@ -59,7 +59,7 @@ from compiler import (          # noqa: E402
 from lexer import Lexer, LexerError          # noqa: E402
 from parser import Parser, ParseError        # noqa: E402
 from foreign import verify as verify_foreign, ForeignError, collect_imports  # noqa: E402
-from backends import select_backend                                          # noqa: E402
+from backends import select_backend, missing_capabilities                    # noqa: E402
 from codegen_c import CodeGenError           # noqa: E402
 from codegen_go import CodeGenGoError        # noqa: E402
 from codegen_asm import CodeGenAsmError      # noqa: E402
@@ -111,7 +111,7 @@ __all__ = [
     "__version__", "BACKENDS",
     "compile_source", "compile_string", "compile_file", "run",
     "parse_ast", "tokenize", "disassemble", "default_abi", "main",
-    "verify_foreign", "collect_imports", "select_backend",
+    "verify_foreign", "collect_imports", "select_backend", "missing_capabilities",
     "Lexer", "Parser",
     "LexerError", "ParseError", "ForeignError",
     "CodeGenError", "CodeGenGoError", "CodeGenAsmError", "CodeGenPyroError",
