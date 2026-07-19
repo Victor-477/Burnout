@@ -63,7 +63,8 @@ def default_abi() -> str:
 
 
 def compile_source(source: str, backend: str, safe: bool,
-                   abi: str = 'sysv', base_dir: str | None = None):
+                   abi: str = 'sysv', base_dir: str | None = None,
+                   optimize: bool = True):
     """Retorna str (go/c/asm) ou bytes (pyro = bytecode)."""
     ast = load_ast(source, base_dir)
     semantic_check(ast)   # variável/função/aridade/break — erros cedo, com linha
@@ -75,7 +76,7 @@ def compile_source(source: str, backend: str, safe: bool,
     if backend == 'node':
         return CodeGenNode(safe=safe).generate(ast)
     if backend == 'pyro':
-        return CodeGenPyro(safe=safe).generate(ast)   # bytes
+        return CodeGenPyro(safe=safe, optimize=optimize).generate(ast)   # bytes
     return CodeGenC(safe=safe).generate(ast)
 
 
@@ -153,6 +154,7 @@ def compile_file(input_path: str,
                  show_ast: bool = False,
                  audit: bool = False,
                  audit_only: bool = False,
+                 optimize: bool = True,
                  emit_only: bool = False,
                  dis: bool = False,
                  run: bool = False) -> str:
@@ -214,7 +216,7 @@ def compile_file(input_path: str,
 
     # ── geracao de codigo ──
     try:
-        code = compile_source(source, backend, safe, abi, base_dir=base_dir)
+        code = compile_source(source, backend, safe, abi, base_dir=base_dir, optimize=optimize)
     except (CodeGenError, CodeGenGoError, CodeGenAsmError,
             CodeGenPyroError, CodeGenNodeError) as e:
         # rede de segurança: se o auto escolheu um backend que falhou,
@@ -223,7 +225,7 @@ def compile_file(input_path: str,
             print(f"⚠  backend {backend} não suportou o programa ({e}); "
                   f"recompilando com go", file=sys.stderr)
             backend = 'go'
-            code = compile_source(source, backend, safe, abi, base_dir=base_dir)
+            code = compile_source(source, backend, safe, abi, base_dir=base_dir, optimize=optimize)
         else:
             raise
 
@@ -337,6 +339,8 @@ def main() -> None:
                     help='Executa a auditoria, imprime o relatório e sai (não compila)')
     ap.add_argument('--emit-only', action='store_true',
                     help='Apenas gera o fonte (.pyro/.s); não invoca o toolchain')
+    ap.add_argument('--no-opt', action='store_true',
+                    help='Desliga o otimizador de bytecode (backend pyro)')
     ap.add_argument('--dis', action='store_true',
                     help='Desassembla o bytecode Pyro gerado (backend pyro)')
     ap.add_argument('--tokens', action='store_true', help='Imprime tokens')
@@ -361,6 +365,7 @@ def main() -> None:
             show_ast    = args.ast,
             audit       = args.audit,
             audit_only  = args.audit_only,
+            optimize    = not args.no_opt,
             emit_only   = args.emit_only,
             dis         = args.dis,
             run         = args.run,

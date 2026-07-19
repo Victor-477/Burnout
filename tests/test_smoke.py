@@ -817,6 +817,41 @@ check("pyro for-char compila", isinstance(
 print("[fase5] input nativo no pyro")
 check("pyro input vira NATIVE 21", "NATIVE 21 1" in _pdis('string s = input("? ");'))
 
+print("[fase5] otimizador de bytecode (pyro)")
+def _gen_pyro_noopt(src):
+    return CodeGenPyro(safe=True, encode=False, optimize=False).generate(
+        Parser(Lexer(src).tokenize()).parse())
+import disasm_pyro as _dpm
+def _dis_noopt(src):
+    return _dpm.disassemble(_gen_pyro_noopt(src))
+# constant folding: (0xF0|0x0F)&0xFF -> um único CONST 255, sem BAND/BOR
+d = _pdis("int m = (0xF0 | 0x0F) & 0xFF; print(m);")
+check("fold: bitwise -> CONST 255", "; 255" in d and "BOR" not in d and "BAND" not in d)
+check("fold: aritmetica int (2*21 -> 42)", "; 42" in _pdis("int x = 2 * 21; print(x);"))
+check("fold: negacao unaria (-(2*21) -> -42)", "; -42" in _pdis("int x = -(2 * 21); print(x);"))
+check("fold: comparacao -> TRUE (sem GT)",
+      "GT" not in _pdis("bool b = 100 > 50; print(b);"))
+check("fold: concat de string literal",
+      '"Ola, mundo"' in _pdis('string s = "Ola" + ", " + "mundo"; print(s);'))
+check("fold: float preserva tipo (10.0, nao int)",
+      "float 10" in _pdis("number x = (3.5 + 1.5) * 2.0; print(x);"))
+check("fold NAO ocorre em --no-opt (mantem BOR/BAND)",
+      "BOR" in _dis_noopt("int m = (0xF0 | 0x0F) & 0xFF; print(m);"))
+# dead-code elimination: código após return some
+d = _pdis('fn f(int x)->int ={ return x; print("morto"); return 9; } print(f(1));')
+check("dce: remove codigo apos return", '"morto"' not in d)
+check("dce: mantem no --no-opt",
+      '"morto"' in _dis_noopt('fn f(int x)->int ={ return x; print("morto"); return 9; } print(f(1));'))
+# prune de constantes: intermediários mortos somem do pool
+d = _pdis("number x = (3.5 + 1.5) * 2.0; print(x);")
+check("prune: intermediarios (3.5/1.5) fora do pool", "3.5" not in d and "1.5" not in d)
+# tamanho: otimizado <= nao-otimizado
+_src_big = "int a = (1 << 8) | 0x34; int b = 2 * 3 * 7; bool c = 10 > 5; print(a); print(b); print(c);"
+check("otimizado <= nao-otimizado (bytes)",
+      len(gen_pyro(_src_big)) <= len(_gen_pyro_noopt(_src_big)))
+# correção: divisão inteira NÃO é dobrada (semântica de trunc/segurança fica p/ runtime)
+check("fold: div inteira nao dobra (DIV presente)", "DIV" in _pdis("int x = 10 / 2; print(x);"))
+
 print("[fase5] JSON nativo no pyro")
 check("pyro json_encode vira NATIVE 22",
       "NATIVE 22 1" in _pdis('struct P{int x;} P p = new P{x:1}; string s = json_encode(p);'))

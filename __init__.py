@@ -84,7 +84,8 @@ def tokenize(source):
     return Lexer(source).tokenize()
 
 
-def compile_source(source, backend="go", safe=True, abi=None, base_dir=None):
+def compile_source(source, backend="go", safe=True, abi=None, base_dir=None,
+                   optimize=True):
     """Compila um fonte `.cryo` e devolve o código-alvo.
 
     Devolve ``str`` para os alvos ``go``/``c``/``asm`` e ``bytes`` para o alvo
@@ -99,7 +100,7 @@ def compile_source(source, backend="go", safe=True, abi=None, base_dir=None):
     if backend not in BACKENDS:
         raise ValueError(f"backend inválido: {backend!r} (use um de {BACKENDS})")
     return _compile_source(source, backend=backend, safe=safe, abi=abi,
-                           base_dir=base_dir)
+                           base_dir=base_dir, optimize=optimize)
 
 
 # Alias histórico

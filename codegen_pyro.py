@@ -131,10 +131,20 @@ class _Func:
         self.index = 0
 
 
+_FOLD_BIN = frozenset({
+    OP_ADD, OP_SUB, OP_MUL, OP_DIV, OP_BAND, OP_BOR, OP_BXOR, OP_SHL, OP_SHR,
+    OP_EQ, OP_NE, OP_LT, OP_GT, OP_LE, OP_GE,
+})
+_PUSH_PURE = frozenset({OP_CONST, OP_TRUE, OP_FALSE, OP_NULL, OP_LOAD})
+_I64_MIN, _I64_MAX = -(1 << 63), (1 << 63) - 1
+
+
 class CodeGenPyro:
-    def __init__(self, safe: bool = True, encode: bool = True):
+    def __init__(self, safe: bool = True, encode: bool = True,
+                 optimize: bool = True):
         self.safe = safe
         self.encode = encode
+        self.optimize = optimize
         self._consts: List = []            # [(tag, value)]
         self._const_idx: Dict = {}
         self._funcs: List[_Func] = []
@@ -611,9 +621,162 @@ class CodeGenPyro:
             self._expr(a)
         self._emit(OP_CALL, (fi, len(n.args)))
 
+    # ── otimizador de bytecode ──────────────────────────────
+    #  Peephole sobre a lista (op, arg) de cada função. Como os
+    #  saltos referenciam LABELS (resolvidos só em _assemble),
+    #  remover/dobrar instruções é seguro — os rótulos ficam
+    #  intactos e reancoram nos offsets certos.
+
+    def _optimize_all(self):
+        for f in self._funcs:
+            code = f.code
+            for _ in range(8):                 # itera até estabilizar
+                code, c1 = self._fold_pass(code)
+                code, c2 = self._dce_pass(code)
+                code, c3 = self._peephole_pass(code)
+                if not (c1 or c2 or c3):
+                    break
+            f.code = code
+        self._prune_consts()
+
+    def _prune_consts(self):
+        # remove do pool as constantes que ninguém referencia mais
+        # (ex.: operandos intermediários que o folding tornou mortos)
+        used = set()
+        for f in self._funcs:
+            for (op, arg) in f.code:
+                if op == OP_CONST:
+                    used.add(arg)
+        remap, new_consts = {}, []
+        for old, c in enumerate(self._consts):
+            if old in used:
+                remap[old] = len(new_consts)
+                new_consts.append(c)
+        for f in self._funcs:
+            f.code = [(op, remap[arg]) if op == OP_CONST else (op, arg)
+                      for (op, arg) in f.code]
+        self._consts = new_consts
+        self._const_idx = {c: i for i, c in enumerate(new_consts)}
+
+    def _fold_pass(self, code):
+        out, i, changed = [], 0, False
+        n = len(code)
+        while i < n:
+            # unário: CONST a ; NEG|BNOT
+            if (i + 1 < n and code[i][0] == OP_CONST
+                    and code[i + 1][0] in (OP_NEG, OP_BNOT)):
+                r = self._fold_unary(code[i + 1][0], self._consts[code[i][1]])
+                if r is not None:
+                    out.append(r); i += 2; changed = True; continue
+            # binário: CONST a ; CONST b ; <op>
+            if (i + 2 < n and code[i][0] == OP_CONST and code[i + 1][0] == OP_CONST
+                    and code[i + 2][0] in _FOLD_BIN):
+                r = self._fold_binary(code[i + 2][0],
+                                      self._consts[code[i][1]],
+                                      self._consts[code[i + 1][1]])
+                if r is not None:
+                    out.append(r); i += 3; changed = True; continue
+            out.append(code[i]); i += 1
+        return out, changed
+
+    def _fold_unary(self, opc, ca):
+        t, v = ca
+        if opc == OP_NEG and t in (TAG_INT, TAG_FLT):
+            if t == TAG_INT:
+                r = -v
+                return (OP_CONST, self._const(TAG_INT, r)) if _I64_MIN <= r <= _I64_MAX else None
+            return (OP_CONST, self._const(TAG_FLT, -v))
+        if opc == OP_BNOT and t == TAG_INT:
+            return (OP_CONST, self._const(TAG_INT, ~v))
+        return None
+
+    def _fold_binary(self, opc, ca, cb):
+        ta, a = ca
+        tb, b = cb
+        numeric = ta in (TAG_INT, TAG_FLT) and tb in (TAG_INT, TAG_FLT)
+        both_int = ta == TAG_INT and tb == TAG_INT
+        both_str = ta == TAG_STR and tb == TAG_STR
+        # comparações -> bool
+        if opc in (OP_EQ, OP_NE):
+            if not (numeric or both_str):
+                return None
+            r = (a == b) if opc == OP_EQ else (a != b)
+            return (OP_TRUE if r else OP_FALSE, None)
+        if opc in (OP_LT, OP_GT, OP_LE, OP_GE):
+            if not (numeric or both_str):
+                return None
+            r = {OP_LT: a < b, OP_GT: a > b, OP_LE: a <= b, OP_GE: a >= b}[opc]
+            return (OP_TRUE if r else OP_FALSE, None)
+        # concatenação de literais string
+        if both_str and opc == OP_ADD:
+            return (OP_CONST, self._const(TAG_STR, a + b))
+        if not numeric:
+            return None
+        # aritmética / bitwise
+        if opc == OP_ADD:   r = a + b
+        elif opc == OP_SUB: r = a - b
+        elif opc == OP_MUL: r = a * b
+        elif opc == OP_DIV:
+            if both_int or b == 0:      # int/int e div-por-zero: deixa p/ runtime
+                return None
+            r = a / b
+        elif opc in (OP_BAND, OP_BOR, OP_BXOR, OP_SHL, OP_SHR):
+            if not both_int:
+                return None
+            if opc in (OP_SHL, OP_SHR) and not (0 <= b <= 63):
+                return None
+            r = {OP_BAND: a & b, OP_BOR: a | b, OP_BXOR: a ^ b,
+                 OP_SHL: a << b, OP_SHR: a >> b}[opc]
+        else:
+            return None
+        if both_int:
+            if not (_I64_MIN <= r <= _I64_MAX):   # estouraria int64: runtime resolve
+                return None
+            return (OP_CONST, self._const(TAG_INT, int(r)))
+        return (OP_CONST, self._const(TAG_FLT, float(r)))
+
+    def _dce_pass(self, code):
+        out, reachable, changed = [], True, False
+        for entry in code:
+            op = entry[0]
+            if op == -1:                    # LABEL: religa o fluxo
+                reachable = True
+                out.append(entry); continue
+            if reachable:
+                out.append(entry)
+                if op in (OP_JMP, OP_RET, OP_HALT):
+                    reachable = False
+            else:
+                changed = True              # instrução morta, descartada
+        return out, changed
+
+    def _peephole_pass(self, code):
+        out, i, changed = [], 0, False
+        n = len(code)
+        while i < n:
+            op = code[i][0]
+            # push puro seguido de POP: some com os dois
+            if (i + 1 < n and op in _PUSH_PURE and code[i + 1][0] == OP_POP):
+                i += 2; changed = True; continue
+            # JMP para o rótulo imediatamente à frente (só labels entre eles)
+            if op == OP_JMP:
+                tgt = code[i][1]
+                j = i + 1
+                hit = False
+                while j < n and code[j][0] == -1:
+                    if code[j][1] is tgt:
+                        hit = True; break
+                    j += 1
+                if hit:
+                    i += 1; changed = True; continue
+            out.append(code[i]); i += 1
+        return out, changed
+
     # ── montagem final (.pyro) ──────────────────────────────
 
     def _assemble(self) -> bytes:
+        if self.optimize:
+            self._optimize_all()
         # registra os nomes das funções no pool ANTES de serializar as consts
         for f in self._funcs:
             self._const(TAG_STR, f.name)
