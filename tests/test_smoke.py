@@ -487,8 +487,33 @@ def expect_pyro_err(src, label):
         gen_pyro(src); check(label + " (deveria falhar)", False)
     except _PErr:
         check(label, True)
-expect_pyro_err('enum E { A, B }', "pyro rejeita enum")
 expect_pyro_err('skill s { desc: "x"; }', "pyro rejeita skill")
+expect_pyro_err('import >c< >C( x )', "pyro rejeita bloco estrangeiro")
+
+# ── enum + builtins nativos (NATIVE) no backend pyro ────────
+print("[pyro-bc] enum + builtins nativos (NATIVE)")
+check("pyro enum compila", isinstance(
+      gen_pyro("enum Cor{V,A} Cor c = Cor_A; print(c == Cor_A);"), (bytes, bytearray)))
+def _pyro_dis(src):
+    import disasm_pyro
+    return disasm_pyro.disassemble(gen_pyro(src, encode=False))
+d = _pyro_dis("print(sqrt(16.0));")
+check("pyro sqrt vira NATIVE", "NATIVE 0 1" in d and "sqrt(argc=1)" in d)
+d = _pyro_dis('print(upper("a"));')
+check("pyro upper vira NATIVE 12", "NATIVE 12 1" in d)
+d = _pyro_dis('print(join(split("a,b", ","), "-"));')
+check("pyro split/join NATIVE", "split(argc=2)" in d and "join(argc=2)" in d)
+check("pyro to_int compila", isinstance(
+      gen_pyro('print(to_int("42") + 1);'), (bytes, bytearray)))
+check("pyro remove compila", isinstance(
+      gen_pyro('map<string,int> m = {"a":1}; remove(m, "a"); print(has(m,"a"));'),
+      (bytes, bytearray)))
+def _pyro_argc_err(src):
+    try:
+        gen_pyro(src); return False
+    except _PErr:
+        return True
+check("pyro NATIVE valida argc", _pyro_argc_err('print(pow(2.0));'))
 
 print("[pyro-bc] containers (arrays/maps/structs)")
 # opcodes esperados no código (usa encode=False p/ ler os bytes em claro)
@@ -559,6 +584,30 @@ check("node rejeita llm", _node_raises('string r = llm("m","p");'))
 check("node rejeita spawn/await", _node_raises("future<int> f = spawn g(1); int r = await f;"))
 check("node rejeita pyro_exec", _node_raises('string s = pyro_exec("x");'))
 
+# ── builtins de string (go / node) ──────────────────────────
+print("[strings] builtins de string em go/node")
+g = gen_go('string s = upper(trim("  a  ")); bool b = contains(s, "A"); '
+           'int i = find(s, "A"); string r = replace(s, "A", "B"); '
+           'string sub = substr(s, 0, 1); string[] p = split("a,b", ","); '
+           'string j = join(p, "-");')
+check("go strings.ToUpper/TrimSpace", "strings.ToUpper" in g and "strings.TrimSpace" in g)
+check("go contains/find/replace", "strings.Contains" in g and "strings.Index" in g
+      and "strings.ReplaceAll" in g)
+check("go substr helper", "func cryoSubstr(" in g)
+check("go split/join", "strings.Split" in g and "strings.Join" in g)
+check("go to_int(string) -> parse", "cryoParseInt(" in gen_go('int n = to_int("42");'))
+check("go to_number(string) -> parse", "cryoParseNum(" in gen_go('number n = to_number("1.5");'))
+check("go to_int(number) segue cast", "int64(" in gen_go('number f=1.9; int n = to_int(f);'))
+nj = gen_node('string s = upper("a"); bool b = contains(s, "A"); '
+              'string[] p = split("a,b", ","); string j = join(p, "-"); '
+              'string sub = substr(s, 0, 1);')
+check("node toUpperCase/includes", "toUpperCase()" in nj and ".includes(" in nj)
+check("node split/join/substr", ".split(" in nj and ".join(" in nj and "cryoSubstr(" in nj)
+try:
+    gen_c('string s = upper("a");'); check("c rejeita upper()", False)
+except Exception:
+    check("c rejeita upper()", True)
+
 # ── blocos estrangeiros verificados + libraries ─────────────
 print("[foreign] verificacao de blocos estrangeiros + libraries")
 from foreign import verify as _verify, ForeignError as _ForeignError, \
@@ -607,13 +656,15 @@ def _sel(src):
 check("auto núcleo puro -> pyro", _sel("int s=0; for(int i=0;i<3;i++){s+=i;} print(s);") == 'pyro')
 check("auto arrays/maps/struct -> pyro",
       _sel('struct P{int x;} int[] a=[1]; map<string,int> m = {"k":1}; print(len(a));') == 'pyro')
-check("auto enum -> go", _sel("enum E{A,B} E e = E_A;") == 'go')
+check("auto enum -> pyro (agora suportado)", _sel("enum E{A,B} E e = E_A;") == 'pyro')
 check("auto optional/json -> go",
       _sel('number? x = null; string j = json_encode(x);') == 'go')
 check("auto llm -> go", _sel('string r = agent("m","p");') == 'go')
 check("auto machine (pyro_exec) -> go", _sel('string s = pyro_exec("x");') == 'go')
-check("auto to_string (convfn) -> go (pyro nao suporta)",
-      _sel("int n=5; string s = to_string(n);") == 'go')
+check("auto to_string/strings -> pyro (agora suportado)",
+      _sel('int n=5; string s = upper(to_string(n));') == 'pyro')
+check("auto try/catch -> go (pyro nao suporta)",
+      _sel('try { print(1); } catch (string e) { print(e); }') == 'go')
 check("auto bloco Go -> go", _sel('import >go< >Go( fmt.Println(1) )') == 'go')
 check("auto bloco Node -> node", _sel('import >node< >Node( console.log(1); )') == 'node')
 check("auto bloco C -> c", _sel('import >c< >C( printf("x"); )') == 'c')
@@ -624,7 +675,10 @@ from backends import missing_capabilities as _miss
 def _mt(src, b):
     return _miss(ast_of(src), b)
 check("miss: map em c -> {map}", 'map' in _mt('map<string,int> m = {"a":1};', 'c')[0])
-check("miss: enum em pyro -> {enum}", 'enum' in _mt('enum E{A} E e = E_A;', 'pyro')[0])
+check("miss: try/catch em pyro -> {trycatch}",
+      'trycatch' in _mt('try { print(1); } catch (string e) { print(e); }', 'pyro')[0])
+check("miss: enum em pyro agora coberto",
+      _mt('enum E{A} E e = E_A;', 'pyro') == (set(), set()))
 check("miss: bloco C em go -> {c}", 'c' in _mt('import >c< >C( x )', 'go')[1])
 check("miss: go cobre map (sem faltas)",
       _mt('map<string,int> m = {"a":1};', 'go') == (set(), set()))

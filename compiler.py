@@ -144,6 +144,7 @@ def compile_file(input_path: str,
                  show_tokens: bool = False,
                  show_ast: bool = False,
                  audit: bool = False,
+                 audit_only: bool = False,
                  emit_only: bool = False,
                  dis: bool = False,
                  run: bool = False) -> str:
@@ -171,7 +172,7 @@ def compile_file(input_path: str,
         print()
 
     # ── auditoria de seguranca ──
-    if audit:
+    if audit or audit_only:
         audit_ast_obj = parse_ast(source)
         findings = audit_ast(audit_ast_obj)
         print(format_audit(findings, input_path))
@@ -192,8 +193,9 @@ def compile_file(input_path: str,
                       f"{' e '.join(partes)}.")
                 print(f"            Use --backend auto (escolheria '{chosen}') "
                       f"ou --backend {chosen}.")
-        # a auditoria é um passo próprio: relata e encerra (não compila).
-        return output_path
+        # --audit-only: relata e encerra; --audit segue para a compilação.
+        if audit_only:
+            return output_path
 
     # ── seleção automática de backend ──
     auto = (backend == 'auto')
@@ -321,7 +323,9 @@ def main() -> None:
     ap.add_argument('--unsafe', action='store_true',
                     help='Desliga a instrumentação de segurança')
     ap.add_argument('--audit', action='store_true',
-                    help='Executa auditoria de segurança estática e sai')
+                    help='Executa a auditoria de segurança estática e segue compilando')
+    ap.add_argument('--audit-only', action='store_true',
+                    help='Executa a auditoria, imprime o relatório e sai (não compila)')
     ap.add_argument('--emit-only', action='store_true',
                     help='Apenas gera o fonte (.pyro/.s); não invoca o toolchain')
     ap.add_argument('--dis', action='store_true',
@@ -347,6 +351,7 @@ def main() -> None:
             show_tokens = args.tokens,
             show_ast    = args.ast,
             audit       = args.audit,
+            audit_only  = args.audit_only,
             emit_only   = args.emit_only,
             dis         = args.dis,
             run         = args.run,

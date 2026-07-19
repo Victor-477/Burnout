@@ -111,6 +111,9 @@ class _Types:
                  'abs': 'number', 'floor': 'number', 'ceil': 'number',
                  'round': 'number', 'min': 'number', 'max': 'number',
                  'json_encode': 'string', 'has': 'bool',
+                 'upper': 'string', 'lower': 'string', 'trim': 'string',
+                 'contains': 'bool', 'find': 'int', 'replace': 'string',
+                 'substr': 'string', 'split': 'string[]', 'join': 'string',
                  'keys': 'string[]'}.get(node.callee)
             return b or self.fns.get(node.callee, 'unknown')
         if isinstance(node, StructInit):
@@ -254,6 +257,15 @@ class CodeGenNode:
                   "  if (i < 0 || i >= a.length)",
                   "    throw new Error('[Cryo Seguranca] IndexError: índice ' + i + ' fora dos limites (len=' + a.length + ')');",
                   "  a[i] = v;",
+                  "}", ""]
+        if 'substr' in self._helpers:
+            H += ["function cryoSubstr(s, i, n) {",
+                  "  s = String(s);",
+                  "  if (i < 0) i = 0;",
+                  "  if (i > s.length) i = s.length;",
+                  "  let end = i + n;",
+                  "  if (n < 0 || end > s.length) end = s.length;",
+                  "  return s.slice(i, end);",
                   "}", ""]
         if 'mod' in self._helpers:
             H += ["function cryoMod(a, b) {",
@@ -544,6 +556,25 @@ class CodeGenNode:
                       'max': 'max', 'floor': 'floor', 'ceil': 'ceil',
                       'round': 'round'}[c]
             return f"Math.{jsname}({args})"
+        if c == 'upper':
+            return f"String({A(0)}).toUpperCase()"
+        if c == 'lower':
+            return f"String({A(0)}).toLowerCase()"
+        if c == 'trim':
+            return f"String({A(0)}).trim()"
+        if c == 'contains':
+            return f"String({A(0)}).includes({A(1)})"
+        if c == 'find':
+            return f"String({A(0)}).indexOf({A(1)})"
+        if c == 'replace':
+            return f"String({A(0)}).split({A(1)}).join({A(2)})"
+        if c == 'substr':
+            self._helpers.add('substr')
+            return f"cryoSubstr({A(0)}, {A(1)}, {A(2)})"
+        if c == 'split':
+            return f"String({A(0)}).split({A(1)})"
+        if c == 'join':
+            return f"({A(0)}).join({A(1)})"
         if c == 'has':
             return f"Object.prototype.hasOwnProperty.call({A(0)}, {A(1)})"
         if c == 'keys':

@@ -171,6 +171,9 @@ class TypeEnv:
                        'pyro_args': 'string[]', 'pyro_time': 'int',
                        'pyro_read': 'string', 'pyro_write_file': 'bool',
                        'pyro_open': 'bool',
+                       'upper': 'string', 'lower': 'string', 'trim': 'string',
+                       'contains': 'bool', 'find': 'int', 'replace': 'string',
+                       'substr': 'string', 'split': 'string[]', 'join': 'string',
                        'http_get': 'string',
                        'http_post': 'string', 'schema_of': 'string',
                        'llm': 'string', 'tools': 'string[]',
@@ -390,6 +393,30 @@ class CodeGenGo:
                   "\tks := make([]K, 0, len(m))",
                   "\tfor k := range m {", "\t\tks = append(ks, k)", "\t}",
                   "\treturn ks", "}", ""]
+        if 'parseint' in self._helpers:
+            self._imports.update(('strconv', 'strings'))
+            H += ["func cryoParseInt(s string) int64 {",
+                  "\tn, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)",
+                  "\tif err != nil {",
+                  "\t\tpanic(\"[Cryo Seguranca] to_int: '\" + s + \"' não é um inteiro válido\")",
+                  "\t}",
+                  "\treturn n", "}", ""]
+        if 'parsenum' in self._helpers:
+            self._imports.update(('strconv', 'strings'))
+            H += ["func cryoParseNum(s string) float64 {",
+                  "\tf, err := strconv.ParseFloat(strings.TrimSpace(s), 64)",
+                  "\tif err != nil {",
+                  "\t\tpanic(\"[Cryo Seguranca] to_number: '\" + s + \"' não é um número válido\")",
+                  "\t}",
+                  "\treturn f", "}", ""]
+        if 'substr' in self._helpers:
+            H += ["// cryoSubstr: recorte de string com limites seguros.",
+                  "func cryoSubstr(s string, i, n int64) string {",
+                  "\tif i < 0 {", "\t\ti = 0", "\t}",
+                  "\tif i > int64(len(s)) {", "\t\ti = int64(len(s))", "\t}",
+                  "\tend := i + n",
+                  "\tif n < 0 || end > int64(len(s)) {", "\t\tend = int64(len(s))", "\t}",
+                  "\treturn s[i:end]", "}", ""]
         if 'input' in self._helpers:
             self._imports.update(('bufio', 'os', 'fmt', 'strings'))
             H += ["var cryoStdin = bufio.NewReader(os.Stdin)",
@@ -1178,8 +1205,15 @@ class CodeGenGo:
         if c == 'to_string':
             self._helpers.add('str'); return f"cryoStr({self._expr(a[0])})"
         if c == 'to_int':
+            # string -> parse com strconv; numérico -> cast direto
+            if self.te.infer(a[0]) == 'string':
+                self._helpers.add('parseint')
+                return f"cryoParseInt({self._expr(a[0])})"
             return f"int64({self._expr(a[0])})"
         if c == 'to_number':
+            if self.te.infer(a[0]) == 'string':
+                self._helpers.add('parsenum')
+                return f"cryoParseNum({self._expr(a[0])})"
             return f"float64({self._expr(a[0])})"
         if c == 'len':
             return f"int64(len({self._expr(a[0])}))"
@@ -1206,6 +1240,36 @@ class CodeGenGo:
         if c == 'keys' and len(a) == 1:
             self._helpers.add('keys')
             return f"cryoKeys({self._expr(a[0])})"
+        # ── strings ──
+        if c == 'upper' and len(a) == 1:
+            self._imports.add('strings')
+            return f"strings.ToUpper({self._expr(a[0])})"
+        if c == 'lower' and len(a) == 1:
+            self._imports.add('strings')
+            return f"strings.ToLower({self._expr(a[0])})"
+        if c == 'trim' and len(a) == 1:
+            self._imports.add('strings')
+            return f"strings.TrimSpace({self._expr(a[0])})"
+        if c == 'contains' and len(a) == 2:
+            self._imports.add('strings')
+            return f"strings.Contains({self._expr(a[0])}, {self._expr(a[1])})"
+        if c == 'find' and len(a) == 2:
+            self._imports.add('strings')
+            return f"int64(strings.Index({self._expr(a[0])}, {self._expr(a[1])}))"
+        if c == 'replace' and len(a) == 3:
+            self._imports.add('strings')
+            return (f"strings.ReplaceAll({self._expr(a[0])}, "
+                    f"{self._expr(a[1])}, {self._expr(a[2])})")
+        if c == 'substr' and len(a) == 3:
+            self._helpers.add('substr')
+            return (f"cryoSubstr({self._expr(a[0])}, int64({self._expr(a[1])}), "
+                    f"int64({self._expr(a[2])}))")
+        if c == 'split' and len(a) == 2:
+            self._imports.add('strings')
+            return f"strings.Split({self._expr(a[0])}, {self._expr(a[1])})"
+        if c == 'join' and len(a) == 2:
+            self._imports.add('strings')
+            return f"strings.Join({self._expr(a[0])}, {self._expr(a[1])})"
         # ── Pyro: introspecção de skills nativas (sem arquivos .md) ──
         if c == 'skills':
             self._use_skills = True

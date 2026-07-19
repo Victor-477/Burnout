@@ -70,12 +70,27 @@ OP_LEN    = 0x64  # pop cont -> empilha tamanho (string/array/map)
 OP_APPEND = 0x65  # pop val, pop arr -> arr.push(val); empilha novo tamanho
 OP_HAS    = 0x66  # pop key, pop map -> empilha bool (existe)
 OP_KEYS   = 0x67  # pop map -> empilha array de chaves
+OP_NATIVE = 0x70  # u8 id, u8 argc -> chama builtin nativo da VM (tabela NATIVES)
 
 # tamanho do operando por opcode (bytes após o opcode)
 _OPERAND = {
     OP_CONST: 2, OP_LOAD: 2, OP_STORE: 2,
     OP_JMP: 2, OP_JMPF: 2, OP_JMPT: 2,
     OP_CALL: 3, OP_NEWARR: 2, OP_NEWMAP: 2,
+    OP_NATIVE: 2,
+}
+
+# builtins nativos da VM: nome -> (id, argc). A VM espelha esta tabela.
+NATIVES = {
+    'sqrt':      (0, 1),  'pow':      (1, 2),  'abs':    (2, 1),
+    'min':       (3, 2),  'max':      (4, 2),  'floor':  (5, 1),
+    'ceil':      (6, 1),  'round':    (7, 1),
+    'to_string': (8, 1),  'to_int':   (9, 1),  'to_number': (10, 1),
+    'remove':    (11, 2),
+    # ── strings ──
+    'upper':     (12, 1), 'lower':    (13, 1), 'trim':   (14, 1),
+    'contains':  (15, 2), 'find':     (16, 2), 'replace': (17, 3),
+    'substr':    (18, 3), 'split':    (19, 2), 'join':   (20, 2),
 }
 
 def _isize(op: int) -> int:
@@ -118,6 +133,7 @@ class CodeGenPyro:
         self._nlabels = 0
         self._loop_stack: List = []        # (break_label, continue_label)
         self._structs: Dict[str, List[str]] = {}
+        self._enum_consts: Dict[str, int] = {}   # 'Nivel_ALTO' -> 2
         self._ntmp = 0
 
     # ── constantes ──────────────────────────────────────────
@@ -166,12 +182,16 @@ class CodeGenPyro:
             elif isinstance(n, StructDecl):
                 # struct = map de chaves string; registramos os campos
                 self._structs[n.name] = [f.name for f in n.fields]
+            elif isinstance(n, EnumDecl):
+                # enum = constantes inteiras em tempo de compilação
+                for i, m in enumerate(n.members):
+                    self._enum_consts[f"{n.name}_{m}"] = i
             elif isinstance(n, (Import, Library)):
                 pass
-            elif isinstance(n, (EnumDecl, SkillDecl, ForeignBlock)):
+            elif isinstance(n, (SkillDecl, ForeignBlock)):
                 raise CodeGenPyroError(
                     f"'{type(n).__name__}' ainda não é suportado no backend pyro "
-                    f"(bytecode: escalares, arrays, maps, structs, funções e fluxo).")
+                    f"(bytecode: escalares, arrays, maps, structs, enums, funções e fluxo).")
             else:
                 top.append(n)
 
@@ -397,6 +417,9 @@ class CodeGenPyro:
         if isinstance(n, Literal):
             self._literal(n); return
         if isinstance(n, Identifier):
+            if n.name in self._enum_consts:      # membro de enum -> const int
+                self._emit(OP_CONST, self._const(TAG_INT, self._enum_consts[n.name]))
+                return
             self._emit(OP_LOAD, self._get_slot(n.name)); return
         if isinstance(n, UnaryExpr):
             self._expr(n.operand)
@@ -508,12 +531,23 @@ class CodeGenPyro:
             self._expr(n.args[0]); self._expr(n.args[1]); self._emit(OP_HAS); return
         if n.callee == 'keys' and len(n.args) == 1:
             self._expr(n.args[0]); self._emit(OP_KEYS); return
+        # builtins nativos da VM (matemática, conversões, strings, remove)
+        nat = NATIVES.get(n.callee)
+        if nat is not None:
+            nid, argc = nat
+            if len(n.args) != argc:
+                raise CodeGenPyroError(
+                    f"'{n.callee}' espera {argc} argumento(s), recebeu {len(n.args)}")
+            for a in n.args:
+                self._expr(a)
+            self._emit(OP_NATIVE, (nid, argc))
+            return
         # função do usuário
         fi = self._fnindex.get(n.callee)
         if fi is None:
             raise CodeGenPyroError(
                 f"função '{n.callee}' desconhecida no backend pyro "
-                f"(builtins: print; structs/arrays/etc. ainda não).")
+                f"(builtins: print, len, has, keys, {', '.join(sorted(NATIVES))}).")
         for a in n.args:
             self._expr(a)
         self._emit(OP_CALL, (fi, len(n.args)))
@@ -549,6 +583,10 @@ class CodeGenPyro:
             elif op == OP_CALL:
                 fi, argc = arg
                 code += struct.pack('<H', fi)
+                code.append(argc & 0xFF)
+            elif op == OP_NATIVE:
+                nid, argc = arg
+                code.append(nid & 0xFF)
                 code.append(argc & 0xFF)
         assert len(code) == code_len
 

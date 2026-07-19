@@ -684,6 +684,12 @@ class CodeGenC:
             raise CodeGenError(
                 f"'{callee}()' só existe no backend Go (JSON/concorrência/HTTP/LLM); "
                 f"use --backend go.")
+        # builtins de string: cobertos por go/node/pyro, não pelo C
+        if callee in ('upper', 'lower', 'trim', 'contains', 'find',
+                      'replace', 'substr', 'split', 'join', 'remove'):
+            raise CodeGenError(
+                f"'{callee}()' não é suportado no backend C; "
+                f"use --backend go, node ou pyro.")
 
         # ── built-ins ──
         if callee == 'print':

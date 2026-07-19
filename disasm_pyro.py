@@ -128,6 +128,10 @@ def disassemble(data: bytes) -> str:
             argc = operand[2]
             fname = funcs[fi]['name'] if fi < len(funcs) else '?'
             text += f" {fi} {argc}  ; {fname}(argc={argc})"
+        elif op == bc.OP_NATIVE:
+            nid, argc = operand[0], operand[1]
+            nname = next((k for k, v in bc.NATIVES.items() if v[0] == nid), '?')
+            text += f" {nid} {argc}  ; {nname}(argc={argc})"
         out.append(text)
         i += size
     return '\n'.join(out) + '\n'
