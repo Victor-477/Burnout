@@ -154,6 +154,7 @@ def compile_file(input_path: str,
                  show_ast: bool = False,
                  audit: bool = False,
                  audit_only: bool = False,
+                 strict: bool = False,
                  optimize: bool = True,
                  emit_only: bool = False,
                  dis: bool = False,
@@ -187,7 +188,8 @@ def compile_file(input_path: str,
         audit_ast_obj = load_ast(source, base_dir)
         findings = audit_ast(audit_ast_obj)
         print(format_audit(findings, input_path))
-        if any(f.level == 'ALTO' for f in findings):
+        has_high = any(f.level == 'ALTO' for f in findings)
+        if has_high:
             print("[Auditoria] Achados de nível ALTO encontrados.", file=sys.stderr)
         # sugestão de backend: se o backend escolhido não cobre algum
         # recurso usado, aponta --backend auto (evita erro/omissão silenciosa).
@@ -204,6 +206,12 @@ def compile_file(input_path: str,
                       f"{' e '.join(partes)}.")
                 print(f"            Use --backend auto (escolheria '{chosen}') "
                       f"ou --backend {chosen}.")
+        # --strict: falha (código de saída 2) se houver achados ALTO —
+        # útil como gate de CI, tanto com --audit quanto --audit-only.
+        if strict and has_high:
+            print("[Auditoria] --strict: abortando por achados de nível ALTO.",
+                  file=sys.stderr)
+            sys.exit(2)
         # --audit-only: relata e encerra; --audit segue para a compilação.
         if audit_only:
             return output_path
@@ -337,6 +345,8 @@ def main() -> None:
                     help='Executa a auditoria de segurança estática e segue compilando')
     ap.add_argument('--audit-only', action='store_true',
                     help='Executa a auditoria, imprime o relatório e sai (não compila)')
+    ap.add_argument('--strict', action='store_true',
+                    help='Com --audit/--audit-only: sai com código 2 se houver achados ALTO (gate de CI)')
     ap.add_argument('--emit-only', action='store_true',
                     help='Apenas gera o fonte (.pyro/.s); não invoca o toolchain')
     ap.add_argument('--no-opt', action='store_true',
@@ -365,6 +375,7 @@ def main() -> None:
             show_ast    = args.ast,
             audit       = args.audit,
             audit_only  = args.audit_only,
+            strict      = args.strict,
             optimize    = not args.no_opt,
             emit_only   = args.emit_only,
             dis         = args.dis,

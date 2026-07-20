@@ -960,6 +960,59 @@ f = audit_ast(ast_of('string r = agent("m", "p");'))
 check("llm-egress BAIXO",
       any(x.rule == 'llm-egress' for x in f))
 
+# ── analise de taint (fluxo de dados nao confiaveis) ─────────
+print("[audit] taint")
+
+def _rules(src):
+    return {(x.level, x.rule) for x in audit_ast(ast_of(src))}
+
+f = _rules('string c = input("cmd"); string o = pyro_exec(c);')
+check("tainted-exec ALTO (input -> pyro_exec)",
+      ('ALTO', 'tainted-exec') in f)
+
+f = _rules('string o = pyro_exec(input("x"));')
+check("tainted-exec ALTO (fonte direta no sink)",
+      ('ALTO', 'tainted-exec') in f)
+
+f = _rules('string o = pyro_exec("ls -la");')
+check("comando literal NAO gera tainted-exec",
+      ('ALTO', 'tainted-exec') not in f)
+
+f = _rules('string a = input("a"); string b = a; string o = pyro_exec(b);')
+check("taint propaga por atribuicao (a -> b -> sink)",
+      ('ALTO', 'tainted-exec') in f)
+
+f = _rules('string u = input("u"); string b = http_get(u);')
+check("tainted-ssrf ALTO (input -> http_get)",
+      ('ALTO', 'tainted-ssrf') in f)
+
+f = _rules('string b = http_get("http://x");')
+check("URL literal NAO gera tainted-ssrf",
+      ('ALTO', 'tainted-ssrf') not in f)
+
+f = _rules('string p = pyro_env("P"); bool ok = pyro_write_file(p, "d");')
+check("tainted-path ALTO (pyro_env -> pyro_write_file)",
+      ('ALTO', 'tainted-path') in f)
+
+f = _rules('string t = input("t"); bool ok = pyro_open(t);')
+check("tainted-open ALTO (input -> pyro_open)",
+      ('ALTO', 'tainted-open') in f)
+
+# ── segredos embutidos ───────────────────────────────────────
+print("[audit] segredos")
+
+f = _rules('const string K = "sk-abcdefghij0123456789";')
+check("hardcoded-secret ALTO (formato de chave)",
+      ('ALTO', 'hardcoded-secret') in f)
+
+f = _rules('string api_key = "hunter2hunter2";')
+check("hardcoded-secret MEDIO (nome sensivel)",
+      ('MEDIO', 'hardcoded-secret') in f)
+
+f = _rules('string nome = "Ana";')
+check("string comum NAO gera hardcoded-secret",
+      not any(r == 'hardcoded-secret' for _, r in f))
+
 # ── resultado ───────────────────────────────────────────────
 print(f"\n{_passed} passaram, {_failed} falharam")
 sys.exit(1 if _failed else 0)
