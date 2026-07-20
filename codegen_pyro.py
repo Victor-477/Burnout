@@ -7,8 +7,10 @@
 #
 #  Formato do arquivo .pyro (little-endian):
 #    magic    4  "PYRO"
-#    version  1  0x01
+#    version  1  0x02
 #    flags    1  bit0 = code section codificada (XOR rolling)
+#                bit1 = seção de depuração presente (pc->linha)
+#                bit2 = sandbox (VM recusa natives de rede/máquina)
 #    nconsts  u16   depois: [ tag(1) + payload ] * nconsts
 #       tag 1 int64  (8)   | tag 2 float64 (8)
 #       tag 3 string (u16 len + bytes utf8) | tag 4 bool (1)
@@ -119,6 +121,7 @@ _MAGIC = b"PYRO"
 _VERSION = 2         # v2: saltos i32 + seção opcional de depuração (pc->linha)
 _FLAG_ENCODED = 0x01
 _FLAG_DEBUG   = 0x02
+_FLAG_SANDBOX = 0x04
 
 
 class _Label:
@@ -146,10 +149,11 @@ _I64_MIN, _I64_MAX = -(1 << 63), (1 << 63) - 1
 
 class CodeGenPyro:
     def __init__(self, safe: bool = True, encode: bool = True,
-                 optimize: bool = True):
+                 optimize: bool = True, sandbox: bool = False):
         self.safe = safe
         self.encode = encode
         self.optimize = optimize
+        self.sandbox = sandbox
         self._consts: List = []            # [(tag, value)]
         self._const_idx: Dict = {}
         self._funcs: List[_Func] = []
@@ -842,6 +846,8 @@ class CodeGenPyro:
             code = self._xor_encode(code)
         if debug:
             flags |= _FLAG_DEBUG
+        if self.sandbox:
+            flags |= _FLAG_SANDBOX
 
         out = bytearray()
         out += _MAGIC

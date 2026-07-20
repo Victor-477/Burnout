@@ -40,8 +40,9 @@ def gen_asm(src, safe=True, abi='sysv'):
 def gen_go(src, safe=True):
     return CodeGenGo(safe=safe).generate(Parser(Lexer(src).tokenize()).parse())
 
-def gen_pyro(src, safe=True, encode=True):
-    return CodeGenPyro(safe=safe, encode=encode).generate(Parser(Lexer(src).tokenize()).parse())
+def gen_pyro(src, safe=True, encode=True, sandbox=False):
+    return CodeGenPyro(safe=safe, encode=encode,
+                       sandbox=sandbox).generate(Parser(Lexer(src).tokenize()).parse())
 
 def gen_node(src, safe=True):
     return CodeGenNode(safe=safe).generate(Parser(Lexer(src).tokenize()).parse())
@@ -475,6 +476,15 @@ check("pyro flag codificado (XOR)", (bc[5] & 0x01) == 1)
 check("pyro flag debug presente", (bc[5] & 0x02) == 2)
 check("pyro const pool tem nomes de função", b'main' in bc and b'f' in bc)
 check("pyro sem encode = flag 0", (gen_pyro('print(1);', encode=False)[5] & 0x01) == 0)
+
+print("[pyro-bc] sandbox (--sandbox)")
+import disasm_pyro
+_bc_sbx = gen_pyro('string b = http_get("http://x");', sandbox=True)
+check("pyro --sandbox grava flag bit2", (_bc_sbx[5] & 0x04) == 0x04)
+check("pyro sem --sandbox não grava bit2",
+      (gen_pyro('string b = http_get("http://x");')[5] & 0x04) == 0)
+_dis_sbx = disasm_pyro.disassemble(gen_pyro('print(1);', encode=False, sandbox=True))
+check("disasm mostra 'sandbox' nas flags", "sandbox" in _dis_sbx)
 
 print("[pyro-bc] cobertura e erros")
 check("pyro if/while/for geram", isinstance(

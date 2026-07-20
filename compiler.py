@@ -64,7 +64,7 @@ def default_abi() -> str:
 
 def compile_source(source: str, backend: str, safe: bool,
                    abi: str = 'sysv', base_dir: str | None = None,
-                   optimize: bool = True):
+                   optimize: bool = True, sandbox: bool = False):
     """Retorna str (go/c/asm) ou bytes (pyro = bytecode)."""
     ast = load_ast(source, base_dir)
     semantic_check(ast)   # variável/função/aridade/break — erros cedo, com linha
@@ -76,7 +76,8 @@ def compile_source(source: str, backend: str, safe: bool,
     if backend == 'node':
         return CodeGenNode(safe=safe).generate(ast)
     if backend == 'pyro':
-        return CodeGenPyro(safe=safe, optimize=optimize).generate(ast)   # bytes
+        return CodeGenPyro(safe=safe, optimize=optimize,
+                           sandbox=sandbox).generate(ast)   # bytes
     return CodeGenC(safe=safe).generate(ast)
 
 
@@ -155,6 +156,7 @@ def compile_file(input_path: str,
                  audit: bool = False,
                  audit_only: bool = False,
                  strict: bool = False,
+                 sandbox: bool = False,
                  optimize: bool = True,
                  emit_only: bool = False,
                  dis: bool = False,
@@ -222,9 +224,15 @@ def compile_file(input_path: str,
         backend, motivo = select_backend(load_ast(source, base_dir))
         print(f"→ backend automático: {backend}  ({motivo})")
 
+    # sandbox só é aplicável ao alvo pyro (política enforçada pela VM Pyro).
+    if sandbox and backend != 'pyro':
+        print(f"⚠  --sandbox só se aplica ao backend pyro; ignorado para "
+              f"'{backend}'.", file=sys.stderr)
+
     # ── geracao de codigo ──
     try:
-        code = compile_source(source, backend, safe, abi, base_dir=base_dir, optimize=optimize)
+        code = compile_source(source, backend, safe, abi, base_dir=base_dir,
+                              optimize=optimize, sandbox=sandbox)
     except (CodeGenError, CodeGenGoError, CodeGenAsmError,
             CodeGenPyroError, CodeGenNodeError) as e:
         # rede de segurança: se o auto escolheu um backend que falhou,
@@ -233,7 +241,8 @@ def compile_file(input_path: str,
             print(f"⚠  backend {backend} não suportou o programa ({e}); "
                   f"recompilando com go", file=sys.stderr)
             backend = 'go'
-            code = compile_source(source, backend, safe, abi, base_dir=base_dir, optimize=optimize)
+            code = compile_source(source, backend, safe, abi, base_dir=base_dir,
+                                  optimize=optimize, sandbox=sandbox)
         else:
             raise
 
@@ -347,6 +356,8 @@ def main() -> None:
                     help='Executa a auditoria, imprime o relatório e sai (não compila)')
     ap.add_argument('--strict', action='store_true',
                     help='Com --audit/--audit-only: sai com código 2 se houver achados ALTO (gate de CI)')
+    ap.add_argument('--sandbox', action='store_true',
+                    help='Backend pyro: grava política de sandbox no .pyro (a VM recusa natives de rede/máquina)')
     ap.add_argument('--emit-only', action='store_true',
                     help='Apenas gera o fonte (.pyro/.s); não invoca o toolchain')
     ap.add_argument('--no-opt', action='store_true',
@@ -376,6 +387,7 @@ def main() -> None:
             audit       = args.audit,
             audit_only  = args.audit_only,
             strict      = args.strict,
+            sandbox     = args.sandbox,
             optimize    = not args.no_opt,
             emit_only   = args.emit_only,
             dis         = args.dis,

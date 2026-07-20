@@ -95,8 +95,12 @@ def disassemble(data: bytes) -> str:
     entry_at = {f['entry']: f['name'] for f in funcs}
 
     out = []
-    out.append(f"; Pyro bytecode  (versão {p['version']}, "
-               f"{'codificado' if p['flags'] & 1 else 'texto-claro'})")
+    _fl = [('codificado' if p['flags'] & 1 else 'texto-claro')]
+    if p['flags'] & 0x02:
+        _fl.append('debug')
+    if p['flags'] & 0x04:
+        _fl.append('sandbox')
+    out.append(f"; Pyro bytecode  (versão {p['version']}, {', '.join(_fl)})")
     out.append(f"; entry = {funcs[p['entryfn']]['name']}  |  "
                f"{len(consts)} consts, {len(funcs)} funcs, {len(code)} bytes de código")
     out.append("")
