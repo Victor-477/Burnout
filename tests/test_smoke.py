@@ -37,8 +37,8 @@ def gen_c(src, safe=True):
 def gen_asm(src, safe=True, abi='sysv'):
     return CodeGenAsm(safe=safe, abi=abi).generate(Parser(Lexer(src).tokenize()).parse())
 
-def gen_go(src, safe=True):
-    return CodeGenGo(safe=safe).generate(Parser(Lexer(src).tokenize()).parse())
+def gen_go(src, safe=True, sandbox=False):
+    return CodeGenGo(safe=safe, sandbox=sandbox).generate(Parser(Lexer(src).tokenize()).parse())
 
 def gen_pyro(src, safe=True, encode=True, sandbox=False):
     return CodeGenPyro(safe=safe, encode=encode,
@@ -485,6 +485,23 @@ check("pyro sem --sandbox não grava bit2",
       (gen_pyro('string b = http_get("http://x");')[5] & 0x04) == 0)
 _dis_sbx = disasm_pyro.disassemble(gen_pyro('print(1);', encode=False, sandbox=True))
 check("disasm mostra 'sandbox' nas flags", "sandbox" in _dis_sbx)
+
+print("[go] sandbox (--sandbox)")
+_go_sbx = gen_go('string o = pyro_exec("ls");', sandbox=True)
+check("go --sandbox: var cryoSandbox = true", "var cryoSandbox = true" in _go_sbx)
+check("go --sandbox: guarda no cryoExec",
+      'cryoSandboxGuard("pyro_exec")' in _go_sbx)
+_go_plain = gen_go('string b = http_get("http://x");')
+check("go sem --sandbox: baked false + override por env",
+      "var cryoSandbox = false" in _go_plain and
+      'os.Getenv("PYRO_SANDBOX")' in _go_plain)
+check("go: http_get recebe guarda de sandbox",
+      'cryoSandboxGuard("http_get")' in _go_plain)
+_go_wf = gen_go('bool ok = pyro_write_file("a.txt", "d");', sandbox=True)
+check("go: pyro_write_file guardado por sandbox",
+      'cryoSandboxGuard("pyro_write_file")' in _go_wf)
+check("go sem builtin sensível não emite sandbox",
+      "cryoSandbox" not in gen_go('int x = 1; print(x);'))
 
 print("[pyro-bc] cobertura e erros")
 check("pyro if/while/for geram", isinstance(

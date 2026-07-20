@@ -207,9 +207,10 @@ class TypeEnv:
 # ── CodeGen Go ──────────────────────────────────────────────
 
 class CodeGenGo:
-    def __init__(self, safe: bool = True):
+    def __init__(self, safe: bool = True, sandbox: bool = False):
         self.te = TypeEnv()
         self._safe = safe
+        self._sandbox = sandbox
         self._imports: Set[str] = set()
         self._helpers: Set[str] = set()
         self._enum_defs:   List[str] = []
@@ -324,6 +325,19 @@ class CodeGenGo:
 
     def _helper_defs(self) -> List[str]:
         H: List[str] = []
+        # sandbox: política de runtime que recusa natives de rede/máquina.
+        # Emitida sempre que um builtin sensível é usado, para que
+        # PYRO_SANDBOX=1 funcione mesmo sem --sandbox; o valor "baked"
+        # reflete a flag de compilação (só aperta, nunca afrouxa).
+        if 'sandbox' in self._helpers:
+            self._imports.update(('os', 'fmt'))
+            baked = 'true' if self._sandbox else 'false'
+            H += [f'var cryoSandbox = {baked} || os.Getenv("PYRO_SANDBOX") == "1"',
+                  "func cryoSandboxGuard(op string) {",
+                  "\tif cryoSandbox {",
+                  '\t\tfmt.Fprintln(os.Stderr, "[Cryo Seguranca] Sandbox: "+op+'
+                  ' " bloqueado por política de sandbox")',
+                  "\t\tos.Exit(1)", "\t}", "}", ""]
         if 'str' in self._helpers:
             self._imports.add('fmt')
             H += ["func cryoStr(v any) string { return fmt.Sprint(v) }", ""]
@@ -427,6 +441,7 @@ class CodeGenGo:
         if 'httpget' in self._helpers:
             self._imports.update(('net/http', 'io'))
             H += ["func cryoHTTPGet(url string) string {",
+                  '\tcryoSandboxGuard("http_get")',
                   "\tresp, err := http.Get(url)",
                   '\tif err != nil { return "" }',
                   "\tdefer resp.Body.Close()",
@@ -435,6 +450,7 @@ class CodeGenGo:
         if 'httppost' in self._helpers:
             self._imports.update(('net/http', 'io', 'strings'))
             H += ["func cryoHTTPPost(url, body string) string {",
+                  '\tcryoSandboxGuard("http_post")',
                   '\tresp, err := http.Post(url, "application/json", strings.NewReader(body))',
                   '\tif err != nil { return "" }',
                   "\tdefer resp.Body.Close()",
@@ -444,6 +460,7 @@ class CodeGenGo:
             self._imports.update(('os', 'net/http', 'io', 'encoding/json', 'bytes', 'fmt'))
             H += ["// cryoLLMPost: POST do payload p/ CRYO_LLM_URL com 3 retries.",
                   "func cryoLLMPost(payload map[string]any) string {",
+                  '\tcryoSandboxGuard("llm/agent")',
                   '\turl := os.Getenv("CRYO_LLM_URL")',
                   '\tif url == "" {',
                   '\t\tfmt.Fprintln(os.Stderr, "[Cryo LLM] CRYO_LLM_URL não definido; retornando vazio")',
@@ -506,6 +523,7 @@ class CodeGenGo:
             self._imports.update(('os/exec', 'runtime'))
             H += ["// cryoOpen: abre um arquivo/URL no app padrão do SO (navegador).",
                   "func cryoOpen(target string) bool {",
+                  '\tcryoSandboxGuard("pyro_open")',
                   "\tvar c *exec.Cmd",
                   "\tswitch runtime.GOOS {",
                   '\tcase "windows":',
@@ -519,6 +537,7 @@ class CodeGenGo:
         if 'exec' in self._helpers:
             self._imports.update(('os/exec', 'runtime'))
             H += ["func cryoExec(command string) string {",
+                  '\tcryoSandboxGuard("pyro_exec")',
                   "\tvar c *exec.Cmd",
                   '\tif runtime.GOOS == "windows" {',
                   '\t\tc = exec.Command("cmd", "/c", command)',
@@ -1118,7 +1137,7 @@ class CodeGenGo:
         # llm("modelo", prompt) as T  ->  structured output tipado (Fase 3)
         if isinstance(inner, CallExpr) and inner.callee == 'llm':
             self._imports.add('encoding/json')
-            self._helpers.add('llm')
+            self._helpers.update(('llm', 'sandbox'))
             model = self._expr(inner.args[0]) if inner.args else '""'
             prompt = self._expr(inner.args[1]) if len(inner.args) > 1 else '""'
             schema = self._json_schema(target)
@@ -1302,7 +1321,7 @@ class CodeGenGo:
             return "cryoJSONEncode(cryoSkillList())"
         # ── Pyro: acesso direto à máquina ──
         if c == 'pyro_exec' and len(a) == 1:
-            self._helpers.add('exec')
+            self._helpers.update(('exec', 'sandbox'))
             return f"cryoExec({self._expr(a[0])})"
         if c == 'pyro_env' and len(a) == 1:
             self._imports.add('os')
@@ -1324,26 +1343,28 @@ class CodeGenGo:
             return 'cryoInput("")'
         if c == 'pyro_write_file' and len(a) == 2:
             self._imports.add('os')
-            return (f"func() bool {{ return os.WriteFile({self._expr(a[0])}, "
+            self._helpers.add('sandbox')
+            return (f'func() bool {{ cryoSandboxGuard("pyro_write_file"); '
+                    f"return os.WriteFile({self._expr(a[0])}, "
                     f"[]byte({self._expr(a[1])}), 0644) == nil }}()")
         if c == 'pyro_open' and len(a) == 1:
-            self._helpers.add('open')
+            self._helpers.update(('open', 'sandbox'))
             return f"cryoOpen({self._expr(a[0])})"
         # ── Fase 2: concorrência / HTTP ──
         if c == 'sleep' and len(a) == 1:
             self._imports.add('time')
             return f"time.Sleep(time.Duration({self._expr(a[0])}) * time.Millisecond)"
         if c == 'http_get' and len(a) == 1:
-            self._helpers.add('httpget')
+            self._helpers.update(('httpget', 'sandbox'))
             return f"cryoHTTPGet({self._expr(a[0])})"
         if c == 'http_post' and len(a) == 2:
-            self._helpers.add('httppost')
+            self._helpers.update(('httppost', 'sandbox'))
             return f"cryoHTTPPost({self._expr(a[0])}, {self._expr(a[1])})"
         # ── Fase 3: LLM nativo ──
         if c == 'schema_of' and len(a) == 1 and isinstance(a[0], Identifier):
             return self._json_schema(a[0].name)
         if c == 'llm':
-            self._helpers.add('llm')
+            self._helpers.update(('llm', 'sandbox'))
             model  = self._expr(a[0]) if a else '""'
             prompt = self._expr(a[1]) if len(a) > 1 else '""'
             return f'cryoLLM({model}, {prompt}, "")'   # sem schema (completion cru)
@@ -1359,7 +1380,7 @@ class CodeGenGo:
             return "cryoJSONEncode(cryoToolList())"
         if c == 'agent':
             self._use_tools = True
-            self._helpers.add('llm'); self._helpers.add('agent')
+            self._helpers.update(('llm', 'sandbox')); self._helpers.add('agent')
             model  = self._expr(a[0]) if a else '""'
             prompt = self._expr(a[1]) if len(a) > 1 else '""'
             # 3o arg opcional: subconjunto de tools (string[]); 4o: limite de passos

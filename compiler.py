@@ -72,7 +72,7 @@ def compile_source(source: str, backend: str, safe: bool,
     if backend == 'asm':
         return CodeGenAsm(safe=safe, abi=abi).generate(ast)
     if backend == 'go':
-        return CodeGenGo(safe=safe).generate(ast)
+        return CodeGenGo(safe=safe, sandbox=sandbox).generate(ast)
     if backend == 'node':
         return CodeGenNode(safe=safe).generate(ast)
     if backend == 'pyro':
@@ -224,10 +224,10 @@ def compile_file(input_path: str,
         backend, motivo = select_backend(load_ast(source, base_dir))
         print(f"→ backend automático: {backend}  ({motivo})")
 
-    # sandbox só é aplicável ao alvo pyro (política enforçada pela VM Pyro).
-    if sandbox and backend != 'pyro':
-        print(f"⚠  --sandbox só se aplica ao backend pyro; ignorado para "
-              f"'{backend}'.", file=sys.stderr)
+    # sandbox é aplicável aos alvos pyro (VM) e go (código gerado).
+    if sandbox and backend not in ('pyro', 'go'):
+        print(f"⚠  --sandbox só se aplica aos backends pyro e go; ignorado "
+              f"para '{backend}'.", file=sys.stderr)
 
     # ── geracao de codigo ──
     try:
@@ -357,7 +357,7 @@ def main() -> None:
     ap.add_argument('--strict', action='store_true',
                     help='Com --audit/--audit-only: sai com código 2 se houver achados ALTO (gate de CI)')
     ap.add_argument('--sandbox', action='store_true',
-                    help='Backend pyro: grava política de sandbox no .pyro (a VM recusa natives de rede/máquina)')
+                    help='Backends pyro/go: recusa natives de rede/máquina por política (VM: flag no .pyro; go: gate no código gerado). Runtime: PYRO_SANDBOX=1')
     ap.add_argument('--emit-only', action='store_true',
                     help='Apenas gera o fonte (.pyro/.s); não invoca o toolchain')
     ap.add_argument('--no-opt', action='store_true',
