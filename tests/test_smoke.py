@@ -913,6 +913,31 @@ check("lsp: documentSymbol lista struct/enum/fn",
       {s['name'] for s in _syms} == {'P', 'E', 'g'})
 check("lsp: word_at extrai identificador", _lsp._word_at("abc def", 0, 1) == 'abc')
 
+# ── Fase 6: formatador (cryoc fmt) ──────────────────────────
+print("[fase6] formatador (cryoc fmt)")
+import format as _fmt
+_messy = 'fn f(int n)->int ={\nif(n<1){\nreturn 1;\n}\nreturn n*f(n-1);\n}\nprint(f(5));\n'
+_fm = _fmt.format_source(_messy)
+check("fmt: reindenta a 4 espaços", "    if(n<1){" in _fm and "        return 1;" in _fm)
+check("fmt: garante quebra final única", _fm.endswith("}\nprint(f(5));\n"))
+check("fmt: idempotente", _fmt.format_source(_fm) == _fm)
+check("fmt: preserva tokens (segurança)", _fmt._tokens(_messy) == _fmt._tokens(_fm))
+# blocos estrangeiros ficam verbatim (token LANG_BLOCK inalterado)
+_fsrc = 'import >C<\nfn g()->int ={\nreturn 1;\n}\n>C(\n    printf("x");\n)\n'
+_ff, _ok = _fmt._safe_format(_fsrc)
+check("fmt: bloco estrangeiro seguro (tokens iguais)", _ok)
+# strings com chaves não confundem a profundidade
+_sbr = 'string s = "a{b}c";\nprint(s);\n'
+check("fmt: chaves em string não afetam indent", _fmt.format_source(_sbr) == _sbr)
+# comentário de bloco verbatim
+_cm = '/* bloco\n   com chaves { } */\nint x = 1;\n'
+check("fmt: comentário de bloco preservado", "{ }" in _fmt.format_source(_cm))
+# entrada já formatada é no-op
+check("fmt: já formatado é no-op", _fmt.format_source(_fm) == _fm)
+# comentários de linha preservados
+check("fmt: comentário de linha preservado",
+      "// oi" in _fmt.format_source("int x = 1; // oi\n"))
+
 # ── auditoria estatica ──────────────────────────────────────
 print("[audit] regras")
 f = audit_ast(ast_of(">C( printf(\"x\"); )"))
