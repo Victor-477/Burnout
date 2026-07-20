@@ -498,7 +498,26 @@ class CodeGenNode:
         if isinstance(n, (SpawnExpr, AwaitExpr)):
             self._err("concorrencia (spawn/await) nao e suportada no backend node; "
                       "use --backend go.")
+        if isinstance(n, Lambda):
+            return self._lambda(n)
         self._err(f"expressao nao suportada no backend node: {type(n).__name__}")
+
+    def _lambda(self, n: Lambda) -> str:
+        params = ', '.join(jsid(pn) for _pt, pn in n.params)
+        prev_cur = self._cur
+        buf: List[str] = []
+        self._cur = buf
+        self._t.push()
+        for pt, pn in n.params:
+            self._t.set(pn, pt)
+        self._indent += 1
+        self._block(n.body)
+        self._indent -= 1
+        self._t.pop()
+        self._cur = prev_cur
+        body = '\n'.join(buf)
+        ind = '  ' * self._indent
+        return f"(({params}) => {{\n{body}\n{ind}}})"
 
     def _literal(self, n: Literal) -> str:
         if n.kind == 'string':

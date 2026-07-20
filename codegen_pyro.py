@@ -488,7 +488,17 @@ class CodeGenPyro:
     def _expr(self, n: Node):
         if isinstance(n, Literal):
             self._literal(n); return
+        if isinstance(n, Lambda):
+            raise CodeGenPyroError(
+                "funções de primeira classe (lambdas) ainda não são suportadas "
+                "no backend pyro; use --backend go ou node. "
+                "(valores-função na VM Pyro estão planejados — Fase 9)")
         if isinstance(n, Identifier):
+            # nome de função usado como valor (1ª classe) — ainda não na VM
+            if n.name in self._fnindex and n.name not in self._cur.locals:
+                raise CodeGenPyroError(
+                    f"função '{n.name}' usada como valor (1ª classe) ainda não é "
+                    f"suportada no backend pyro; use --backend go ou node.")
             if n.name in self._enum_consts:      # membro de enum -> const int
                 self._emit(OP_CONST, self._const(TAG_INT, self._enum_consts[n.name]))
                 return

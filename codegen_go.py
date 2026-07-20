@@ -54,9 +54,46 @@ def _split_type_pair(s: str):
     raise CodeGenGoError(f"tipo map malformado: '{s}'")
 
 
+def _split_top_commas(s: str):
+    """Divide por vírgulas de topo, respeitando <> [] ()."""
+    if not s.strip():
+        return []
+    out, depth, start = [], 0, 0
+    for i, c in enumerate(s):
+        if c in '<[(':
+            depth += 1
+        elif c in '>])':
+            depth -= 1
+        elif c == ',' and depth == 0:
+            out.append(s[start:i].strip()); start = i + 1
+    out.append(s[start:].strip())
+    return out
+
+
+def _go_fn_type(t: str) -> str:
+    """'fn(P1,P2)->R' -> 'func(goP1, goP2) goR' (R vazio se void)."""
+    i, depth = 3, 1
+    while i < len(t) and depth:
+        if t[i] == '(':
+            depth += 1
+        elif t[i] == ')':
+            depth -= 1
+        if depth == 0:
+            break
+        i += 1
+    params = t[3:i]
+    rest = t[i + 1:]
+    ret = rest[2:] if rest.startswith('->') else ''
+    gp = ', '.join(go_type(p) for p in _split_top_commas(params))
+    gr = go_type(ret) if ret and ret != 'void' else ''
+    return f"func({gp})" + (f" {gr}" if gr else "")
+
+
 def go_type(t: str) -> str:
     if not t:
         return ''
+    if t.startswith('fn(') and '->' in t:     # tipo função -> func(...)...
+        return _go_fn_type(t)
     if t.endswith('?'):                       # opcional -> ponteiro
         return '*' + go_type(t[:-1])
     if t.startswith('map<') and t.endswith('>'):
@@ -1106,7 +1143,45 @@ class CodeGenGo:
         if isinstance(node, AwaitExpr):
             return f"(<-{self._expr(node.expr)})"
 
+        if isinstance(node, Lambda):
+            return self._lambda(node)
+
         return f"/* EXPR? {type(node).__name__} */"
+
+    def _lambda_ret(self, node: 'Lambda') -> str:
+        """Infere o tipo de retorno pelo primeiro Return do corpo."""
+        self.te.push()
+        for pt, pn in node.params:
+            self.te.set(pn, pt)
+        rt = 'void'
+        for s in node.body:
+            if isinstance(s, Return) and s.value is not None:
+                rt = self.te.infer(s.value)
+                break
+        self.te.pop()
+        return rt
+
+    def _lambda(self, node: 'Lambda') -> str:
+        params = ', '.join(f"{gid(pn)} {go_type(pt)}" for pt, pn in node.params)
+        ret_t = node.return_type or self._lambda_ret(node)
+        gr = go_type(ret_t) if ret_t and ret_t not in ('void', 'unknown', 'null') else ''
+        sig = f"func({params})" + (f" {gr}" if gr else "")
+        prev_cur, prev_ret = self._cur, self._cur_fn_ret
+        buf: List[str] = []
+        self._cur = buf
+        self._cur_fn_ret = ret_t or 'void'
+        self.te.push()
+        for pt, pn in node.params:
+            self.te.set(pn, pt)
+        self._indent += 1
+        for s in node.body:
+            self._gen(s)
+        self._indent -= 1
+        self.te.pop()
+        self._cur = prev_cur
+        self._cur_fn_ret = prev_ret
+        body = '\n'.join(buf)
+        return sig + " {\n" + body + "\n" + ('\t' * self._indent) + "}"
 
     def _spawn(self, node: SpawnExpr, elem: Optional[str] = None) -> str:
         # spawn e  ->  goroutine + canal bufferizado (Future<T>)

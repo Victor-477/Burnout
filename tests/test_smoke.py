@@ -1040,6 +1040,49 @@ f = _rules('string nome = "Ana";')
 check("string comum NAO gera hardcoded-secret",
       not any(r == 'hardcoded-secret' for _, r in f))
 
+# ── [fase8] funções de 1ª classe + lambdas ──────────────────
+print("[fase8] funções de 1ª classe + lambdas")
+from ast_nodes import Lambda as _Lambda
+from backends import select_backend as _select
+from semantic import findings as _find
+
+def _ast8(s):
+    return Parser(Lexer(s).tokenize()).parse()
+
+_p8 = _ast8('fn(int)->int f = (int x) => x * 2;')
+check("parser: var de tipo função + lambda",
+      _p8.statements[0].var_type == 'fn(int)->int' and
+      isinstance(_p8.statements[0].value, _Lambda))
+check("parser: agrupamento não vira lambda",
+      _ast8('int a = (1 + 2) * 3;').statements[0].value.__class__.__name__ == 'BinaryExpr')
+check("parser: declaração de função ainda funciona",
+      _ast8('fn d(int x) -> int ={ return x*2; }').statements[0].__class__.__name__ == 'FunctionDecl')
+
+_g8 = gen_go('fn(int)->int f = (int x) => x + 1; int r = f(41); print(r);')
+check("go: lambda vira func literal", "func(x int64) int64" in _g8)
+check("go: tipo de retorno função", "func(int64) int64" in
+      gen_go('fn mk(int b) -> fn(int)->int ={ return (int x) => x + b; }'))
+
+check("node: lambda vira arrow function",
+      "=>" in gen_node('fn(int)->int f = (int x) => x + 1; int r = f(41); print(r);'))
+
+def _pyro_err8(src):
+    try:
+        gen_pyro(src); return False
+    except _PErr:
+        return True
+check("pyro: lambda barrada (fail-closed)", _pyro_err8('fn(int)->int f = (int x) => x + 1;'))
+check("pyro: função como valor barrada",
+      _pyro_err8('fn d(int n)->int ={return n;} fn(int)->int f = d;'))
+
+_bsel, _ = _select(_ast8('fn(int)->int f = (int x) => x + 1; int r = f(1); print(r);'))
+check("auto: firstclassfn não escolhe pyro", _bsel in ('go', 'node'))
+
+check("semântica: função como valor não acusa 'não declarada'",
+      _find(_ast8('fn d(int n)->int ={return n;} '
+                  'fn ap(fn(int)->int f)->int ={return f(1);} '
+                  'int r = ap(d); print(r);')) == [])
+
 # ── resultado ───────────────────────────────────────────────
 print(f"\n{_passed} passaram, {_failed} falharam")
 sys.exit(1 if _failed else 0)
