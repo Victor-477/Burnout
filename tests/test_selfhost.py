@@ -20,6 +20,7 @@ _root = os.path.dirname(os.path.dirname(_here))           # raiz do projeto
 sys.path.insert(0, os.path.join(_root, "Cryo"))
 CRYOC = os.path.join(_root, "Burnout", "cryoc.py")
 SELFHOST = os.path.join(_root, "Cryo", "selfhost")
+VM_BIN = os.path.join(_root, "build", "pyrovm.exe" if sys.platform == "win32" else "pyrovm")
 
 from lexer import Lexer   # lexer de referência (oráculo)
 from parser import Parser  # parser de referência (oráculo do estágio 2)
@@ -207,6 +208,55 @@ if got3 != exp3:
             print(f"      obtido:   {g}")
             break
 check("AST idêntica (fonte 2: while/else-if/unário/chamada)", got3 == exp3)
+
+# ── estágio 3: codegen em Cryo -> .pyro executável ──────────
+print("[9.3] codegen auto-hospedado (Cryo na VM emite .pyro executável)")
+
+def _int_lines(text):
+    out = []
+    for ln in (text or "").replace("\r\n", "\n").split("\n"):
+        s = ln.strip()
+        if s and (s.lstrip("-")).isdigit():
+            out.append(s)
+    return out
+
+PROG = ("int a = 2; int b = 3; print(a + b * 2); print((a + b) * 2); "
+        "print(10 - 4 / 2); print(-b + 5);")
+
+# oráculo: compila+roda PROG pelo compilador de referência (backend pyro)
+with tempfile.NamedTemporaryFile(suffix=".cryo", delete=False, mode="w", encoding="utf-8") as tp:
+    tp.write(PROG); prog_cryo = tp.name
+oracle = subprocess.run([sys.executable, CRYOC, prog_cryo, "--backend", "pyro", "--run", "--no-banner"],
+                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+oracle_out = _int_lines(oracle.stdout)
+
+# auto-hospedado: o compilador-em-Cryo (na VM) gera out.pyro a partir de PROG
+out_pyro = os.path.join(tempfile.gettempdir(), "selfhost_out.pyro").replace("\\", "/")
+_escp = PROG.replace("\\", "\\\\").replace('"', '\\"')
+try:
+    os.remove(out_pyro)
+except OSError:
+    pass
+gen = _run_vm('import "codegen.cryo"\ncompile("' + _escp + '", "' + out_pyro + '");\n')
+check("o codegen Cryo compilou e rodou na VM", gen.returncode == 0)
+check("o compilador auto-hospedado gravou o .pyro", os.path.isfile(out_pyro))
+
+selfhost_out = []
+if os.path.isfile(out_pyro) and os.path.isfile(VM_BIN):
+    r = subprocess.run([VM_BIN, out_pyro], capture_output=True, text=True,
+                       encoding="utf-8", errors="replace", timeout=30)
+    selfhost_out = _int_lines(r.stdout)
+
+check("oráculo produziu saída", len(oracle_out) > 0)
+if selfhost_out != oracle_out:
+    print(f"    oráculo:      {oracle_out}")
+    print(f"    auto-hospedado: {selfhost_out}")
+check(".pyro auto-hospedado roda com saída idêntica ao compilador de referência",
+      selfhost_out == oracle_out and len(selfhost_out) > 0)
+try:
+    os.remove(prog_cryo)
+except OSError:
+    pass
 
 print(f"\n{_passed} passaram, {_failed} falharam")
 sys.exit(1 if _failed else 0)
