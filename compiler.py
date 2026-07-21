@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
-# ============================================================
-#  Cryo Compiler — Entry Point / CLI  (v0.4)
-#
-#  Uso:
-#    python compiler.py app.cryo                 # backend C (padrao)
-#    python compiler.py app.cryo --backend asm   # backend x86-64 nativo
-#    python compiler.py app.cryo --unsafe        # desliga instrumentacao
-#    python compiler.py app.cryo --audit         # relatorio de seguranca
-#    python compiler.py app.cryo --run -v
-# ============================================================
+# ==========================================================================
+# Cryo Compiler — Entry Point / CLI (v0.4)
+# 
+# Usage:
+# python compiler.py app.cryo # C backend (default)
+# python compiler.py app.cryo --backend asm # native x86-64 backend
+# python compiler.py app.cryo --unsafe # turn off instrumentation
+# python compiler.py app.cryo --audit # security report
+# python compiler.py app.cryo --run -v
+# ==========================================================================
 
 import sys
 import os
@@ -16,7 +16,7 @@ import io
 import argparse
 import subprocess
 
-# ── Windows: garante saida UTF-8 (evita crash com cp1252) ──
+# ── Windows: guarantees UTF-8 output (avoids crash with cp1252) ──
 for _stream in ('stdout', 'stderr'):
     _s = getattr(sys, _stream, None)
     if _s is not None and hasattr(_s, 'reconfigure'):
@@ -25,8 +25,8 @@ for _stream in ('stdout', 'stderr'):
         except Exception:
             pass
 
-# Burnout (compilador) importa o front-end de CRYO; os backends (codegens)
-# vivem aqui mesmo (Burnout = o compilador). A VM Pyro fica em pyro/vm.
+# Burnout (compiler) imports the CRYO front-end; the backends (codes)
+# live right here (Burnout = the compiler). The Pyro VM is located at pyro/vm.
 _here = os.path.dirname(os.path.abspath(__file__))   # burnout/
 _root = os.path.dirname(_here)
 sys.path.insert(0, os.path.join(_root, 'cryo'))      # front-end (CRYO)
@@ -39,11 +39,11 @@ from foreign     import verify as verify_foreign, ForeignError   # CRYO
 from backends     import select_backend, missing_capabilities   # CRYO
 from modules      import resolve_modules, ModuleError           # CRYO
 from semantic     import check as semantic_check, SemanticError  # CRYO
-from codegen_c    import CodeGenC,    CodeGenError       # backend C
-from codegen_go   import CodeGenGo,   CodeGenGoError     # backend Go
-from codegen_asm  import CodeGenAsm,  CodeGenAsmError    # backend x86-64
-from codegen_pyro import CodeGenPyro, CodeGenPyroError   # backend bytecode Pyro
-from codegen_node import CodeGenNode, CodeGenNodeError   # backend Node.js / JS
+from codegen_c    import CodeGenC,    CodeGenError       # C backend
+from codegen_go   import CodeGenGo,   CodeGenGoError     # Go backend
+from codegen_asm  import CodeGenAsm,  CodeGenAsmError    # x86-64 backend
+from codegen_pyro import CodeGenPyro, CodeGenPyroError   # Pyro bytecode backend
+from codegen_node import CodeGenNode, CodeGenNodeError   # Node.js/JS backend
 
 
 BANNER = r"""
@@ -58,17 +58,17 @@ BANNER = r"""
 
 
 def default_abi() -> str:
-    """ABI padrao do backend asm conforme a plataforma."""
+    """Default ABI of the asm backend depending on the platform."""
     return 'win64' if sys.platform == 'win32' else 'sysv'
 
 
 def compile_source(source: str, backend: str, safe: bool,
                    abi: str = 'sysv', base_dir: str | None = None,
                    optimize: bool = True, sandbox: bool = False):
-    """Retorna str (go/c/asm) ou bytes (pyro = bytecode)."""
+    """Returns str (go/c/asm) or bytes (pyro = bytecode)."""
     ast = load_ast(source, base_dir)
-    semantic_check(ast)   # variável/função/aridade/break — erros cedo, com linha
-    verify_foreign(ast)   # blocos estrangeiros/libraries exigem `import >Lang<`
+    semantic_check(ast)   # variable/function/aridade/break — errors early, with line
+    verify_foreign(ast)   # foreign blocks/libraries require `import >Lang<`
     if backend == 'asm':
         return CodeGenAsm(safe=safe, abi=abi).generate(ast)
     if backend == 'go':
@@ -86,7 +86,7 @@ def parse_ast(source: str):
 
 
 def load_ast(source: str, base_dir: str | None = None):
-    """Parse + resolução de módulos (import \"arquivo.cryo\")."""
+    """Parse + module resolution (import \"file.cryo\")."""
     ast = parse_ast(source)
     return resolve_modules(ast, base_dir or os.getcwd())
 
@@ -95,7 +95,7 @@ def _gcc_c_flags(compiler_dir: str, output_path: str, runtime: str,
                  bin_path: str, safe: bool):
     flags = ['gcc', '-O2', '-std=c11', f'-I{compiler_dir}']
     if safe:
-        # Endurecimento do binario gerado
+        # Hardening of the generated binary
         flags += [
             '-fstack-protector-strong',
             '-D_FORTIFY_SOURCE=2',
@@ -106,15 +106,15 @@ def _gcc_c_flags(compiler_dir: str, output_path: str, runtime: str,
 
 
 def _run_pyro(pyro_path: str, compiler_dir: str, run: bool, verbose: bool):
-    """Compila a VM Pyro (Go) uma vez e executa o bytecode .pyro."""
-    root    = os.path.dirname(compiler_dir)                 # raiz do projeto
+    """Compiles the Pyro (Go) VM once and runs the .pyro bytecode."""
+    root    = os.path.dirname(compiler_dir)                 # project root
     vm_dir  = os.path.join(root, 'pyro', 'vm')
     os.makedirs(os.path.join(root, 'build'), exist_ok=True)
     pyrovm  = os.path.join(root, 'build', 'pyrovm')
     if sys.platform == 'win32':
         pyrovm += '.exe'
 
-    # (re)compila a VM se ainda não existe ou se o fonte é mais novo
+    # (re)compiles the VM if it does not yet exist or if the source is newer
     src = os.path.join(vm_dir, 'main.go')
     need = (not os.path.isfile(pyrovm) or
             (os.path.isfile(src) and os.path.getmtime(src) > os.path.getmtime(pyrovm)))
@@ -125,7 +125,7 @@ def _run_pyro(pyro_path: str, compiler_dir: str, run: bool, verbose: bool):
             r = subprocess.run(['go', 'build', '-o', pyrovm, '.'],
                                cwd=vm_dir, capture_output=True, text=True)
             if r.returncode != 0:
-                print(f"[go] Erro ao compilar a VM Pyro:\n{r.stderr}", file=sys.stderr)
+                print(f"[go] Error compiling Pyro VM:\n{r.stderr}", file=sys.stderr)
                 return
         if verbose:
             print(f"✓ VM Pyro: {pyrovm}")
@@ -134,14 +134,14 @@ def _run_pyro(pyro_path: str, compiler_dir: str, run: bool, verbose: bool):
             subprocess.run([pyrovm, pyro_path])
     except FileNotFoundError:
         if verbose:
-            print("⚠  go não encontrado — .pyro gerado, mas a VM não foi compilada/executada")
+            print("⚠  go not found — .pyro generated, but VM was not compiled/executed")
 
 
 def _gcc_asm_flags(output_path: str, runtime: str, bin_path: str, abi: str):
     if abi == 'win64':
-        # MinGW: PE relocavel, libm embutida em libmingwex
+        # MinGW: Relocatable PE, libm embedded in libmingwex
         return ['gcc', '-O2', output_path, runtime, '-o', bin_path]
-    # System V: -no-pie faz lea rip/rotulos absolutos funcionarem
+    # System V: -no-pie makes lea rip/absolute labels work
     return ['gcc', '-no-pie', '-O2', output_path, runtime, '-lm', '-o', bin_path]
 
 
@@ -166,7 +166,7 @@ def compile_file(input_path: str,
         abi = default_abi()
 
     if not os.path.isfile(input_path):
-        print(f"[Erro] Arquivo não encontrado: {input_path}", file=sys.stderr)
+        print(f"[Error] File not found: {input_path}", file=sys.stderr)
         sys.exit(1)
 
     with open(input_path, 'r', encoding='utf-8') as f:
@@ -185,16 +185,16 @@ def compile_file(input_path: str,
         pprint.pprint(parse_ast(source), width=80)
         print()
 
-    # ── auditoria de seguranca ──
+    # ── security audit ──
     if audit or audit_only:
         audit_ast_obj = load_ast(source, base_dir)
         findings = audit_ast(audit_ast_obj)
         print(format_audit(findings, input_path))
         has_high = any(f.level == 'ALTO' for f in findings)
         if has_high:
-            print("[Auditoria] Achados de nível ALTO encontrados.", file=sys.stderr)
-        # sugestão de backend: se o backend escolhido não cobre algum
-        # recurso usado, aponta --backend auto (evita erro/omissão silenciosa).
+            print("[Audit] HIGH level findings found.", file=sys.stderr)
+        # backend suggestion: if the chosen backend does not cover some
+        # resource used, points --backend auto (prevents silent error/omission).
         if backend != 'auto':
             miss_tags, miss_foreign = missing_capabilities(audit_ast_obj, backend)
             if miss_tags or miss_foreign:
@@ -203,43 +203,43 @@ def compile_file(input_path: str,
                 if miss_tags:
                     partes.append("recursos [" + ", ".join(sorted(miss_tags)) + "]")
                 if miss_foreign:
-                    partes.append("blocos estrangeiros [" + ", ".join(sorted(miss_foreign)) + "]")
-                print(f"\n[Auditoria] O backend '{backend}' não cobre "
+                    partes.append("foreign blocks [" + ", ".join(sorted(miss_foreign)) + "]")
+                print(f"\n[Audit] The backend '{backend}' does not cover"
                       f"{' e '.join(partes)}.")
                 print(f"            Use --backend auto (escolheria '{chosen}') "
                       f"ou --backend {chosen}.")
-        # --strict: falha (código de saída 2) se houver achados ALTO —
-        # útil como gate de CI, tanto com --audit quanto --audit-only.
+        # --strict: fail (exit code 2) if there are HIGH findings —
+        # useful as a CI gate, both with --audit and --audit-only.
         if strict and has_high:
-            print("[Auditoria] --strict: abortando por achados de nível ALTO.",
+            print("[Audit] --strict: aborting due to HIGH level findings.",
                   file=sys.stderr)
             sys.exit(2)
-        # --audit-only: relata e encerra; --audit segue para a compilação.
+        # --audit-only: report and close; --audit proceeds to compilation.
         if audit_only:
             return output_path
 
-    # ── seleção automática de backend ──
+    # ── automatic backend selection ──
     auto = (backend == 'auto')
     if auto:
         backend, motivo = select_backend(load_ast(source, base_dir))
         print(f"→ backend automático: {backend}  ({motivo})")
 
-    # sandbox é aplicável aos alvos pyro (VM) e go (código gerado).
+    # sandbox is applicable to both pyro (VM) and go (generated code) targets.
     if sandbox and backend not in ('pyro', 'go'):
-        print(f"⚠  --sandbox só se aplica aos backends pyro e go; ignorado "
+        print(f"⚠ --sandbox only applies to pyro and go backends; ignored"
               f"para '{backend}'.", file=sys.stderr)
 
-    # ── geracao de codigo ──
+    # ── code generation ──
     try:
         code = compile_source(source, backend, safe, abi, base_dir=base_dir,
                               optimize=optimize, sandbox=sandbox)
     except (CodeGenError, CodeGenGoError, CodeGenAsmError,
             CodeGenPyroError, CodeGenNodeError) as e:
-        # rede de segurança: se o auto escolheu um backend que falhou,
-        # recompila em go (superconjunto) em vez de abortar.
+        # safety net: if auto chose a backend that failed,
+        # recompiles in go (superset) instead of aborting.
         if auto and backend != 'go':
-            print(f"⚠  backend {backend} não suportou o programa ({e}); "
-                  f"recompilando com go", file=sys.stderr)
+            print(f"⚠ backend {backend} did not support the program ({e});"
+                  f"recompiling with go", file=sys.stderr)
             backend = 'go'
             code = compile_source(source, backend, safe, abi, base_dir=base_dir,
                                   optimize=optimize, sandbox=sandbox)
@@ -249,7 +249,7 @@ def compile_file(input_path: str,
     ext = {'asm': '.s', 'go': '.go', 'pyro': '.pyro',
            'node': '.js', 'c': '.c'}.get(backend, '.c')
     if output_path is None:
-        # separa fontes (.cryo) de artefatos gerados: saída vai para build/
+        # separates sources (.cryo) from generated artifacts: output goes to build/
         os.makedirs('build', exist_ok=True)
         base = os.path.splitext(os.path.basename(input_path))[0]
         output_path = os.path.join('build', base + ext)
@@ -257,7 +257,7 @@ def compile_file(input_path: str,
     out_dir = os.path.dirname(output_path)
     if out_dir:
         os.makedirs(out_dir, exist_ok=True)
-    if isinstance(code, (bytes, bytearray)):        # .pyro = bytecode binário
+    if isinstance(code, (bytes, bytearray)):        # .pyro = binary bytecode
         with open(output_path, 'wb') as f:
             f.write(code)
     else:
@@ -270,13 +270,13 @@ def compile_file(input_path: str,
                 'pyro': 'bytecode Pyro', 'node': 'JavaScript (Node)',
                 'c': 'C nativo'}.get(backend, 'C nativo')
         tam = f"  ({len(code)} bytes)" if isinstance(code, (bytes, bytearray)) else ""
-        print(f"✓ [{alvo} / {modo}] gerado: {input_path}  →  {output_path}{tam}")
+        print(f"✓ [{alvo} / {modo}] generated: {input_path} → {output_path}{tam}")
 
-    # ── emit-only: gera fonte e para (o build script cuida do toolchain) ──
+    # ── emit-only: generates source and stops (the build script takes care of the toolchain) ──
     if emit_only:
         return output_path
 
-    # ── backend pyro: desassembla e/ou executa na VM Pyro ──
+    # ── pyro backend: disassembles and/or runs in the Pyro VM ──
     if backend == 'pyro':
         if dis:
             import disasm_pyro
@@ -288,18 +288,18 @@ def compile_file(input_path: str,
                       run=run, verbose=verbose)
         return output_path
 
-    # ── backend node: executa o .js com o Node.js ──
+    # ── backend node: runs .js with Node.js ──
     if backend == 'node':
         if run:
             try:
                 print(f"\n── Executando (Node): {output_path} ───────────────────")
                 subprocess.run(['node', output_path])
             except FileNotFoundError:
-                print("⚠  node não encontrado — .js gerado, mas não executado",
+                print("⚠ node not found — .js generated but not executed",
                       file=sys.stderr)
         return output_path
 
-    # ── montar/compilar binário ──
+    # ── assemble/compile binary ──
     bin_path     = os.path.abspath(os.path.splitext(output_path)[0])
     if sys.platform == 'win32':
         bin_path += '.exe'
@@ -330,7 +330,7 @@ def compile_file(input_path: str,
             print(f"[{tool}] Erro:\n{result.stderr}", file=sys.stderr)
     except FileNotFoundError:
         if verbose:
-            print(f"⚠  {tool} não encontrado — apenas {ext} gerado (não compilado)")
+            print(f"⚠ {tool} not found — just {ext} generated (not compiled)")
 
     return output_path
 
@@ -338,37 +338,37 @@ def compile_file(input_path: str,
 def main() -> None:
     ap = argparse.ArgumentParser(
         prog='cryo',
-        description='Compilador Cryo v0.5 — .cryo → Go (base), C nativo ou x86-64 asm',
+        description='Cryo compiler v0.5 — .cryo → Go (base), native C or x86-64 asm',
     )
-    ap.add_argument('input',           help='Arquivo de entrada (.cryo)')
-    ap.add_argument('-o', '--output',  help='Arquivo de saída (.go/.pyro/.s)')
+    ap.add_argument('input',           help='Input file (.cryo)')
+    ap.add_argument('-o', '--output',  help='Output file (.go/.pyro/.s)')
     ap.add_argument('--backend', choices=('auto', 'go', 'c', 'asm', 'pyro', 'node'),
                     default='go',
-                    help='Backend: go (padrão), c, asm, pyro, node, ou auto '
-                         '(escolhe o melhor pelo programa)')
+                    help='Backend: go (default), c, asm, pyro, node, or auto'
+                         '(choose the best according to the program)')
     ap.add_argument('--abi', choices=('sysv', 'win64'), default=None,
-                    help='ABI do backend asm (padrão: win64 no Windows, senão sysv)')
+                    help='asm backend ABI (default: win64 on Windows, else sysv)')
     ap.add_argument('--unsafe', action='store_true',
-                    help='Desliga a instrumentação de segurança')
+                    help='Turn off safety instrumentation')
     ap.add_argument('--audit', action='store_true',
-                    help='Executa a auditoria de segurança estática e segue compilando')
+                    help='Run the static security audit and continue compiling')
     ap.add_argument('--audit-only', action='store_true',
-                    help='Executa a auditoria, imprime o relatório e sai (não compila)')
+                    help='Runs the audit, prints the report and exits (does not compile)')
     ap.add_argument('--strict', action='store_true',
-                    help='Com --audit/--audit-only: sai com código 2 se houver achados ALTO (gate de CI)')
+                    help='With --audit/--audit-only: exit with code 2 if there are HIGH findings (CI gate)')
     ap.add_argument('--sandbox', action='store_true',
-                    help='Backends pyro/go: recusa natives de rede/máquina por política (VM: flag no .pyro; go: gate no código gerado). Runtime: PYRO_SANDBOX=1')
+                    help='Pyro/go backends: refuse network/machine natives by policy (VM: flag in .pyro; go: gate in generated code). Runtime: PYRO_SANDBOX=1')
     ap.add_argument('--emit-only', action='store_true',
-                    help='Apenas gera o fonte (.pyro/.s); não invoca o toolchain')
+                    help='It only generates the source (.pyro/.s); does not invoke the toolchain')
     ap.add_argument('--no-opt', action='store_true',
-                    help='Desliga o otimizador de bytecode (backend pyro)')
+                    help='Turn off bytecode optimizer (pyro backend)')
     ap.add_argument('--dis', action='store_true',
-                    help='Desassembla o bytecode Pyro gerado (backend pyro)')
+                    help='Disassembles the generated Pyro bytecode (pyro backend)')
     ap.add_argument('--tokens', action='store_true', help='Imprime tokens')
     ap.add_argument('--ast',    action='store_true', help='Imprime AST')
     ap.add_argument('-v', '--verbose', action='store_true', help='Saída detalhada')
     ap.add_argument('--run',    action='store_true', help='Executa após compilar')
-    ap.add_argument('--no-banner', action='store_true', help='Oculta o banner')
+    ap.add_argument('--no-banner', action='store_true', help='Hide the banner')
     args = ap.parse_args()
 
     if not args.no_banner:
@@ -394,27 +394,27 @@ def main() -> None:
             run         = args.run,
         )
     except LexerError     as e:
-        print(f"\n[Erro Léxico]    {e}", file=sys.stderr); sys.exit(1)
+        print(f"\n[Lexical Error]    {e}", file=sys.stderr); sys.exit(1)
     except ParseError     as e:
         print(f"\n[Erro Sintático] {e}", file=sys.stderr); sys.exit(1)
     except ForeignError   as e:
-        print(f"\n[Erro Estrangeiro] {e}", file=sys.stderr); sys.exit(1)
+        print(f"\n[Foreign Error] {e}", file=sys.stderr); sys.exit(1)
     except ModuleError    as e:
-        print(f"\n[Erro de Módulo] {e}", file=sys.stderr); sys.exit(1)
+        print(f"\n[Module Error] {e}", file=sys.stderr); sys.exit(1)
     except SemanticError  as e:
-        print(f"\n[Erro Semântico] {e}", file=sys.stderr); sys.exit(1)
+        print(f"\n[Semantic Error] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenAsmError as e:
-        print(f"\n[Erro CodeGen ASM] {e}", file=sys.stderr); sys.exit(1)
+        print(f"\n[CodeGen ASM Error] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenGoError as e:
-        print(f"\n[Erro CodeGen Go] {e}", file=sys.stderr); sys.exit(1)
+        print(f"\n[CodeGen Go Error] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenPyroError as e:
-        print(f"\n[Erro CodeGen Pyro] {e}", file=sys.stderr); sys.exit(1)
+        print(f"\n[CodeGen Pyro Error] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenNodeError as e:
-        print(f"\n[Erro CodeGen Node] {e}", file=sys.stderr); sys.exit(1)
+        print(f"\n[CodeGen Node Error] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenError   as e:
-        print(f"\n[Erro CodeGen]   {e}", file=sys.stderr); sys.exit(1)
+        print(f"\n[CodeGen Error]   {e}", file=sys.stderr); sys.exit(1)
     except Exception      as e:
-        print(f"\n[Erro Interno]   {e}", file=sys.stderr); raise
+        print(f"\n[Internal Error]   {e}", file=sys.stderr); raise
 
 
 if __name__ == '__main__':

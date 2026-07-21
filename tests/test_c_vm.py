@@ -24,21 +24,21 @@ def compile_c_vm():
     go_build = ["go", "build", "-o", GO_VM, os.path.join(_root, "Pyro", "vm", "main.go")]
     res_go = subprocess.run(go_build, capture_output=True, text=True)
     if res_go.returncode != 0:
-        print("Erro de compilacao da Go VM:")
+        print("Error de compilacao da Go VM:")
         print(res_go.stderr)
         sys.exit(1)
         
     print("Compilando C VM...")
-    # /utf-8: mantém os literais UTF-8 do fonte (mensagens de erro acentuadas)
-    # idênticos aos da VM Go — essencial para a paridade de stderr.
+    # /utf-8: mantém os literais UTF-8 do fonte (mensagens de Error acentuadas)
+    # idênticos aos da VM Go — essencial for a paridade de stderr.
     cmd = 'call "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat" && cl /O2 /utf-8 /Fe:Pyro\\vm\\pyrovm.exe Pyro\\vm\\main.c Pyro\\vm\\pyro_runtime.c'
     res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
     if res.returncode != 0:
-        print("Erro de compilacao da C VM:")
+        print("Error de compilacao da C VM:")
         print(res.stdout)
         print(res.stderr)
         sys.exit(1)
-    print("VMs compiladas com sucesso!")
+    print("VMs compiladas with sucesso!")
 
 def run_command(args, stdin=""):
     try:
@@ -56,13 +56,13 @@ def test_parity():
     failed = 0
     skipped = 0
     
-    # Adicionalmente, podemos desativar temporariamente a rede se nao quisermos testar HTTP real,
-    # mas ambos Go VM e C VM devem fazer a requisicao identica.
+    # Adicionalmente, podemos desativar temporariamente a rede if nao quisermos testar HTTP real,
+    # but ambos Go VM and C VM devem fazer a requisicao identica.
     
     for filename in examples:
         filepath = os.path.join(CRYO_EXAMPLES, filename)
         
-        # Testamos se o arquivo e compilavel com pyro backend
+        # Testamos if o file and compilavel with pyro backend
         with tempfile.NamedTemporaryFile(suffix=".pyro", delete=False) as tmp:
             tmp_pyro = tmp.name
         
@@ -71,32 +71,32 @@ def test_parity():
         c_code, c_out, c_err = run_command(comp_args)
         
         if c_code != 0:
-            # Se nao compilar com backend pyro, apenas pulamos (ex: asm, node, etc.)
+            # if nao compilar with backend pyro, apenas pulamos (ex: asm, node, etc.)
             skipped += 1
             os.remove(tmp_pyro)
             continue
             
-        print(f"Testando {filename}...")
+        print(f"Testing {filename}...")
         
-        # Executa na Go VM
+        # Executa in the Go VM
         go_args = [GO_VM, tmp_pyro]
         go_code, go_out, go_err = run_command(go_args)
         
-        # Executa na C VM
+        # Executa in the C VM
         C_VM = os.path.join(_root, "Pyro", "vm", "pyrovm.exe")
         c_args = [C_VM, tmp_pyro]
         cvm_code, cvm_out, cvm_err = run_command(c_args)
         
-        # Limpar arquivo temporario
+        # Limpar file temporario
         try:
             os.remove(tmp_pyro)
         except OSError:
             pass
             
         # Comparar saídas
-        # O output do 'go run' pode incluir algumas warnings ou mensagens de go compilando, entao
-        # devemos filtrar ou garantir que o stderr e limpo.
-        # No caso do Go VM, se for run direto no main.go, o output e limpo.
+        # O output do 'go run' pode incluir algumas warnings or mensagens de go compilando, entao
+        # devemos filtrar or garantir que o stderr and limpo.
+        # in the caso do Go VM, if for run direto in the main.go, o output and limpo.
         
         # Normaliza quebras de linha
         go_out_norm = go_out.replace("\r\n", "\n")
@@ -105,12 +105,12 @@ def test_parity():
         go_err_norm = go_err.replace("\r\n", "\n").strip()
         cvm_err_norm = cvm_err.replace("\r\n", "\n").strip()
         
-        # Para fins de comparacao do stderr, Go compiler pode colocar avisos ou mensagens na stderr se go run recompilar.
-        # Mas o stderr do programa executando em si deve ser comparado.
+        # for fins de comparacao do stderr, Go compiler pode colocar avisos or mensagens in the stderr if go run recompilar.
+        # but o stderr do programa executando in si deve ser comparado.
         
-        # Vamos verificar se as saidas padrao sao identicas
+        # Vamos verificar if as saidas padrao sao identicas
         if go_code != cvm_code or go_out_norm != cvm_out_norm:
-            print(f"[FAIL] Falha de paridade em {filename}")
+            print(f"[FAIL] Falha de paridade in {filename}")
             print(f"Exit Codes: Go={go_code}, C={cvm_code}")
             if go_out_norm != cvm_out_norm:
                 print("--- Output Go ---")
@@ -140,7 +140,7 @@ def test_parity():
         ("unwrap-null",  'int? x = null; int y = x!; print(y);', []),
         ("assert-fail",  'assert(1 == 2, "nope");', []),
         ("sandbox-http", 'string b = http_get("http://127.0.0.1:9/x"); print(b);', ["--sandbox"]),
-        # try/catch: o valor capturado deve ser idêntico nas duas VMs
+        # try/catch: o value capturado deve ser idêntico nas duas VMs
         ("catch-throw",  'try { throw("x"); } catch (string e) { print("cap: " + e); }', []),
         ("catch-assert", 'try { assert(false, "boom"); } catch (string e) { print(e); }', []),
         ("catch-unwrap", 'try { int? z = null; int y = z!; print(y); } catch (string e) { print(e); }', []),
@@ -154,7 +154,7 @@ def test_parity():
         comp = [sys.executable, CRYOC, src_path, "--backend", "pyro", "-o", pyro_path, "--no-banner"] + extra
         rc, _o, _e = run_command(comp)
         if rc != 0:
-            print(f"[FAIL] abort '{name}': não compilou p/ pyro: {_e.strip()[:120]}")
+            print(f"[FAIL] abort '{name}': not compilou p/ pyro: {_e.strip()[:120]}")
             failed += 1
             for p in (src_path, pyro_path):
                 try: os.remove(p)
@@ -200,7 +200,7 @@ def test_parity():
         except OSError: pass
         return code, out.replace("\r\n", "\n").strip(), data
     if rc != 0:
-        print("[FAIL] write_bytes: não compilou p/ pyro"); failed += 1
+        print("[FAIL] write_bytes: not compilou p/ pyro"); failed += 1
     else:
         gcode, gout, gdata = _run_and_read(GO_VM)
         ccode, cout, cdata = _run_and_read(C_VM)

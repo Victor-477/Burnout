@@ -1,6 +1,6 @@
-"""Permite invocar o compilador como módulo: ``python -m burnout app.cryo --run``.
+"""Allows invoking the compiler as a module: ``python -m burnout app.cryo --run``.
 
-Equivale a ``python burnout/cryoc.py app.cryo --run`` — mesma CLI, mesmos
+Equivalent to ``python burnout/cryoc.py app.cryo --run`` — same CLI, same
 argumentos. Veja ``python -m burnout --help``.
 """
 from . import main

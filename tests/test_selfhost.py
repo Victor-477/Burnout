@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # ============================================================
 #  Burnout — Teste de fidelidade do compilador auto-hospedado
-#  (Fase 9.3). Estágio 1: o lexer escrito em Cryo, rodando na
+#  (Fase 9.3). Estágio 1: o lexer escrito in Cryo, rodando in the
 #  VM Pyro, deve produzir o MESMO fluxo de tokens que o lexer
 #  de referência (cryo/lexer.py).
 # ============================================================
@@ -29,16 +29,16 @@ from ast_nodes import (
     BinaryExpr, UnaryExpr, CallExpr, Identifier, Literal,
 )
 
-# Fonte de teste em uma linha (sem quebras/escapes internos além de aspas),
-# exercitando palavras-chave, tipos, ident, int/float, string, comentário de
-# bloco e os operadores cobertos pelo lexer auto-hospedado.
+# Fonte de teste in uma linha (sem quebras/escapes internos além de aspas),
+# exercitando palavras-key, tipos, ident, int/float, string, comentário de
+# bloco and os operadores cobertos pelo lexer auto-hospedado.
 SAMPLE = ('fn f(int n) -> number ={ /* bloco */ number x = 3.14; '
           'int c = n * 2; if (c >= 10 && n != 0) { c = c - 1; } '
           'return x; } string s = "Cryo";')
 
 
 def reference_tokens(src):
-    """Fluxo de tokens do lexer de referência no formato 'NOME valor'."""
+    """Fluxo de tokens do lexer de referência in the formato 'NOME value'."""
     out = []
     for t in Lexer(src).tokenize():
         out.append(f"{t.type.name} {t.value}")
@@ -46,7 +46,7 @@ def reference_tokens(src):
 
 
 def ser(n):
-    """Serializa a AST de referência na MESMA S-expression que o parser Cryo."""
+    """Serializa a AST de referência in the MESMA S-expression que o parser Cryo."""
     if isinstance(n, FunctionDecl):
         params = "".join(f" (p {pt} {pn})" for (pt, pn) in n.params)
         ret = n.return_type or "void"
@@ -92,8 +92,8 @@ def reference_ast(src):
 
 
 def _run_vm(driver_body):
-    """Escreve um driver no dir selfhost, compila p/ .pyro, roda na VM e
-    devolve as linhas de saída que são S-expressions (começam com '(')."""
+    """Escreve um driver in the dir selfhost, compila p/ .pyro, roda in the VM and
+    devolve as linhas de output que são S-expressions (começam with '(')."""
     driver = os.path.join(SELFHOST, "_test_driver.cryo")
     with open(driver, "w", encoding="utf-8") as f:
         f.write(driver_body)
@@ -110,7 +110,7 @@ def _run_vm(driver_body):
 
 
 def selfhost_tokens(src):
-    """Compila o lexer Cryo p/ .pyro e roda na VM, capturando os tokens."""
+    """Compila o lexer Cryo p/ .pyro and roda in the VM, capturando os tokens."""
     escaped = src.replace("\\", "\\\\").replace('"', '\\"')
     driver = os.path.join(SELFHOST, "_test_driver.cryo")
     with open(driver, "w", encoding="utf-8") as f:
@@ -126,7 +126,7 @@ def selfhost_tokens(src):
             os.remove(driver)
         except OSError:
             pass
-    # mantém só as linhas de token: "NOME valor", onde NOME é um nome de
+    # mantém só as linhas de token: "NOME value", onde NOME é um name de
     # TokenType (maiúsculas/_). Assim descartamos qualquer ruído de progresso
     # do compilador, independentemente da codificação do terminal.
     lines = []
@@ -149,41 +149,41 @@ def check(desc, cond):
         print(f"  FAIL {desc}")
 
 
-print("[9.3] lexer auto-hospedado (Cryo na VM Pyro) vs. lexer de referência")
+print("[9.3] lexer auto-hospedado (Cryo in the VM Pyro) vs. lexer de referência")
 
 expected = reference_tokens(SAMPLE)
 got, res = selfhost_tokens(SAMPLE)
 
-check("o lexer Cryo compilou e rodou na VM", res.returncode == 0 and len(got) > 0)
+check("o lexer Cryo compilou and rodou in the VM", res.returncode == 0 and len(got) > 0)
 check("mesmo número de tokens", len(got) == len(expected))
 
 if got != expected:
-    # mostra a primeira divergência para diagnóstico
+    # mostra a primeira divergência for diagnóstico
     n = max(len(got), len(expected))
     for i in range(n):
         g = got[i] if i < len(got) else "<falta>"
         e = expected[i] if i < len(expected) else "<extra>"
         if g != e:
-            print(f"    divergência na posição {i}: esperado {e!r}, obtido {g!r}")
+            print(f"    divergência in the posição {i}: esperado {e!r}, obtido {g!r}")
             break
 
 check("fluxo de tokens idêntico ao lexer de referência", got == expected)
-check("termina com EOF", len(got) > 0 and got[-1] == "EOF ")
+check("termina with EOF", len(got) > 0 and got[-1] == "EOF ")
 
-print("[9.3] parser auto-hospedado (Cryo na VM Pyro) vs. parser de referência")
+print("[9.3] parser auto-hospedado (Cryo in the VM Pyro) vs. parser de referência")
 _esc = SAMPLE.replace("\\", "\\\\").replace('"', '\\"')
 res2 = _run_vm('import "parser.cryo"\nparse("' + _esc + '");\n')
 got2 = [ln for ln in (res2.stdout or "").replace("\r\n", "\n").split("\n") if ln.startswith("(")]
 exp2 = reference_ast(SAMPLE)
 
-check("o parser Cryo compilou e rodou na VM", res2.returncode == 0 and len(got2) > 0)
+check("o parser Cryo compilou and rodou in the VM", res2.returncode == 0 and len(got2) > 0)
 check("mesmo número de statements de topo", len(got2) == len(exp2))
 if got2 != exp2:
     for i in range(max(len(got2), len(exp2))):
         g = got2[i] if i < len(got2) else "<falta>"
         e = exp2[i] if i < len(exp2) else "<extra>"
         if g != e:
-            print(f"    divergência no statement {i}:")
+            print(f"    divergência in the statement {i}:")
             print(f"      esperado: {e}")
             print(f"      obtido:   {g}")
             break
@@ -203,14 +203,14 @@ if got3 != exp3:
         g = got3[i] if i < len(got3) else "<falta>"
         e = exp3[i] if i < len(exp3) else "<extra>"
         if g != e:
-            print(f"    divergência (fonte 2) no statement {i}:")
+            print(f"    divergência (fonte 2) in the statement {i}:")
             print(f"      esperado: {e}")
             print(f"      obtido:   {g}")
             break
 check("AST idêntica (fonte 2: while/else-if/unário/chamada)", got3 == exp3)
 
-# ── estágio 3: codegen em Cryo -> .pyro executável ──────────
-print("[9.3] codegen auto-hospedado (Cryo na VM emite .pyro executável)")
+# ── estágio 3: codegen in Cryo -> .pyro executável ──────────
+print("[9.3] codegen auto-hospedado (Cryo in the VM emite .pyro executável)")
 
 def _int_lines(text):
     out = []
@@ -233,13 +233,13 @@ def oracle_run(prog):
     return _int_lines(r.stdout)
 
 def selfhost_run(prog, label):
-    """O compilador-em-Cryo (na VM) gera out.pyro; executa e devolve a saída."""
+    """O compilador-in-Cryo (in the VM) gera out.pyro; executa and devolve a output."""
     out_pyro = os.path.join(tempfile.gettempdir(), "selfhost_out.pyro").replace("\\", "/")
     try: os.remove(out_pyro)
     except OSError: pass
     escp = prog.replace("\\", "\\\\").replace('"', '\\"')
     gen = _run_vm('import "codegen.cryo"\ncompile("' + escp + '", "' + out_pyro + '");\n')
-    check(f"[{label}] codegen Cryo rodou e gravou o .pyro",
+    check(f"[{label}] codegen Cryo rodou and gravou o .pyro",
           gen.returncode == 0 and os.path.isfile(out_pyro))
     if os.path.isfile(out_pyro) and os.path.isfile(VM_BIN):
         r = subprocess.run([VM_BIN, out_pyro], capture_output=True, text=True,
@@ -260,16 +260,16 @@ def check_selfhost(prog, label):
 check_selfhost("int a = 2; int b = 3; print(a + b * 2); print((a + b) * 2); "
                "print(10 - 4 / 2); print(-b + 5);", "aritmética")
 
-# controle de fluxo: while + if/else-if/else com comparações e saltos
+# controle de fluxo: while + if/else-if/else with comparações and saltos
 check_selfhost("int i = 0; int sum = 0; while (i < 5) { sum = sum + i; i = i + 1; } "
                "print(sum); int x = 7; if (x > 5) { print(1); } else { print(0); } "
                "if (x == 5) { print(100); } else if (x > 6) { print(2); } else { print(3); }",
                "fluxo")
 
-# funções de usuário: recursão (fib), múltiplos params, chamadas em expressão
+# funções de usuário: recursão (fib), múltiplos params, chamadas in expressão
 check_selfhost("fn fib(int n) -> int ={ if (n < 2) { return n; } return fib(n - 1) + fib(n - 2); } "
-               "fn soma(int a, int b) -> int ={ return a + b; } "
-               "print(fib(10)); print(soma(20, 22)); int s = fib(7) + soma(5, 5); print(s);",
+               "fn sum(int a, int b) -> int ={ return a + b; } "
+               "print(fib(10)); print(sum(20, 22)); int s = fib(7) + sum(5, 5); print(s);",
                "funções")
 
 print(f"\n{_passed} passaram, {_failed} falharam")

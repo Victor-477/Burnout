@@ -1,6 +1,6 @@
 # ============================================================
 #  Cryo Compiler - C Code Generator  (v0.3)
-#  .cryo  ->  .pyro  (C nativo, compilavel com gcc/clang)
+#  .cryo  ->  .pyro  (Native C, compilable with gcc/clang)
 # ============================================================
 from ast_nodes import *
 from foreign import collect_imports, resolve_library_lang
@@ -10,7 +10,7 @@ from typing import List, Dict, Optional, Set
 class CodeGenError(Exception):
     pass
 
-# ── Mapeamento de tipos Cryo -> C ───────────────────────────
+# ── Cryo -> C type mapping ───────────────────────────
 
 C_TYPE: Dict[str, str] = {
     'int':    'int64_t',
@@ -24,17 +24,17 @@ C_TYPE: Dict[str, str] = {
 def c_type(t: str) -> str:
     if t and (t.startswith('map<') or t.endswith('?')):
         raise CodeGenError(
-            f"tipo '{t}' (map/opcional) ainda não é suportado no backend C; "
+            f"type '{t}' (map/optional) is not yet supported in the C backend; "
             f"use --backend go.")
     if t and t.endswith('[]'):
         return 'CryoArray*'
-    return C_TYPE.get(t, t)          # tipos de struct passam diretamente
+    return C_TYPE.get(t, t)          # struct types pass directly
 
 def elem_type(arr_t: str) -> str:
     return arr_t[:-2] if arr_t.endswith('[]') else 'unknown'
 
 
-# ── Inferencia de tipos ──────────────────────────────────────
+# ── Type Inference ──────────────────────────────────────
 
 class TypeEnv:
     def __init__(self):
@@ -129,17 +129,17 @@ class CodeGenC:
         self._fn_defs:      List[str] = []
         self._main_stmts:   List[str] = []
         self._cur:          List[str] = self._main_stmts
-        # ── seguranca ──
-        self._safe_default = safe          # modo --safe global
-        self._safe_stack:  List[bool] = [] # override por blocos safe/unsafe
-        self._loop_depth = 0               # valida break/continue
-        self._fe = 0                       # contador de indices de for-each
+        # ── security ──
+        self._safe_default = safe          # global --safe mode
+        self._safe_stack:  List[bool] = [] # override by safe/unsafe blocks
+        self._loop_depth = 0               # validates break/continue
+        self._fe = 0                       # for-each index counter
 
     @property
     def _safe(self) -> bool:
         return self._safe_stack[-1] if self._safe_stack else self._safe_default
 
-    # ── emissao ──────────────────────────────────────────────
+    # ── emission ──────────────────────────────────────────────
 
     def _pad(self) -> str:
         return '    ' * self._indent
@@ -147,7 +147,7 @@ class CodeGenC:
     def _emit(self, line: str = ''):
         self._cur.append(self._pad() + line if line else '')
 
-    # ── entrada principal ────────────────────────────────────
+    # ── main entry ────────────────────────────────────
 
     def generate(self, program: Program) -> str:
         self._pre_scan(program.statements)
@@ -197,8 +197,8 @@ class CodeGenC:
     def _assemble(self) -> str:
         lines = [
             "/* ================================================",
-            " * [PYRO] Compilado de Cryo -> C nativo  (v0.3)",
-            " * Compilar: gcc -O2 arquivo.pyro cryo_runtime.c -lm -o programa",
+            " * [PYRO] Compiled from Cryo -> Native C  (v0.3)",
+            " * Compile: gcc -O2 file.pyro cryo_runtime.c -lm -o program",
             " * ================================================ */",
             "",
             '#include "cryo_runtime.h"',
@@ -250,11 +250,11 @@ class CodeGenC:
         elif isinstance(node, ForeignBlock):        self._foreign(node)
         elif isinstance(node, (IndexAssignment, MapLiteral, CastExpr, UnwrapExpr, MatchStatement)):
             raise CodeGenError(
-                f"'{type(node).__name__}' (map/JSON/opcional/match) ainda não é "
-                f"suportado no backend C; use --backend go.")
+                f"'{type(node).__name__}' (map/JSON/optional/match) is not yet "
+                f"supported in C backend; use --backend go.")
         elif isinstance(node, SkillDecl):
             raise CodeGenError(
-                "declaração 'skill' faz parte da camada Pyro e só existe no "
+                "'skill' declaration is part of the Pyro layer and only exists in the "
                 "backend Go; use --backend go.")
         elif isinstance(node, (CallExpr, MethodCallExpr)):
             self._emit(self._expr(node) + ';')
@@ -272,8 +272,8 @@ class CodeGenC:
         has_data = any(len(m.fields) > 0 for m in n.members)
         if has_data:
             raise CodeGenError(
-                "Enums com dados (Algebraic Data Types) não são suportados "
-                "no backend C; use --backend go ou node.")
+                "Enums with data (Algebraic Data Types) are not supported "
+                "in C backend; use --backend go or node.")
         members = ', '.join(f"{n.name}_{m.name}" for m in n.members)
         self._emit(f"typedef enum {{ {members} }} {n.name};")
         self._emit()
@@ -420,24 +420,24 @@ class CodeGenC:
 
     def _break(self, n: Break):
         if self._loop_depth == 0:
-            raise CodeGenError("'break' fora de um laco")
+            raise CodeGenError("'break' out of a loop")
         self._emit("break;")
 
     def _continue(self, n: Continue):
         if self._loop_depth == 0:
-            raise CodeGenError("'continue' fora de um laco")
+            raise CodeGenError("'continue' out of a loop")
         self._emit("continue;")
 
     def _switch(self, n: Switch):
         sub_t = self.te.infer(n.subject)
-        # switch em string nao existe em C: desdobra em if/else encadeado.
+        # switch on string does not exist in C: unfold into chained if/else.
         if sub_t == 'string':
             self._switch_as_if(n)
             return
         self._emit(f"switch ({self._expr(n.subject)}) {{")
         self._indent += 1
-        # cada case dentro de switch quebra por padrao (sem fall-through implicito)
-        self._loop_depth += 1  # permite 'break' dentro de case
+        # each case inside a switch breaks by default (no implicit fall-through)
+        self._loop_depth += 1  # allows 'break' inside case
         for case in n.cases:
             for v in case.values:
                 self._emit(f"case {self._expr(v)}:")
@@ -463,7 +463,7 @@ class CodeGenC:
 
     @staticmethod
     def _terminates(body: List[Node]) -> bool:
-        """True se o bloco termina com return/break/continue (sem fall-through)."""
+        """True if the block ends with return/break/continue (no fall-through)."""
         return bool(body) and isinstance(body[-1], (Return, Break, Continue))
 
     def _switch_as_if(self, n: Switch):
@@ -495,7 +495,7 @@ class CodeGenC:
         if n.message is not None:
             msg = self._expr(n.message)
         else:
-            msg = f'"assert falhou (linha {n.line})"'
+            msg = f'"assert failed (line {n.line})"'
         self._emit(f"cryo_assert({cond}, {msg});")
 
     def _safety(self, n: SafetyBlock):
@@ -555,14 +555,14 @@ class CodeGenC:
         self._emit(f"/* [CRYO] import >{n.lang}< */")
 
     def _library(self, n: Library):
-        # só inclui a library se ela pertencer à linguagem C
+        # only includes the library if it belongs to the C language
         lang = resolve_library_lang(n, getattr(self, "_imported_langs", set()))
         if lang == 'c':
             lib = n.name.lower()
             self._emit(f'#include <{lib}.h>  /* [CRYO] library >c {n.name}< */')
         else:
             self._emit(f'/* [CRYO] library >{n.name}< (linguagem {lang or "?"}) '
-                       f'ignorada no backend C */')
+                       f'ignored in C backend */')
 
     def _foreign(self, n: ForeignBlock):
         if n.lang.lower() == 'c':
@@ -571,15 +571,15 @@ class CodeGenC:
                 self._emit(line.rstrip())
             self._emit("/* -- [/C block] -- */")
         else:
-            self._emit(f"/* [CRYO] bloco >{n.lang}< ignorado no backend C */")
+            self._emit(f"/* [CRYO] >{n.lang}< block ignored in C backend */")
 
-    # ── expressoes ──────────────────────────────────────────
+    # ── expressions ──────────────────────────────────────────
 
     def _expr(self, node: Node) -> str:
         if isinstance(node, (MapLiteral, CastExpr, UnwrapExpr, TryExpr, SpawnExpr, AwaitExpr)):
             raise CodeGenError(
                 f"'{type(node).__name__}' (map/JSON/opcional/propagação '?'/async) "
-                f"ainda não é suportado no backend C; use --backend go.")
+                f"ainda não é supported in C backend; use --backend go.")
         if isinstance(node, Literal):
             if node.kind == 'null':   return 'NULL'
             if node.kind == 'bool':   return 'true' if node.value else 'false'
@@ -646,23 +646,23 @@ class CodeGenC:
         if node.op == '||': return f"({l} || {r})"
         if node.op == '??': return f"(({l}) != NULL ? ({l}) : ({r}))"
 
-        # Concatenacao de strings
+        # String concatenation
         if node.op == '+' and (lt == 'string' or rt == 'string'):
             ls = l if lt == 'string' else self._to_str(l, lt)
             rs = r if rt == 'string' else self._to_str(r, rt)
             return f"cryo_str_concat({ls}, {rs})"
 
-        # Comparacao de strings
+        # String comparison
         if node.op == '==' and (lt == 'string' or rt == 'string'):
             return f"cryo_str_eq({l}, {r})"
         if node.op == '!=' and (lt == 'string' or rt == 'string'):
             return f"(!cryo_str_eq({l}, {r}))"
 
-        # ── Operadores bit a bit (apenas inteiros) ──
+        # ── Bitwise operators (integers only) ──
         if node.op in ('&', '|', '^', '<<', '>>'):
             return f"({l} {node.op} {r})"
 
-        # ── Instrumentacao de seguranca em inteiros ──
+        # ── Integer security instrumentation ──
         both_int = (lt == 'int' and rt == 'int')
         if self._safe and both_int:
             if node.op == '+': return f"cryo_add_ovf({l}, {r})"
@@ -670,7 +670,7 @@ class CodeGenC:
             if node.op == '*': return f"cryo_mul_ovf({l}, {r})"
             if node.op == '/': return f"cryo_idiv_chk({l}, {r})"
             if node.op == '%': return f"cryo_imod_chk({l}, {r})"
-        # Divisao/modulo por zero: sempre protegidos em inteiros
+        # Divisao/modulo por zero: always protecteds em inteiros
         elif both_int and node.op in ('/', '%'):
             fn = 'cryo_idiv_chk' if node.op == '/' else 'cryo_imod_chk'
             return f"{fn}({l}, {r})"
@@ -681,20 +681,20 @@ class CodeGenC:
         callee = node.callee
         args   = node.args
 
-        # recursos apenas do backend Go (Pyro/JSON, concorrência, HTTP, LLM)
+        # resources only for Go backend (Pyro/JSON, concurrency, HTTP, LLM)
         if callee.startswith('pyro_') or callee in (
                 'skills', 'skill_get', 'skill_has', 'skills_json', 'json_encode',
                 'http_get', 'http_post', 'sleep',
                 'schema_of', 'llm', 'tools', 'tool_get', 'tools_json', 'agent'):
             raise CodeGenError(
-                f"'{callee}()' só existe no backend Go (JSON/concorrência/HTTP/LLM); "
+                f"'{callee}()' only exists in the Go backend (JSON/concurrency/HTTP/LLM); "
                 f"use --backend go.")
-        # builtins de string: cobertos por go/node/pyro, não pelo C
+        # string builtins: covered by go/node/pyro, not C
         if callee in ('upper', 'lower', 'trim', 'contains', 'find',
                       'replace', 'substr', 'split', 'join', 'remove'):
             raise CodeGenError(
-                f"'{callee}()' não é suportado no backend C; "
-                f"use --backend go, node ou pyro.")
+                f"'{callee}()' is not supported in the C backend; "
+                f"use --backend go, node or pyro.")
 
         # ── built-ins ──
         if callee == 'print':
@@ -736,7 +736,7 @@ class CodeGenC:
         if callee == 'throw':
             return f"CRYO_THROW({self._expr(args[0])})"
 
-        # Funcao definida pelo usuario
+        # User-defined function
         args_str = ', '.join(self._expr(a) for a in args)
         return f"{callee}({args_str})"
 
@@ -750,7 +750,7 @@ class CodeGenC:
         if typ == 'int':    return f'cryo_print_i64({e})'
         if typ == 'number': return f'cryo_print_f64({e})'
         if typ == 'bool':   return f'cryo_print_bool({e})'
-        # fallback: converte para string
+        # fallback: converts to string
         return f'cryo_print_str({self._to_str(e, typ)})'
 
     def _method(self, node: MethodCallExpr) -> str:

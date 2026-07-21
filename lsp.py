@@ -2,19 +2,19 @@
 # ============================================================
 #  Cryo Language Server (LSP)
 #
-#  Servidor LSP mínimo, sem dependências: fala JSON-RPC sobre
-#  stdio (enquadramento Content-Length) e reaproveita o front-end
-#  do compilador (lexer/parser/semântica/foreign/módulos).
+#  Minimal LSP server, no dependencies: speaks JSON-RPC over
+#  stdio (Content-Length framing) and reuses the front-end
+#  from the compiler (lexer/parser/semantics/foreign/modules).
 #
-#  Recursos:
-#    - textDocument/publishDiagnostics  (léxico, sintático, semântico,
-#      módulos e blocos estrangeiros) ao abrir/editar
-#    - textDocument/hover               (builtins, palavras-chave,
-#      funções/structs/enums do usuário)
-#    - textDocument/definition          (funções/structs/enums)
-#    - textDocument/documentSymbol      (outline do arquivo)
+#  Resources:
+#    - textDocument/publishDiagnostics  (lexical, syntax, semântico,
+#      módulos e foreign blocks) ao abrir/editar
+#    - textDocument/hover               (builtins, keywords,
+#      user functions/structs/enums)
+#    - textDocument/definition          (functions/structs/enums)
+#    - textDocument/documentSymbol      (file outline)
 #
-#  Uso:  python burnout/lsp.py         (stdio; um editor o inicia)
+#  Usage:  python burnout/lsp.py         (stdio; an editor starts it)
 # ============================================================
 import json
 import os
@@ -38,66 +38,66 @@ from ast_nodes import (                            # noqa: E402
     FunctionDecl, StructDecl, EnumDecl, ConstDecl, SkillDecl,
 )
 
-# ── documentação de builtins/keywords para hover ───────────
+# ── builtins/keywords documentation for hover ───────────
 _BUILTIN_DOC = {
-    'print': "`print(v)` — imprime um valor.",
-    'input': "`input(prompt) -> string` — lê uma linha do terminal.",
-    'len': "`len(x) -> int` — tamanho de string/array/map.",
-    'assert': "`assert(cond)` / `assert(cond, msg)` — aborta se falso.",
-    'to_string': "`to_string(v) -> string` — converte para texto.",
-    'to_int': "`to_int(v) -> int` — converte para inteiro.",
-    'to_number': "`to_number(v) -> number` — converte para ponto flutuante.",
+    'print': "`print(v)` — prints a value.",
+    'input': "`input(prompt) -> string` — reads a line from the terminal.",
+    'len': "`len(x) -> int` — length of string/array/map.",
+    'assert': "`assert(cond)` / `assert(cond, msg)` — aborts if false.",
+    'to_string': "`to_string(v) -> string` — converts to text.",
+    'to_int': "`to_int(v) -> int` — converts to integer.",
+    'to_number': "`to_number(v) -> number` — converts to floating point.",
     'sqrt': "`sqrt(x) -> number`", 'pow': "`pow(x, y) -> number`",
     'abs': "`abs(x) -> number`", 'min': "`min(a, b)`", 'max': "`max(a, b)`",
     'floor': "`floor(x) -> number`", 'ceil': "`ceil(x) -> number`",
     'round': "`round(x) -> number`",
-    'has': "`has(m, k) -> bool` — a chave existe no mapa?",
-    'keys': "`keys(m) -> K[]` — chaves do mapa.",
-    'remove': "`remove(m, k)` — remove a chave do mapa.",
+    'has': "`has(m, k) -> bool` — does the key exist in the map?",
+    'keys': "`keys(m) -> K[]` — map keys.",
+    'remove': "`remove(m, k)` — removes the key from the map.",
     'upper': "`upper(s) -> string`", 'lower': "`lower(s) -> string`",
     'trim': "`trim(s) -> string`",
     'contains': "`contains(s, sub) -> bool`", 'find': "`find(s, sub) -> int`",
     'replace': "`replace(s, velho, novo) -> string`",
     'substr': "`substr(s, inicio, n) -> string`",
     'split': "`split(s, sep) -> string[]`", 'join': "`join(arr, sep) -> string`",
-    'json_encode': "`json_encode(v) -> string` — serializa para JSON.",
-    'json_decode': "`json_decode(s) as T` — desserializa JSON.",
-    'http_get': "`http_get(url) -> string` — GET HTTP (\"\" em erro).",
+    'json_encode': "`json_encode(v) -> string` — serializes to JSON.",
+    'json_decode': "`json_decode(s) as T` — deserializes JSON.",
+    'http_get': "`http_get(url) -> string` — HTTP GET (\"\" on error).",
     'http_post': "`http_post(url, body) -> string` — POST HTTP.",
-    'sleep': "`sleep(ms)` — pausa em milissegundos.",
-    'llm': "`llm(modelo, prompt) [as T]` — chamada de LLM (structured output).",
-    'agent': "`agent(modelo, prompt[, tools, passos])` — laço de tool-calling.",
-    'schema_of': "`schema_of(T) -> string` — JSON Schema de um tipo.",
+    'sleep': "`sleep(ms)` — pauses in milliseconds.",
+    'llm': "`llm(model, prompt) [as T]` — LLM call (structured output).",
+    'agent': "`agent(model, prompt[, tools, steps])` — tool-calling loop.",
+    'schema_of': "`schema_of(T) -> string` — JSON Schema of a type.",
     'tools': "`tools() -> string[]` — nomes das tools.",
-    'tools_json': "`tools_json() -> string` — catálogo de tools em JSON.",
-    'pyro_exec': "`pyro_exec(cmd) -> string` — executa um comando de shell.",
-    'pyro_write_file': "`pyro_write_file(path, s) -> bool` — grava um arquivo.",
-    'pyro_open': "`pyro_open(path) -> bool` — abre no app padrão do SO.",
+    'tools_json': "`tools_json() -> string` — JSON catalog of tools.",
+    'pyro_exec': "`pyro_exec(cmd) -> string` — executes a shell command.",
+    'pyro_write_file': "`pyro_write_file(path, s) -> bool` — writes a file.",
+    'pyro_open': "`pyro_open(path) -> bool` — opens in the OS default app.",
 }
 _KEYWORD_DOC = {
-    'fn': "Declaração de função: `fn nome(params) -> tipo ={ ... }`.",
-    'tool': "`tool fn` — função exposta a um LLM (schema derivado da assinatura).",
-    'schema': "Declara um `schema` (struct com JSON Schema nativo).",
-    'struct': "Declara um registro de campos nomeados.",
-    'enum': "Declara um conjunto de constantes (`Enum_MEMBRO`).",
-    'skill': "Declara uma skill de LLM compilada no binário.",
-    'const': "Declara uma constante imutável.",
+    'fn': "Function declaration: `fn name(params) -> type ={ ... }`.",
+    'tool': "`tool fn` — function exposed to an LLM (schema derived from signature).",
+    'schema': "Declares a `schema` (struct with native JSON Schema).",
+    'struct': "Declares a record of named fields.",
+    'enum': "Declares a set of constants (`Enum_MEMBER`).",
+    'skill': "Declares an LLM skill compiled into the binary.",
+    'const': "Declares an immutable constant.",
     'if': "Condicional. `if (cond) { ... } else { ... }`.",
-    'for': "Laço: `for (init; cond; upd)` ou `for (T x in coll)`.",
-    'while': "Laço enquanto a condição for verdadeira.",
-    'return': "Retorna de uma função.",
+    'for': "Loop: `for (init; cond; upd)` or `for (T x in coll)`.",
+    'while': "Loop while condition is true.",
+    'return': "Returns from a function.",
     'spawn': "`spawn expr` — inicia trabalho concorrente (future<T>).",
-    'await': "`await f` — aguarda o resultado de um future.",
-    'try': "Tratamento de erro: `try { } catch (string e) { } finally { }`.",
-    'import': "`import \"arquivo.cryo\"` (módulo) ou `import >Lang<` (linguagem).",
-    'library': "`library >lang nome<` — importa uma biblioteca estrangeira.",
-    'map': "Tipo mapa: `map<K, V>`.", 'future': "Tipo de resultado pendente.",
-    'unsafe': "Bloco sem instrumentação de segurança.",
-    'safe': "Reativa a instrumentação dentro de um bloco unsafe.",
+    'await': "`await f` — waits for the result of a future.",
+    'try': "Error handling: `try { } catch (string e) { } finally { }`.",
+    'import': "`import \"file.cryo\"` (module) or `import >Lang<` (language).",
+    'library': "`library >lang name<` — imports a foreign library.",
+    'map': "Tipo mapa: `map<K, V>`.", 'future': "Pending result type.",
+    'unsafe': "Block without security instrumentation.",
+    'safe': "Reactivates instrumentation inside an unsafe block.",
 }
 
 
-# ── protocolo JSON-RPC (stdio, Content-Length) ──────────────
+# ── JSON-RPC protocol (stdio, Content-Length) ──────────────
 def _read_message(stream):
     headers = {}
     while True:
@@ -122,11 +122,11 @@ def _write_message(stream, obj):
     stream.flush()
 
 
-# ── utilidades de texto/posição ─────────────────────────────
+# ── text/position utilities ─────────────────────────────
 def _uri_to_path(uri):
     if uri.startswith('file://'):
         p = uri[7:]
-        if re.match(r'/[A-Za-z]:', p):    # /C:/... no Windows
+        if re.match(r'/[A-Za-z]:', p):    # /C:/... on Windows
             p = p[1:]
         return os.path.normpath(p.replace('/', os.sep))
     return uri
@@ -174,7 +174,7 @@ def _full_line_diag(text, line1, message):
 
 def compute_diagnostics(uri, text):
     diags = []
-    # léxico
+    # lexical
     try:
         tokens = Lexer(text).tokenize()
     except LexerError as e:
@@ -186,7 +186,7 @@ def compute_diagnostics(uri, text):
         else:
             diags.append(_diag(0, 0, 1, str(e)))
         return diags
-    # sintático
+    # syntax
     try:
         ast = Parser(tokens).parse()
     except ParseError as e:
@@ -194,21 +194,21 @@ def compute_diagnostics(uri, text):
         diags.append(_full_line_diag(text, int(m.group(1)), m.group(2)) if m
                      else _diag(0, 0, 1, str(e)))
         return diags
-    # módulos (best-effort; erro vira diagnóstico na linha 0)
+    # modules (best-effort; error becomes diagnostic on line 0)
     try:
         base = os.path.dirname(_uri_to_path(uri))
         resolved = resolve_modules(ast, base)
     except ModuleError as e:
         diags.append(_diag(0, 0, 1, f"módulo: {e}"))
         resolved = ast
-    # semântica
+    # semantics
     try:
         for line, msg in semantic.findings(resolved):
             diags.append(_full_line_diag(text, line, msg) if line
                          else _diag(0, 0, 1, msg))
-    except Exception as e:                       # nunca derruba o servidor
+    except Exception as e:                       # never brings down the server
         diags.append(_diag(0, 0, 1, f"análise: {e}"))
-    # blocos estrangeiros
+    # foreign blocks
     try:
         verify_foreign(resolved)
     except ForeignError as e:
@@ -217,7 +217,7 @@ def compute_diagnostics(uri, text):
 
 
 def _decls(text):
-    """(nome -> (kind, line, detail)) das declarações de topo do arquivo."""
+    """(name -> (kind, line, detail)) of top-level file declarations."""
     out = {}
     try:
         ast = Parser(Lexer(text).tokenize()).parse()
@@ -287,7 +287,7 @@ def document_symbols(text):
     return syms
 
 
-# ── servidor ────────────────────────────────────────────────
+# ── server ────────────────────────────────────────────────
 class Server:
     def __init__(self, stdin, stdout):
         self.stdin = stdin
@@ -318,7 +318,7 @@ class Server:
             except Exception as e:
                 if mid is not None:
                     self._respond(mid, None)
-                sys.stderr.write(f"[cryo-lsp] erro em {method}: {e}\n")
+                sys.stderr.write(f"[cryo-lsp] error in {method}: {e}\n")
             if method == "exit":
                 break
 
@@ -343,7 +343,7 @@ class Server:
             uri = params["textDocument"]["uri"]
             changes = params.get("contentChanges", [])
             if changes:
-                self.docs[uri] = changes[-1]["text"]    # full sync: último texto
+                self.docs[uri] = changes[-1]["text"]    # full sync: last text
             self._publish(uri)
         elif method == "textDocument/didSave":
             uri = params["textDocument"]["uri"]
@@ -363,7 +363,7 @@ class Server:
             uri = params["textDocument"]["uri"]
             self._respond(mid, document_symbols(self.docs.get(uri, "")))
         elif mid is not None:
-            self._respond(mid, None)                    # método não suportado
+            self._respond(mid, None)                    # method not supported
 
 
 def main():

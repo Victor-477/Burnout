@@ -1,26 +1,26 @@
 # ============================================================
 #  Cryo Compiler - x86-64 Assembly Code Generator  (v0.4)
-#  .cryo  ->  .s  (GAS / sintaxe Intel)
+#  .cryo  ->  .s  (GAS / Intel syntax)
 #
-#  Objetivo: extrair o maximo da maquina gerando codigo nativo
-#  diretamente, sem passar por C. Suporta duas ABIs:
+#  Objective: extract the most from the machine by generating native code
+#  directly, without passing through C. Supports two ABIs:
 #
 #    sysv  (System V AMD64 — Linux, macOS, WSL):
-#        gcc -no-pie programa.s cryo_runtime.c -lm -o programa
+#        gcc -no-pie program.s cryo_runtime.c -lm -o program
 #    win64 (Microsoft x64 — Windows/MinGW):
-#        gcc programa.s cryo_runtime.c -o programa
+#        gcc program.s cryo_runtime.c -o program
 #
-#  Subconjunto suportado: inteiros (int) e booleanos (bool),
-#  funcoes/recursao, if/else, while, for, switch, break/continue,
-#  operadores aritmeticos/bit-a-bit/logicos, assert e print.
-#  Recursos de alto nivel (number/double, strings dinamicas,
-#  arrays, structs, enums, try/catch) permanecem no backend C.
+#  Supported subset: integers (int) and booleans (bool),
+#  functions/recursion, if/else, while, for, switch, break/continue,
+#  arithmetic/bitwise/logical operators, assert and print.
+#  High-level resources (number/double, dynamic strings,
+#  arrays, structs, enums, try/catch) remain in the C backend.
 #
-#  Estrategia de registradores (comum as duas ABIs):
-#    rax  = acumulador / resultado de expressao
-#    r10  = operando direito (RHS) — volatil e NAO-argumento em
-#           ambas as ABIs, evitando conflito com rcx (arg no Win64)
-#    r15  = salva rsp em torno de chamadas (nao-volatil, preservado)
+#  Register strategy (common to both ABIs):
+#    rax  = accumulator / expression result
+#    r10  = right operand (RHS) — volatile and NOT-argument in
+#           both ABIs, avoiding conflict with rcx (arg in Win64)
+#    r15  = saves rsp around calls (non-volatile, preserved)
 # ============================================================
 from ast_nodes import *
 from typing import List, Dict, Optional
@@ -30,11 +30,11 @@ class CodeGenAsmError(Exception):
     pass
 
 
-# Registradores de argumento inteiro por ABI
+# Integer argument registers by ABI
 ARG_REGS_SYSV  = ['rdi', 'rsi', 'rdx', 'rcx', 'r8', 'r9']
 ARG_REGS_WIN64 = ['rcx', 'rdx', 'r8', 'r9']
 
-# Operador de comparacao -> instrucao 'set'
+# Comparison operator -> 'set' instruction
 _SETCC = {
     '==': 'sete', '!=': 'setne',
     '<':  'setl', '>':  'setg',
@@ -45,15 +45,15 @@ _SETCC = {
 class CodeGenAsm:
     def __init__(self, safe: bool = True, abi: str = 'sysv'):
         if abi not in ('sysv', 'win64'):
-            raise CodeGenAsmError(f"ABI desconhecida: {abi!r}")
+            raise CodeGenAsmError(f"Unknown ABI: {abi!r}")
         self._abi = abi
         self._arg_regs = ARG_REGS_WIN64 if abi == 'win64' else ARG_REGS_SYSV
-        # Win64 exige 32 bytes de shadow space antes de cada call
+        # Win64 requires 32 bytes of shadow space before each call
         self._shadow = 32 if abi == 'win64' else 0
-        # Offset (a partir de rbp) do 1o argumento passado na pilha, visto pelo
+        # Offset (from rbp) of the 1st argument passed on the stack, seen by the
         # callee. Win64: shadow(32) + retaddr/rbp(16) = 48. SysV: 16.
         self._stack_arg_base = 48 if abi == 'win64' else 16
-        # Secao de dados somente-leitura (COFF usa .rdata; ELF usa .rodata)
+        # Read-only data section (COFF uses .rdata; ELF uses .rodata)
         self._rodata_section = '.rdata,"dr"' if abi == 'win64' else '.rodata'
 
         self._safe_default = safe
@@ -64,18 +64,18 @@ class CodeGenAsm:
         self._n_str = 0
         self._n_lbl = 0
 
-        # estado por-funcao
+        # per-function state
         self._locals: Dict[str, int] = {}
         self._vartypes: Dict[str, str] = {}
         self._cur_fn = ''
         self._loop_stack: List[tuple] = []   # (break_label, continue_label)
 
-        # tipos de retorno das funcoes (para inferencia de print)
+        # tipos de retorno das functions (para inferencia de print)
         self._fn_ret: Dict[str, str] = {}
 
-        # structs registrados: nome -> lista de (nome_campo, tipo_campo)
+        # registered structs: name -> list of (field_name, field_type)
         self._structs: Dict[str, List[tuple]] = {}
-        # sizes por variavel local (structs ocupam varios slots)
+        # sizes per local variable (structs occupy several slots)
         self._var_sizes: Dict[str, int] = {}
         self._cur_fn_ret = 'void'
 
@@ -105,10 +105,10 @@ class CodeGenAsm:
         self._rodata.append(f'    .string "{esc}"')
         return lbl
 
-    # ── entrada principal ───────────────────────────────────
+    # ── main entry ───────────────────────────────────
 
     def generate(self, program: Program) -> str:
-        # 1a passada: registra structs (layout) e tipos de retorno
+        # 1st pass: registers structs (layout) and return types
         for n in program.statements:
             if isinstance(n, StructDecl):
                 self._reg_struct(n)
@@ -121,16 +121,16 @@ class CodeGenAsm:
             if isinstance(n, FunctionDecl):
                 self._gen_function(n)
             elif isinstance(n, (Import, Library, StructDecl)):
-                pass  # structs sao so layout; nada a emitir
+                pass  # structs are only layout; nothing to emit
             elif isinstance(n, (EnumDecl, ForeignBlock)):
                 raise CodeGenAsmError(
-                    f"'{type(n).__name__}' nao e suportado no backend assembly; "
-                    f"use --backend c para enums/blocos estrangeiros."
+                    f"'{type(n).__name__}' is not supported in the assembly backend; "
+                    f"use --backend c para enums/foreign blocks."
                 )
             else:
                 top_level.append(n)
 
-        # 'main' sintetico a partir dos statements de topo
+        # synthetic 'main' from top-level statements
         self._gen_function(FunctionDecl('main', [], 'int', top_level),
                            synthetic_main=True)
 
@@ -138,14 +138,14 @@ class CodeGenAsm:
 
     def _assemble(self) -> str:
         if self._abi == 'win64':
-            montar = "gcc arquivo.s cryo_runtime.c -o programa   (MinGW)"
+            montar = "gcc file.s cryo_runtime.c -o program   (MinGW)"
             abi_nome = "Microsoft x64 (Win64)"
         else:
-            montar = "gcc -no-pie arquivo.s cryo_runtime.c -lm -o programa"
+            montar = "gcc -no-pie file.s cryo_runtime.c -lm -o program"
             abi_nome = "System V AMD64"
         out = [
             "# ================================================",
-            f"# [CRYO] Compilado de Cryo -> x86-64 (ABI {abi_nome})",
+            f"# [CRYO] Compiled from Cryo -> x86-64 (ABI {abi_nome})",
             f"# Montar: {montar}",
             "# ================================================",
             "    .intel_syntax noprefix",
@@ -159,13 +159,13 @@ class CodeGenAsm:
         out.append("")
         return '\n'.join(out)
 
-    # ── structs: layout e classificacao de retorno ─────────
+    # ── structs: layout and return classification ─────────
 
     def _reg_struct(self, n: StructDecl):
         for f in n.fields:
             if f.field_type not in ('int', 'bool'):
                 raise CodeGenAsmError(
-                    f"struct '{n.name}', campo '{f.name}': o backend assembly "
+                    f"struct '{n.name}', field '{f.name}': the assembly backend "
                     f"so aceita campos int/bool (8 bytes). Use --backend c.")
         self._structs[n.name] = [(f.name, f.field_type) for f in n.fields]
 
@@ -175,33 +175,33 @@ class CodeGenAsm:
     def _type_size(self, typ: str) -> int:
         if self._is_struct(typ):
             return len(self._structs[typ]) * 8
-        return 8   # int/bool/ponteiro
+        return 8   # int/bool/pointer
 
     def _field_index(self, struct_type: str, field: str) -> int:
         for i, (fname, _) in enumerate(self._structs[struct_type]):
             if fname == field:
                 return i
         raise CodeGenAsmError(
-            f"campo '{field}' inexistente em struct '{struct_type}'.")
+            f"field '{field}' non-existent in struct '{struct_type}'.")
 
     def _field_addr(self, var_name: str, field: str) -> str:
         typ = self._vartypes.get(var_name)
         if not self._is_struct(typ):
             raise CodeGenAsmError(
-                f"'{var_name}' nao e struct; acesso a campo '{field}' invalido.")
+                f"'{var_name}' is not a struct; invalid field access '{field}'.")
         idx = self._field_index(typ, field)
-        lo  = self._locals[var_name]          # campo 0 no endereco mais baixo
+        lo  = self._locals[var_name]          # field 0 at the lowest address
         disp = lo - idx * 8
         return f"[rbp-{disp}]"
 
     def _struct_return_kind(self, struct_type: str) -> str:
-        """Como uma struct e retornada: 'rax', 'rax_rdx' ou 'memory'."""
+        """How a struct is returned: 'rax', 'rax_rdx' or 'memory'."""
         size = self._type_size(struct_type)
         if self._abi == 'sysv':
             if size <= 8:  return 'rax'
             if size <= 16: return 'rax_rdx'
             return 'memory'
-        # win64: retorna em RAX so se o tamanho for 1/2/4/8 bytes
+        # win64: returns in RAX only if size is 1/2/4/8 bytes
         if size in (1, 2, 4, 8): return 'rax'
         return 'memory'
 
@@ -211,14 +211,14 @@ class CodeGenAsm:
         if kind == 'rax_rdx': return ['rax', 'rdx']
         raise CodeGenAsmError(
             f"struct '{struct_type}' ({self._type_size(struct_type)} bytes) e "
-            f"grande demais para retorno em registrador na ABI {self._abi}; "
+            f"too large for register return in ABI {self._abi}; "
             f"o backend assembly ainda nao implementa retorno via ponteiro "
-            f"(sret). Use --backend c ou reduza a struct.")
+            f"(sret). Use --backend c or reduce the struct.")
 
-    # ── funcoes ─────────────────────────────────────────────
+    # ── functions ─────────────────────────────────────────────
 
     def _collect_locals(self, stmts, names, types):
-        """Descobre todas as variaveis locais de uma funcao (namespace plano)."""
+        """Discovers all local variables of a function (flat namespace)."""
         for n in stmts:
             if isinstance(n, VarDecl):
                 if n.name not in names:
@@ -252,37 +252,37 @@ class CodeGenAsm:
 
         names: List[str] = []
         types: Dict[str, str] = {}
-        # parametros primeiro (structs por valor como parametro nao suportados)
+        # parameters first (structs by value as parameter not supported)
         for ptype, pname in fn.params:
             if self._is_struct(ptype):
                 raise CodeGenAsmError(
                     f"funcao '{fn.name}': struct '{ptype}' como parametro por "
-                    f"valor nao e suportado no backend assembly. Use --backend c.")
+                    f"value is not supported in assembly backend. Use --backend c.")
             names.append(pname)
             types[pname] = ptype
         self._collect_locals(fn.body, names, types)
         self._vartypes = types
 
-        # aloca por tamanho (structs ocupam varios slots); frame alinhado em 16.
-        # cursor = distancia (para baixo) de rbp ate o byte mais baixo do local.
+        # allocates by size (structs occupy several slots); frame aligned to 16.
+        # cursor = distance (downwards) from rbp to the lowest byte of the local.
         cursor = 0
         for name in names:
             size = self._type_size(types[name])
             cursor += size
-            self._locals[name] = cursor      # byte mais baixo em [rbp-cursor]
+            self._locals[name] = cursor      # lowest byte in [rbp-cursor]
             self._var_sizes[name] = size
         frame = ((cursor + 15) // 16) * 16
         if frame == 0:
-            frame = 16  # mantem alinhamento mesmo sem locais
+            frame = 16  # maintains alignment even without locals
 
         self._text.append(f"{fn.name}:")
         self._emit("push rbp")
         self._emit("mov rbp, rsp")
         self._emit(f"sub rsp, {frame}")
 
-        # salva parametros nos slots locais.
-        #   i < reg_n  -> veio em registrador
-        #   i >= reg_n -> veio na pilha do chamador ([rbp+base+k*8])
+        # saves parameters in local slots.
+        #   i < reg_n  -> came in a register
+        #   i >= reg_n -> came on the caller's stack ([rbp+base+k*8])
         reg_n = len(self._arg_regs)
         for i, (ptype, pname) in enumerate(fn.params):
             off = self._locals[pname]
@@ -296,10 +296,10 @@ class CodeGenAsm:
         for s in fn.body:
             self._gen(s)
 
-        # epilogo (retorno padrao 0)
+        # epilogue (default return 0)
         self._text.append(f".Lret_{fn.name}:")
         if synthetic_main:
-            self._emit("xor eax, eax")   # main retorna 0
+            self._emit("xor eax, eax")   # main returns 0
         self._emit("leave")
         self._emit("ret")
         self._text.append("")
@@ -322,16 +322,16 @@ class CodeGenAsm:
         elif isinstance(node, Assert):             self._assert(node)
         elif isinstance(node, SafetyBlock):        self._safety(node)
         elif isinstance(node, CallExpr):
-            self._eval_call(node); # resultado descartado
+            self._eval_call(node); # discarded result
         else:
             raise CodeGenAsmError(
-                f"'{type(node).__name__}' nao suportado no backend assembly "
+                f"'{type(node).__name__}' not supported in assembly backend "
                 f"(use --backend c).")
 
     def _slot(self, name: str) -> str:
         if name not in self._locals:
             raise CodeGenAsmError(
-                f"variavel '{name}' desconhecida no backend assembly "
+                f"variable '{name}' unknown in assembly backend "
                 f"(o subconjunto nativo cobre apenas int/bool locais).")
         return f"[rbp-{self._locals[name]}]"
 
@@ -363,7 +363,7 @@ class CodeGenAsm:
         self._emit(f"mov {self._slot(n.name)}, rax")
 
     def _store_struct(self, name: str, value: Node):
-        """Materializa 'value' na struct local 'name' (por campos)."""
+        """Materializes 'value' into local struct 'name' (by fields)."""
         typ = self._vartypes[name]
         fields = self._structs[typ]
         if isinstance(value, StructInit):
@@ -372,26 +372,26 @@ class CodeGenAsm:
                 if fname in init_map:
                     self._eval(init_map[fname])
                 else:
-                    self._emit("xor eax, eax")          # campo omitido = 0
+                    self._emit("xor eax, eax")          # omitted field = 0
                 self._emit(f"mov {self._field_addr(name, fname)}, rax")
         elif isinstance(value, Identifier):
             src = value.name
             if self._vartypes.get(src) != typ:
                 raise CodeGenAsmError(
-                    f"copia de struct incompativel: '{src}' -> '{name}'.")
+                    f"incompatible struct copy: '{src}' -> '{name}'.")
             for fname, _ in fields:
                 self._emit(f"mov rax, {self._field_addr(src, fname)}")
                 self._emit(f"mov {self._field_addr(name, fname)}, rax")
         elif isinstance(value, CallExpr):
-            regs = self._struct_regs(typ)               # valida register-return
-            self._eval_call(value)                       # resultado em RAX/RDX
+            regs = self._struct_regs(typ)               # validates register-return
+            self._eval_call(value)                       # result in RAX/RDX
             for i, reg in enumerate(regs):
                 fname = fields[i][0]
                 self._emit(f"mov {self._field_addr(name, fname)}, {reg}")
         else:
             raise CodeGenAsmError(
-                f"valor invalido para struct '{name}': aceito 'new Struct{{...}}', "
-                f"outra variavel struct, ou chamada de funcao.")
+                f"invalid value for struct '{name}': accepted 'new Struct{{...}}', "
+                f"another struct variable, or function call.")
 
     def _compound(self, n: CompoundAssignment):
         base_op = n.op[:-1]                   # '+=' -> '+', '<<=' -> '<<'
@@ -407,7 +407,7 @@ class CodeGenAsm:
         if self._is_struct(self._cur_fn_ret):
             if n.value is None:
                 raise CodeGenAsmError(
-                    f"funcao '{self._cur_fn}' retorna struct mas 'return' esta vazio.")
+                    f"function '{self._cur_fn}' returns struct but 'return' is empty.")
             self._return_struct(n.value)
             self._emit(f"jmp .Lret_{self._cur_fn}")
             return
@@ -418,9 +418,9 @@ class CodeGenAsm:
         self._emit(f"jmp .Lret_{self._cur_fn}")
 
     def _return_struct(self, value: Node):
-        """Coloca a struct de retorno nos registradores da ABI (RAX[/RDX])."""
+        """Puts the return struct in the ABI registers (RAX[/RDX])."""
         typ = self._cur_fn_ret
-        regs = self._struct_regs(typ)       # valida register-return; senao erro
+        regs = self._struct_regs(typ)       # validatestes register-return; otherwise error
         fields = self._structs[typ]
 
         if isinstance(value, Identifier):
@@ -434,19 +434,19 @@ class CodeGenAsm:
                 return init_map.get(fname, Literal('int', 0))
             if len(regs) == 1:
                 self._eval(field_val(0))                 # -> rax
-            else:  # rax + rdx: avalia campo0 -> pilha, campo1 -> rdx
+            else:  # rax + rdx: evaluates field0 -> stack, field1 -> rdx
                 self._eval(field_val(0))
                 self._emit("push rax")
                 self._eval(field_val(1))
                 self._emit("mov rdx, rax")
                 self._emit("pop rax")
         elif isinstance(value, CallExpr):
-            self._struct_regs(typ)                       # valida
-            self._eval_call(value)                        # resultado ja em RAX[/RDX]
+            self._struct_regs(typ)                       # validates
+            self._eval_call(value)                        # result already in RAX[/RDX]
         else:
             raise CodeGenAsmError(
-                "retorno de struct so aceita 'new Struct{...}', variavel struct "
-                "ou chamada de funcao no backend assembly.")
+                "struct return only accepts 'new Struct{...}', struct variable "
+                "or function call in the assembly backend.")
 
     def _if(self, n: If):
         l_else = self._label('Lelse')
@@ -493,13 +493,13 @@ class CodeGenAsm:
         self._text.append(f"{l_end}:")
 
     def _switch(self, n: Switch):
-        # desdobrado em comparacoes (subconjunto inteiro)
+        # unfolded into comparisons (integer subset)
         l_end = self._label('Lsend')
-        self._loop_stack.append((l_end, l_end))  # break -> fim do switch
+        self._loop_stack.append((l_end, l_end))  # break -> end of switch
         case_labels = [self._label('Lcase') for _ in n.cases]
         l_default = self._label('Ldefault')
         self._eval(n.subject)
-        self._emit("mov rdx, rax")            # rdx = valor do switch
+        self._emit("mov rdx, rax")            # rdx = switch value
         for lbl, case in zip(case_labels, n.cases):
             for v in case.values:
                 self._eval(v)
@@ -518,12 +518,12 @@ class CodeGenAsm:
 
     def _break(self):
         if not self._loop_stack:
-            raise CodeGenAsmError("'break' fora de um laco/switch")
+            raise CodeGenAsmError("'break' out of a loop/switch")
         self._emit(f"jmp {self._loop_stack[-1][0]}")
 
     def _continue(self):
         if not self._loop_stack:
-            raise CodeGenAsmError("'continue' fora de um laco")
+            raise CodeGenAsmError("'continue' out of a loop")
         self._emit(f"jmp {self._loop_stack[-1][1]}")
 
     def _assert(self, n: Assert):
@@ -533,7 +533,7 @@ class CodeGenAsm:
                 and n.message.kind == 'string':
             lbl = self._str_label(n.message.value)
         else:
-            lbl = self._str_label(f"assert falhou (linha {n.line})")
+            lbl = self._str_label(f"assert failed (line {n.line})")
         self._emit(f"lea {self._arg_regs[1]}, [rip+{lbl}]")
         self._call_aligned("cryo_assert")
 
@@ -542,7 +542,7 @@ class CodeGenAsm:
         for s in n.body: self._gen(s)
         self._safe_stack.pop()
 
-    # ── expressoes (resultado em rax) ───────────────────────
+    # ── expressions (result in rax) ───────────────────────
 
     def _eval(self, node: Node):
         if isinstance(node, Literal):
@@ -554,15 +554,15 @@ class CodeGenAsm:
                 self._emit("xor eax, eax")
             else:
                 raise CodeGenAsmError(
-                    f"literal '{node.kind}' nao suportado no backend assembly "
+                    f"literal '{node.kind}' not supported in assembly backend "
                     f"(apenas int/bool; use --backend c).")
             return
 
         if isinstance(node, Identifier):
             if self._is_struct(self._vartypes.get(node.name)):
                 raise CodeGenAsmError(
-                    f"struct '{node.name}' usada como valor escalar; acesse um "
-                    f"campo (ex.: {node.name}.campo) no backend assembly.")
+                    f"struct '{node.name}' used as scalar value; access a "
+                    f"field (e.g., {node.name}.field) in the assembly backend.")
             self._emit(f"mov rax, {self._slot(node.name)}")
             return
 
@@ -575,7 +575,7 @@ class CodeGenAsm:
                 self._emit("sete al")
                 self._emit("movzx rax, al")
             else:
-                raise CodeGenAsmError(f"unario '{node.op}' nao suportado")
+                raise CodeGenAsmError(f"unary '{node.op}' not supported")
             return
 
         if isinstance(node, BinaryExpr):
@@ -593,26 +593,26 @@ class CodeGenAsm:
                 self._emit(f"mov rax, {self._field_addr(obj.name, node.field)}")
                 return
             raise CodeGenAsmError(
-                "acesso a campo so suportado em variavel struct local no backend "
+                "field access is only supported on a local struct variable in backend "
                 "assembly (use --backend c).")
 
         if isinstance(node, StructInit):
             raise CodeGenAsmError(
-                "'new Struct{...}' so pode ser atribuido a uma variavel struct ou "
-                "retornado; nao pode ser usado como subexpressao no backend assembly.")
+                "'new Struct{...}' can only be assigned to a struct variable or "
+                "returned; cannot be used as a subexpression in assembly backend.")
 
         raise CodeGenAsmError(
-            f"expressao '{type(node).__name__}' nao suportada no backend "
+            f"expression '{type(node).__name__}' not supported in backend "
             f"assembly (use --backend c).")
 
     def _binary(self, node: BinaryExpr):
-        # curto-circuito logico
+        # logical short-circuit
         if node.op in ('&&', '||'):
             self._logical(node)
             return
 
-        # avalia esquerda -> pilha, direita -> r10, esquerda -> rax
-        # (r10 e volatil e NAO-argumento nas duas ABIs; rcx e argumento no Win64)
+        # evaluates left -> stack, right -> r10, left -> rax
+        # (r10 is volatile and NOT-argument in both ABIs; rcx is argument in Win64)
         self._eval(node.left)
         self._emit("push rax")
         self._eval(node.right)
@@ -630,14 +630,14 @@ class CodeGenAsm:
             if self._safe: self._call_binop_safe('cryo_mul_ovf')
             else:          self._emit("imul rax, r10")
         elif op == '/':
-            self._call_binop_safe('cryo_idiv_chk')   # sempre protegido
+            self._call_binop_safe('cryo_idiv_chk')   # always protected
         elif op == '%':
-            self._call_binop_safe('cryo_imod_chk')   # sempre protegido
+            self._call_binop_safe('cryo_imod_chk')   # always protected
         elif op == '&':  self._emit("and rax, r10")
         elif op == '|':  self._emit("or rax, r10")
         elif op == '^':  self._emit("xor rax, r10")
         elif op == '<<':
-            self._emit("mov rcx, r10")   # contagem de shift precisa estar em cl
+            self._emit("mov rcx, r10")   # shift count must be in cl
             self._emit("sal rax, cl")
         elif op == '>>':
             self._emit("mov rcx, r10")
@@ -647,10 +647,10 @@ class CodeGenAsm:
             self._emit(f"{_SETCC[op]} al")
             self._emit("movzx rax, al")
         elif op == '??':
-            # inteiros nunca sao nulos: resultado = esquerda
+            # integers are never null: result = left
             pass
         else:
-            raise CodeGenAsmError(f"operador '{op}' nao suportado")
+            raise CodeGenAsmError(f"operator '{op}' not supported")
 
     def _logical(self, node: BinaryExpr):
         l_short = self._label('Lshort')
@@ -658,7 +658,7 @@ class CodeGenAsm:
         self._eval(node.left)
         self._emit("cmp rax, 0")
         if node.op == '&&':
-            self._emit(f"je {l_short}")       # falso -> curto-circuito 0
+            self._emit(f"je {l_short}")       # false -> short-circuit 0
             self._eval(node.right)
             self._emit("cmp rax, 0")
             self._emit(f"je {l_short}")
@@ -667,7 +667,7 @@ class CodeGenAsm:
             self._text.append(f"{l_short}:")
             self._emit("xor eax, eax")
         else:  # ||
-            self._emit(f"jne {l_short}")      # verdadeiro -> curto-circuito 1
+            self._emit(f"jne {l_short}")      # true -> short-circuit 1
             self._eval(node.right)
             self._emit("cmp rax, 0")
             self._emit(f"jne {l_short}")
@@ -678,7 +678,7 @@ class CodeGenAsm:
         self._text.append(f"{l_end}:")
 
     def _call_binop_safe(self, fn: str):
-        # rax = lhs, r10 = rhs  ->  chama fn(arg0=lhs, arg1=rhs)
+        # rax = lhs, r10 = rhs  ->  calls fn(arg0=lhs, arg1=rhs)
         a0, a1 = self._arg_regs[0], self._arg_regs[1]
         self._emit(f"mov {a0}, rax")
         self._emit(f"mov {a1}, r10")
@@ -695,10 +695,10 @@ class CodeGenAsm:
             self._call_aligned("cryo_abs_i")
             return
 
-        # funcao definida pelo usuario
+        # user-defined function
         reg_n = len(self._arg_regs)
         if len(node.args) <= reg_n:
-            # caminho simples: tudo em registradores
+            # simple path: everything in registers
             for a in node.args:
                 self._eval(a)
                 self._emit("push rax")
@@ -728,13 +728,13 @@ class CodeGenAsm:
             self._call_aligned("cryo_print_i64")
 
     def _call_aligned(self, target: str):
-        """Chama 'target' com a pilha alinhada a 16 bytes.
+        """Calls 'target' with the stack aligned to 16 bytes.
 
-        Preserva rsp via r15 (nao-volatil, salvo/restaurado no local), o
-        que funciona independentemente da paridade de temporarios ja
-        empilhados. No Win64 tambem reserva 32 bytes de shadow space
-        (exigido pela ABI para o callee spillar os 4 args em registrador).
-        Os registradores de argumento ja devem estar carregados.
+        Preserves rsp via r15 (non-volatile, saved/restored locally), which
+        that works regardless of the parity of temporaries already
+        pushed. On Win64 it also reserves 32 bytes of shadow space
+        (required by the ABI for the callee to spill the 4 args into register).
+        The argument registers must already be loaded.
         """
         self._emit("push r15")
         self._emit("mov r15, rsp")
@@ -742,17 +742,17 @@ class CodeGenAsm:
         if self._shadow:
             self._emit(f"sub rsp, {self._shadow}")   # shadow space (Win64)
         self._emit(f"call {target}")
-        self._emit("mov rsp, r15")                    # libera shadow + restaura
+        self._emit("mov rsp, r15")                    # frees shadow + restores
         self._emit("pop r15")
 
     def _call_with_stack_args(self, target: str, args: List[Node]):
-        """Chama 'target' com mais argumentos do que registradores.
+        """Calls 'target' with more arguments than registers.
 
-        Os primeiros reg_n argumentos vao em registrador; o restante e
-        colocado na area de saida da pilha (acima do shadow space no
-        Win64), na ordem esperada pelo callee. Funciona para as duas ABIs.
+        The first reg_n arguments go in a register; the rest is
+        placed in the stack's output area (above the shadow space in
+        Win64), in the order expected by callee. Works for both ABIs.
 
-        Layout na area de saida (a partir de rsp, no momento do call):
+        Layout in the output area (from rsp, at call time):
             Win64: [shadow 32B][arg_reg_n][arg_reg_n+1]...
             SysV : [arg_reg_n][arg_reg_n+1]...
         """
@@ -761,27 +761,27 @@ class CodeGenAsm:
         n_stack = n - reg_n
         shadow = self._shadow
         reserve = shadow + n_stack * 8
-        reserve_padded = (reserve + 15) & ~15   # mantem rsp alinhado a 16
+        reserve_padded = (reserve + 15) & ~15   # keeps rsp aligned to 16
 
-        # 1) avalia todos os args -> temporarios na pilha (esq. p/ dir.)
+        # 1) evaluates all args -> temporaries on stack (left to right)
         for a in args:
             self._eval(a)
             self._emit("push rax")
-        # temporarios: arg[n-1] em [rsp], arg[k] em [rsp + (n-1-k)*8]
+        # temporaries: arg[n-1] in [rsp], arg[k] in [rsp + (n-1-k)*8]
 
-        # 2) ancora a base dos temporarios (r11 e volatil, usado so antes do call)
+        # 2) anchors the base of the temporaries (r11 is volatile, used only before call)
         self._emit("mov r11, rsp")
-        # 3) salva rsp, alinha e reserva a area de saida
+        # 3) saves rsp, aligns and reserves the output area
         self._emit("push r15")
         self._emit("mov r15, rsp")
         self._emit("and rsp, -16")
         self._emit(f"sub rsp, {reserve_padded}")
 
-        # 4) marshaling: registradores a partir dos temporarios
+        # 4) marshaling: registers from temporaries
         for i in range(reg_n):
             off = (n - 1 - i) * 8
             self._emit(f"mov {self._arg_regs[i]}, [r11+{off}]")
-        # 5) marshaling: args de pilha para a area de saida
+        # 5) marshaling: stack args to output area
         for j in range(n_stack):
             src_idx = reg_n + j
             off = (n - 1 - src_idx) * 8
@@ -789,12 +789,12 @@ class CodeGenAsm:
             self._emit(f"mov [rsp+{shadow + j * 8}], rax")
 
         self._emit(f"call {target}")
-        # 6) desfaz area de saida, restaura r15 e descarta temporarios
+        # 6) undoes output area, restores r15 and discards temporaries
         self._emit("mov rsp, r15")
         self._emit("pop r15")
         self._emit(f"add rsp, {n * 8}")
 
-    # ── inferencia minima de tipo ───────────────────────────
+    # ── minimal type inference ───────────────────────────
 
     def _infer(self, node: Node) -> str:
         if isinstance(node, Literal):
@@ -823,8 +823,8 @@ class CodeGenAsm:
     def _check_int_type(self, t: str, name: str):
         if self._is_struct(t):
             raise CodeGenAsmError(
-                f"variavel '{name}': struct '{t}' em contexto escalar.")
+                f"variable '{name}': struct '{t}' in scalar context.")
         if t not in ('int', 'bool'):
             raise CodeGenAsmError(
-                f"variavel '{name}': tipo '{t}' nao suportado no backend "
+                f"variable '{name}': type '{t}' not supported in backend "
                 f"assembly (apenas int/bool). Use --backend c.")

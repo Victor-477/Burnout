@@ -1,11 +1,11 @@
 # ============================================================
 #  Cryo Compiler - Go Code Generator  (v0.5)
-#  .cryo  ->  .go  (Go nativo, compilavel com `go build`)
+#  .cryo  ->  .go  (Native Go, compilable with `go build`)
 #
-#  Go passa a ser a linguagem-base de compilacao do Cryo: e de
-#  alto nivel, multiplataforma, com um unico `go build`, e cobre
-#  naturalmente structs, arrays, strings, enums e excecoes.
-#  (O backend assembly permanece disponivel para uso futuro.)
+#  Go becomes the base compilation language for Cryo: it is
+#  high level, multiplatform, with a single `go build`, and covers
+#  naturally structs, arrays, strings, enums and exceptions.
+#  (The assembly backend remains available for future use.)
 # ============================================================
 from ast_nodes import *
 from foreign import collect_imports, resolve_library_lang
@@ -17,7 +17,7 @@ class CodeGenGoError(Exception):
     pass
 
 
-# ── Mapeamento de tipos Cryo -> Go ──────────────────────────
+# ── Cryo -> Go type mapping ──────────────────────────
 
 GO_TYPE: Dict[str, str] = {
     'int':    'int64',
@@ -37,12 +37,12 @@ GO_KEYWORDS = {
 
 
 def gid(name: str) -> str:
-    """Evita colisao de identificadores Cryo com palavras-chave Go."""
+    """Avoids collision of Cryo identifiers with Go keywords."""
     return name + '_' if name in GO_KEYWORDS else name
 
 
 def _split_type_pair(s: str):
-    """Divide 'K,V' respeitando aninhamento de <> e []."""
+    """Splits 'K,V' respecting nesting of <> and []."""
     depth = 0
     for i, c in enumerate(s):
         if c in '<[':
@@ -55,7 +55,7 @@ def _split_type_pair(s: str):
 
 
 def _split_top_commas(s: str):
-    """Divide por vírgulas de topo, respeitando <> [] ()."""
+    """Splits by top-level commas, respecting <> [] ()."""
     if not s.strip():
         return []
     out, depth, start = [], 0, 0
@@ -71,7 +71,7 @@ def _split_top_commas(s: str):
 
 
 def _go_fn_type(t: str) -> str:
-    """'fn(P1,P2)->R' -> 'func(goP1, goP2) goR' (R vazio se void)."""
+    """'fn(P1,P2)->R' -> 'func(goP1, goP2) goR' (R empty if void)."""
     i, depth = 3, 1
     while i < len(t) and depth:
         if t[i] == '(':
@@ -92,18 +92,18 @@ def _go_fn_type(t: str) -> str:
 def go_type(t: str) -> str:
     if not t:
         return ''
-    if t.startswith('fn(') and '->' in t:     # tipo função -> func(...)...
+    if t.startswith('fn(') and '->' in t:     # function type -> func(...)...
         return _go_fn_type(t)
-    if t.endswith('?'):                       # opcional -> ponteiro
+    if t.endswith('?'):                       # optional -> pointer
         return '*' + go_type(t[:-1])
     if t.startswith('map<') and t.endswith('>'):
         k, v = _split_type_pair(t[4:-1])
         return f"map[{go_type(k)}]{go_type(v)}"
-    if t.startswith('future<') and t.endswith('>'):   # future -> canal
+    if t.startswith('future<') and t.endswith('>'):   # future -> channel
         return f"chan {go_type(t[7:-1])}"
     if t.endswith('[]'):
         return '[]' + go_type(t[:-2])
-    return GO_TYPE.get(t, t)   # structs/enums passam direto
+    return GO_TYPE.get(t, t)   # structs/enums pass straight through
 
 
 def is_future(t: str) -> bool:
@@ -115,7 +115,7 @@ def future_elem(t: str) -> str:
 
 
 def go_field(name: str) -> str:
-    """Nome de campo exportado em Go (necessário p/ encoding/json)."""
+    """Exported field name in Go (necessary for encoding/json)."""
     return name[:1].upper() + name[1:] if name else name
 
 
@@ -132,7 +132,7 @@ def elem_type(arr_t: str) -> str:
         return 'unknown'
     if arr_t.endswith('[]'):
         return arr_t[:-2]
-    if is_map(arr_t):                          # valor de um map
+    if is_map(arr_t):                          # value of a map
         return _split_type_pair(arr_t[4:-1])[1]
     return 'unknown'
 
@@ -142,7 +142,7 @@ def map_key_type(t: str) -> str:
 
 
 def zero_value(t: str) -> str:
-    """Valor 'null'/zero para um tipo Go."""
+    """'null'/zero value for a Go type."""
     if t == 'int':    return '0'
     if t == 'number': return '0.0'
     if t == 'string': return '""'
@@ -150,7 +150,7 @@ def zero_value(t: str) -> str:
     return 'nil'
 
 
-# ── Inferencia de tipos (para concat de string, print, etc.) ─
+# ── Type Inference (for string concat, print, etc.) ─
 
 class TypeEnv:
     def __init__(self):
@@ -259,12 +259,12 @@ class CodeGenGo:
         self._indent = 1
         self._safe_stack: List[bool] = []
         self._loop_depth = 0
-        self._ntmp = 0                 # temporárias frescas (ex.: propagação '?')
+        self._ntmp = 0                 # fresh temporaries (e.g.: '?' propagation)
         self._cur_fn_ret = 'void'
-        # ── camada Pyro: skills nativas e acesso à máquina ──
+        # ── Pyro layer: native skills and machine access ──
         self._skills: List[SkillDecl] = []
         self._use_skills = False
-        # ── Fase 3: LLM nativo — funções 'tool' expostas a modelos ──
+        # ── Phase 3: Native LLM — 'tool' functions exposed to models ──
         self._tools: List[FunctionDecl] = []
         self._use_tools = False
         self._member_to_enum: Dict[str, str] = {}
@@ -273,12 +273,12 @@ class CodeGenGo:
     def _safe_mode(self) -> bool:
         return self._safe_stack[-1] if self._safe_stack else self._safe
 
-    # ── emissao ─────────────────────────────────────────────
+    # ── emission ─────────────────────────────────────────────
 
     def _emit(self, line: str = ''):
         self._cur.append(('\t' * self._indent + line) if line else '')
 
-    # ── entrada principal ───────────────────────────────────
+    # ── main entry ───────────────────────────────────
 
     def generate(self, program: Program) -> str:
         self._pre_scan(program.statements)
@@ -297,20 +297,20 @@ class CodeGenGo:
                 self._cur, self._indent = self._global_defs, 0
                 self._const(node)
             elif isinstance(node, SkillDecl):
-                self._skills.append(node)   # registrada; emitida em _assemble
+                self._skills.append(node)   # registered; emitted in _assemble
             elif isinstance(node, Library):
-                # library >go pkg< -> adiciona o pacote aos imports Go
+                # library >go pkg< -> adds the package to Go imports
                 if resolve_library_lang(node, self._imported_langs) == 'go':
                     self._imports.add(node.name)
             elif isinstance(node, Import):
-                pass  # habilita a linguagem; sem código a emitir aqui
+                pass  # enables the language; no code to emit here
             else:
                 self._cur, self._indent = self._main, 1
                 self._gen(node)
         return self._assemble()
 
     def _pre_scan(self, stmts):
-        # tipos nativos sempre conhecidos pelo type-checker
+        # native types always known by the type-checker
         self.te.reg_struct('Skill', {
             'name': 'string', 'desc': 'string', 'model': 'string',
             'tools': 'string[]', 'config': 'map<string,string>'})
@@ -329,15 +329,15 @@ class CodeGenGo:
                 self.te.set(n.name, n.var_type)
 
     def _assemble(self) -> str:
-        # gera helpers e skills PRIMEIRO: ambos podem registrar imports
-        # (fmt, bufio, sort, os/exec...) antes de montarmos o bloco de import.
+        # generates helpers and skills FIRST: both can register imports
+        # (fmt, bufio, sort, os/exec...) before we assemble the import block.
         helper_lines = self._helper_defs()
         skill_lines = self._skill_defs() if (self._skills or self._use_skills) else []
         tool_lines = self._tool_defs() if (self._tools or self._use_tools) else []
         out = [
             "// ================================================",
-            "// [PYRO] Compilado de Cryo -> Go nativo  (v0.5)",
-            "// Compilar: go build arquivo.go   |   Rodar: go run arquivo.go",
+            "// [PYRO] Compiled from Cryo -> Native Go  (v0.5)",
+            "// Compile: go build file.go   |   Run: go run file.go",
             "// ================================================",
             "package main",
             "",
@@ -363,22 +363,22 @@ class CodeGenGo:
         out.append("")
         return '\n'.join(out)
 
-    # ── helpers de runtime (emitidos sob demanda) ───────────
+    # ── runtime helpers (emitted on demand) ───────────
 
     def _helper_defs(self) -> List[str]:
         H: List[str] = []
-        # sandbox: política de runtime que recusa natives de rede/máquina.
-        # Emitida sempre que um builtin sensível é usado, para que
-        # PYRO_SANDBOX=1 funcione mesmo sem --sandbox; o valor "baked"
-        # reflete a flag de compilação (só aperta, nunca afrouxa).
+        # sandbox: runtime policy that rejects network/machine natives.
+        # Emitted whenever a sensitive builtin is used, so that
+        # PYRO_SANDBOX=1 works even without --sandbox; the "baked" value
+        # reflects the compilation flag (only tightens, never loosens).
         if 'sandbox' in self._helpers:
             self._imports.update(('os', 'fmt'))
             baked = 'true' if self._sandbox else 'false'
             H += [f'var cryoSandbox = {baked} || os.Getenv("PYRO_SANDBOX") == "1"',
                   "func cryoSandboxGuard(op string) {",
                   "\tif cryoSandbox {",
-                  '\t\tfmt.Fprintln(os.Stderr, "[Cryo Seguranca] Sandbox: "+op+'
-                  ' " bloqueado por política de sandbox")',
+                  '\t\tfmt.Fprintln(os.Stderr, "[Cryo Security] Sandbox: "+op+'
+                  ' " blocked by sandbox policy")',
                   "\t\tos.Exit(1)", "\t}", "}", ""]
         if 'str' in self._helpers:
             self._imports.add('fmt')
@@ -395,35 +395,35 @@ class CodeGenGo:
             H += ["func cryoAddOvf(a, b int64) int64 {",
                   "\ts := a + b",
                   "\tif (b > 0 && s < a) || (b < 0 && s > a) {",
-                  '\t\tpanic("[Cryo Seguranca] Overflow: adicao de inteiros")', "\t}",
+                  '\t\tpanic("[Cryo Security] Overflow: adicao de inteiros")', "\t}",
                   "\treturn s", "}", ""]
         if 'subovf' in self._helpers:
             H += ["func cryoSubOvf(a, b int64) int64 {",
                   "\ts := a - b",
                   "\tif (b < 0 && s < a) || (b > 0 && s > a) {",
-                  '\t\tpanic("[Cryo Seguranca] Overflow: subtracao de inteiros")', "\t}",
+                  '\t\tpanic("[Cryo Security] Overflow: subtracao de inteiros")', "\t}",
                   "\treturn s", "}", ""]
         if 'mulovf' in self._helpers:
             H += ["func cryoMulOvf(a, b int64) int64 {",
                   "\tif a == 0 || b == 0 {", "\t\treturn 0", "\t}",
                   "\tif a == -1<<63 && b == -1 || b == -1<<63 && a == -1 {",
-                  '\t\tpanic("[Cryo Seguranca] Overflow: multiplicacao de inteiros")', "\t}",
+                  '\t\tpanic("[Cryo Security] Overflow: multiplicacao de inteiros")', "\t}",
                   "\ts := a * b",
                   "\tif s/b != a {",
-                  '\t\tpanic("[Cryo Seguranca] Overflow: multiplicacao de inteiros")', "\t}",
+                  '\t\tpanic("[Cryo Security] Overflow: multiplicacao de inteiros")', "\t}",
                   "\treturn s", "}", ""]
         if 'idiv' in self._helpers:
             H += ["func cryoIDivChk(a, b int64) int64 {",
                   "\tif b == 0 {",
-                  '\t\tpanic("[Cryo Seguranca] DivisaoPorZero: divisao inteira")', "\t}",
+                  '\t\tpanic("[Cryo Security] DivisaoPorZero: divisao inteira")', "\t}",
                   "\tif a == -1<<63 && b == -1 {",
-                  '\t\tpanic("[Cryo Seguranca] Overflow: INT64_MIN / -1")', "\t}",
+                  '\t\tpanic("[Cryo Security] Overflow: INT64_MIN / -1")', "\t}",
                   "\treturn a / b", "}", ""]
         if 'imod' in self._helpers:
-            # INT64_MIN % -1 é 0 (bem-definido em Go); só a divisão estoura.
+            # INT64_MIN % -1 is 0 (well-defined in Go); only division overflows.
             H += ["func cryoIModChk(a, b int64) int64 {",
                   "\tif b == 0 {",
-                  '\t\tpanic("[Cryo Seguranca] DivisaoPorZero: modulo")', "\t}",
+                  '\t\tpanic("[Cryo Security] DivisaoPorZero: modulo")', "\t}",
                   "\tif a == -1<<63 && b == -1 {",
                   "\t\treturn 0", "\t}",
                   "\treturn a % b", "}", ""]
@@ -442,7 +442,7 @@ class CodeGenGo:
                   "\treturn d", "}", ""]
         if 'unwrap' in self._helpers:
             H += ["func cryoUnwrap[T any](p *T) T {",
-                  "\tif p == nil {", '\t\tpanic("[Cryo Seguranca] NullPointer: unwrap de opcional nulo")', "\t}",
+                  "\tif p == nil {", '\t\tpanic("[Cryo Security] NullPointer: unwrap de opcional nulo")', "\t}",
                   "\treturn *p", "}", ""]
         if 'keys' in self._helpers:
             H += ["func cryoKeys[K comparable, V any](m map[K]V) []K {",
@@ -454,7 +454,7 @@ class CodeGenGo:
             H += ["func cryoParseInt(s string) int64 {",
                   "\tn, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)",
                   "\tif err != nil {",
-                  "\t\tpanic(\"[Cryo Seguranca] to_int: '\" + s + \"' não é um inteiro válido\")",
+                  "\t\tpanic(\"[Cryo Security] to_int: '\" + s + \"' não é um inteiro válido\")",
                   "\t}",
                   "\treturn n", "}", ""]
         if 'parsenum' in self._helpers:
@@ -462,11 +462,11 @@ class CodeGenGo:
             H += ["func cryoParseNum(s string) float64 {",
                   "\tf, err := strconv.ParseFloat(strings.TrimSpace(s), 64)",
                   "\tif err != nil {",
-                  "\t\tpanic(\"[Cryo Seguranca] to_number: '\" + s + \"' não é um número válido\")",
+                  "\t\tpanic(\"[Cryo Security] to_number: '\" + s + \"' não é um número válido\")",
                   "\t}",
                   "\treturn f", "}", ""]
         if 'substr' in self._helpers:
-            H += ["// cryoSubstr: recorte de string com limites seguros.",
+            H += ["// cryoSubstr: string slicing with safe limits.",
                   "func cryoSubstr(s string, i, n int64) string {",
                   "\tif i < 0 {", "\t\ti = 0", "\t}",
                   "\tif i > int64(len(s)) {", "\t\ti = int64(len(s))", "\t}",
@@ -500,7 +500,7 @@ class CodeGenGo:
                   "\treturn string(b)", "}", ""]
         if 'writebytes' in self._helpers:
             self._imports.add('os')
-            H += ["// cryoWriteBytes: grava um int[] como bytes num arquivo.",
+            H += ["// cryoWriteBytes: writes an int[] as bytes to a file.",
                   "func cryoWriteBytes(path string, data []int64) bool {",
                   '\tcryoSandboxGuard("write_bytes")',
                   "\tbuf := make([]byte, len(data))",
@@ -508,12 +508,12 @@ class CodeGenGo:
                   "\treturn os.WriteFile(path, buf, 0644) == nil", "}", ""]
         if 'llm' in self._helpers:
             self._imports.update(('os', 'net/http', 'io', 'encoding/json', 'bytes', 'fmt'))
-            H += ["// cryoLLMPost: POST do payload p/ CRYO_LLM_URL com 3 retries.",
+            H += ["// cryoLLMPost: POST of payload to CRYO_LLM_URL with 3 retries.",
                   "func cryoLLMPost(payload map[string]any) string {",
                   '\tcryoSandboxGuard("llm/agent")',
                   '\turl := os.Getenv("CRYO_LLM_URL")',
                   '\tif url == "" {',
-                  '\t\tfmt.Fprintln(os.Stderr, "[Cryo LLM] CRYO_LLM_URL não definido; retornando vazio")',
+                  '\t\tfmt.Fprintln(os.Stderr, "[Cryo LLM] CRYO_LLM_URL undefined; returning empty")',
                   '\t\treturn ""', "\t}",
                   "\tbody, _ := json.Marshal(payload)",
                   "\tfor attempt := 0; attempt < 3; attempt++ {",
@@ -537,9 +537,9 @@ class CodeGenGo:
                   "\t}",
                   "\treturn cryoLLMPost(payload)", "}", ""]
         if 'agent' in self._helpers:
-            # laço de agente: LLM pede tool -> runtime executa -> devolve -> repete
-            # 'only' filtra as tools expostas; maxSteps limita as iterações.
-            H += ["// cryoAgent: laço de tool-calling. Contrato POST",
+            # agent loop: LLM requests tool -> runtime executes -> returns -> repeats
+            # 'only' filters the exposed tools; maxSteps limits iterations.
+            H += ["// cryoAgent: tool-calling loop. POST contract",
                   "// {model, messages, tools} -> {\"tool_call\":{name,arguments}} | {\"content\":...}.",
                   "func cryoAgent(model, prompt string, only []string, maxSteps int) string {",
                   "\ttools := cryoToolList()",
@@ -571,7 +571,7 @@ class CodeGenGo:
                   '\treturn ""', "}", ""]
         if 'open' in self._helpers:
             self._imports.update(('os/exec', 'runtime'))
-            H += ["// cryoOpen: abre um arquivo/URL no app padrão do SO (navegador).",
+            H += ["// cryoOpen: opens a file/URL in the OS default app (browser).",
                   "func cryoOpen(target string) bool {",
                   '\tcryoSandboxGuard("pyro_open")',
                   "\tvar c *exec.Cmd",
@@ -598,11 +598,11 @@ class CodeGenGo:
                   "\treturn string(out)", "}", ""]
         return H
 
-    # ── Pyro: skills nativas (compiladas no binário) ────────
+    # ── Pyro: native skills (compiled in the binary) ────────
 
     def _skill_defs(self) -> List[str]:
-        """Emite o tipo Skill, o registro global e helpers de introspecção."""
-        D = ["// [PYRO] Skills nativas de LLM — compactas, sem arquivos .md",
+        """Emits the Skill type, global registry, and introspection helpers."""
+        D = ["// [PYRO] Native LLM Skills — compact, without .md files",
              "type Skill struct {",
              '\tName   string            `json:"name"`',
              '\tDesc   string            `json:"desc"`',
@@ -610,7 +610,7 @@ class CodeGenGo:
              '\tTools  []string          `json:"tools"`',
              '\tConfig map[string]string `json:"config"`',
              "}", ""]
-        # registro global
+        # global registry
         entries = []
         for sk in self._skills:
             entries.append(f'\t{self._go_string(sk.name)}: {self._skill_literal(sk)},')
@@ -618,7 +618,7 @@ class CodeGenGo:
         D += entries
         D.append("}")
         D.append("")
-        # nomes ordenados (saída estável)
+        # sorted names (stable output)
         self._imports.add('sort')
         D += ["func cryoSkillNames() []string {",
               "\tns := make([]string, 0, len(cryoSkills))",
@@ -657,10 +657,10 @@ class CodeGenGo:
         if isinstance(node, ArrayLiteral):
             items = ', '.join(self._skill_str(e) for e in node.elements)
             return f"[]string{{{items}}}"
-        raise CodeGenGoError("'tools' de uma skill deve ser um array de strings.")
+        raise CodeGenGoError("'tools' of a skill must be an array of strings.")
 
     def _literal_str(self, node) -> str:
-        """Converte um literal de config de skill em string (compilado)."""
+        """Converts a skill config literal to a string (compiled)."""
         if isinstance(node, Literal):
             if node.kind == 'bool':   return 'true' if node.value else 'false'
             if node.kind == 'string': return str(node.value)
@@ -670,15 +670,15 @@ class CodeGenGo:
                 and isinstance(node.operand, Literal):
             return '-' + self._literal_str(node.operand)
         raise CodeGenGoError(
-            "valores de config de skill devem ser literais (string/número/bool).")
+            "skill config values must be literals (string/number/bool).")
 
-    # ── Fase 3: LLM nativo (schema, llm, tools) ─────────────
+    # ── Phase 3: Native LLM (schema, llm, tools) ─────────────
 
     _JSON_PRIM = {'int': 'integer', 'number': 'number',
                   'string': 'string', 'bool': 'boolean'}
 
     def _schema_obj(self, typ: str):
-        """JSON Schema (dict) recursivo de um tipo Cryo."""
+        """Recursive JSON Schema (dict) of a Cryo type."""
         if typ in self._JSON_PRIM:
             return {"type": self._JSON_PRIM[typ]}
         if typ.endswith('[]'):
@@ -693,7 +693,7 @@ class CodeGenGo:
         return {}
 
     def _json_schema(self, typ: str) -> str:
-        """Literal Go string com o JSON Schema (gerado em tempo de compilação)."""
+        """Literal Go string with JSON Schema (generated at compile time)."""
         return self._go_string(json.dumps(self._schema_obj(typ), ensure_ascii=False))
 
     def _tool_params_schema(self, fn: FunctionDecl):
@@ -702,8 +702,8 @@ class CodeGenGo:
                 "required": [pn for _pt, pn in fn.params]}
 
     def _tool_defs(self) -> List[str]:
-        """Tipo Tool + registro global + helpers de introspecção."""
-        D = ["// [PYRO] Tools de LLM — schema derivado da assinatura da função",
+        """Tipo Tool + global registry + helpers de introspecção."""
+        D = ["// [PYRO] LLM Tools — schema derived from function signature",
              "type Tool struct {",
              '\tName       string `json:"name"`',
              '\tParameters string `json:"parameters"`',  # JSON Schema (string)
@@ -723,14 +723,14 @@ class CodeGenGo:
               "\tout := make([]Tool, 0, len(cryoTools))",
               "\tfor _, n := range cryoToolNames() {", "\t\tout = append(out, cryoTools[n])", "\t}",
               "\treturn out", "}", ""]
-        # despachante: recebe (nome, argsJSON) -> chama a tool real -> resultado
+        # dispatcher: receives (name, argsJSON) -> calls real tool -> result
         self._imports.add('encoding/json')
-        D += ["// cryoToolCall: executa a tool 'name' com argumentos JSON e devolve o resultado.",
+        D += ["// cryoToolCall: executes the 'name' tool with JSON arguments and returns the result.",
               "func cryoToolCall(name, args string) string {",
               "\tswitch name {"]
         for fn in self._tools:
             D.append(f"\tcase {self._go_string(fn.name)}:")
-            # struct de argumentos (campos exportados + tag json = nome do parâmetro)
+            # arguments struct (exported fields + json tag = parameter name)
             fields = '; '.join(
                 f'{go_field(pn)} {go_type(pt)} `json:"{pn}"`' for pt, pn in fn.params)
             D.append(f"\t\tvar _a struct {{ {fields} }}")
@@ -746,7 +746,7 @@ class CodeGenGo:
         D += ["\t}", '\treturn ""', "}", ""]
         return D
 
-    # ── declaracoes ─────────────────────────────────────────
+    # ── declarations ─────────────────────────────────────────
 
     def _enum(self, n: EnumDecl):
         has_data = any(len(m.fields) > 0 for m in n.members)
@@ -772,15 +772,15 @@ class CodeGenGo:
                 params = ', '.join(f"v{idx} {go_type(t)}" for idx, t in enumerate(m.fields))
                 args_struct = ', '.join(f"Val{idx}: v{idx}" for idx in range(len(m.fields)))
                 
-                # construtor canônico curto: Ok(...) / Err(...).
-                # (o prefixado 'Result_Ok' colidiria com o tipo-struct homônimo.)
+                # short canonical constructor: Ok(...) / Err(...).
+                # (the prefixed 'Result_Ok' would collide with the homonymous struct-type.)
                 self._enum_defs.append(f"func {gid(m.name)}({params}) {gid(n.name)} {{")
                 self._enum_defs.append(f"\treturn {struct_name}{{{args_struct}}}")
                 self._enum_defs.append("}")
 
     def _struct(self, n: StructDecl):
-        # Campos exportados (maiúsculos) + tag json com o nome original,
-        # para que encoding/json (json_encode/json_decode) funcione.
+        # Exported fields (capitalized) + json tag with the original name,
+        # so that encoding/json (json_encode/json_decode) works.
         self._struct_defs.append(f"type {gid(n.name)} struct {{")
         for f in n.fields:
             self._struct_defs.append(
@@ -789,7 +789,7 @@ class CodeGenGo:
 
     def _fn(self, n: FunctionDecl):
         if getattr(n, 'is_tool', False):
-            self._tools.append(n)          # registra como tool exposta a LLMs
+            self._tools.append(n)          # registers as a tool exposed to LLMs
         params = ', '.join(f"{gid(pn)} {go_type(pt)}" for pt, pn in n.params)
         ret = go_type(n.return_type or 'void')
         ret_s = f" {ret}" if ret else ""
@@ -810,7 +810,7 @@ class CodeGenGo:
 
     def _const(self, n: ConstDecl):
         self.te.set(n.name, n.var_type)
-        # var de pacote: nao-usado nao e erro em Go
+        # package var: unused is not an error in Go
         self._global_defs.append(
             f"var {gid(n.name)} {go_type(n.var_type)} = {self._expr(n.value)}")
 
@@ -843,14 +843,14 @@ class CodeGenGo:
         elif isinstance(node, (CallExpr, MethodCallExpr)):
             self._emit(self._stmt_call(node))
         else:
-            self._emit(f"// [Go] NAO SUPORTADO: {type(node).__name__}")
+            self._emit(f"// [Go] NOT SUPPORTED: {type(node).__name__}")
 
-    # ── propagação de erro: expr?  (Fase 8.3) ───────────────
+    # ── error propagation: expr?  (Phase 8.3) ───────────────
     def _go_try(self, inner: Node) -> str:
-        """Emite a temporária + guarda de propagação e devolve a string
-        da expressão 'valor Ok' (ou base do opcional). Na via de erro/nulo,
-        a função retorna cedo com o Err/nil — o tipo de retorno da função
-        deve ser o mesmo Result (ou um opcional)."""
+        """Emits the temporary + propagation guard and returns the string
+        of the 'Ok value' expression (or base of the optional). In the error/null path,
+        the function returns early with Err/nil — the function's return type
+        must be the same Result (or an optional)."""
         t = self.te.infer(inner)
         self._ntmp += 1
         tmp = f"__try{self._ntmp}"
@@ -879,26 +879,26 @@ class CodeGenGo:
         elif isinstance(n.value, MapLiteral):
             self._emit(f"var {name} {gt} = {self._map_literal(n.value, vt)}")
         elif is_map(vt) and n.value is None:
-            # map sem valor: inicializa vazio e gravável
+            # map without value: initializes empty and writable
             self._emit(f"{name} := {gt}{{}}")
         elif is_optional(vt) and n.value is not None:
             self._emit(f"var {name} {gt} = {self._to_optional(n.value, vt)}")
         elif is_future(vt) and isinstance(n.value, SpawnExpr):
-            # usa o tipo de elemento declarado (evita 'chan any' por inferência falha)
+            # uses the declared element type (avoids 'chan any' by failed inference)
             self._emit(f"var {name} {gt} = {self._spawn(n.value, future_elem(vt))}")
         elif n.value is not None:
             val = self._expr_typed(n.value, vt)
             self._emit(f"var {name} {gt} = {val}")
         else:
             self._emit(f"var {name} {gt}")
-        self._emit(f"_ = {name}")   # Go: locais nao-usados sao erro
+        self._emit(f"_ = {name}")   # Go: unused locals are an error
 
     def _to_optional(self, value: Node, opt_type: str) -> str:
-        """Coage 'value' para o opcional T?: null->nil; se já é opcional,
-        usa direto; senão embrulha o valor base em ponteiro (cryoPtr)."""
+        """Coerces 'value' to optional T?: null->nil; if it's already optional,
+        uses directly; else wraps the base value in pointer (cryoPtr)."""
         if isinstance(value, Literal) and value.kind == 'null':
             return 'nil'
-        if is_optional(self.te.infer(value)):     # já é T? (ex.: chamada que retorna T?)
+        if is_optional(self.te.infer(value)):     # already T? (e.g.: call returning T?)
             return self._expr(value)
         self._helpers.add('ptr')
         base = opt_type[:-1]                      # 'int?' -> 'int'
@@ -1007,7 +1007,7 @@ class CodeGenGo:
         cond = self._expr(n.condition) if n.condition else ''
         upd  = self._for_part(n.update) if n.update else ''
         self.te.push()
-        # declara a variavel de init no escopo antes de emitir
+        # declares the init variable in scope before emitting
         self._emit(f"for {init}; {cond}; {upd} {{")
         self._indent += 1
         self._loop_depth += 1
@@ -1022,7 +1022,7 @@ class CodeGenGo:
         self.te.set(n.var_name, n.var_type)
         it_t = self.te.infer(n.iterable)
         if it_t == 'string':
-            # itera caracteres: Go dá runes; converte cada um p/ string
+            # iterates characters: Go gives runes; converts each to string
             v = gid(n.var_name)
             self._emit(f"for _, _r_{v} := range {self._expr(n.iterable)} {{")
             self._indent += 1
@@ -1049,8 +1049,8 @@ class CodeGenGo:
         if isinstance(node, VarDecl):
             self.te.set(node.name, node.var_type)
             val = self._expr(node.value) if node.value else zero_value(node.var_type)
-            # for-init exige ':='; tipamos int/number explicitamente para
-            # evitar 'int' inferido colidir com int64 no resto do sistema
+            # for-init requires ':='; we explicitly type int/number to
+            # avoid inferred 'int' colliding with int64 in the rest of the system
             gt = go_type(node.var_type)
             if node.var_type in ('int', 'number'):
                 val = f"{gt}({val})"
@@ -1114,7 +1114,7 @@ class CodeGenGo:
         self._helpers.add('assert')
         cond = self._expr(n.condition)
         msg = self._expr(n.message) if n.message is not None \
-            else f'"assert falhou (linha {n.line})"'
+            else f'"assert failed (line {n.line})"'
         self._emit(f"cryoAssert({cond}, {msg})")
 
     def _safety(self, n: SafetyBlock):
@@ -1130,7 +1130,7 @@ class CodeGenGo:
         self._emit("}")
 
     def _try(self, n: TryCatch):
-        # Go nao tem excecoes: usa closure + defer/recover.
+        # Go has no exceptions: uses closure + defer/recover.
         self._emit("func() {")
         self._indent += 1
         if n.catch_body is not None or n.finally_body:
@@ -1168,13 +1168,13 @@ class CodeGenGo:
                 self._emit(line.strip())
             self._emit("// -- [/bloco Go] --")
         else:
-            self._emit(f"// [Cryo] bloco >{n.lang}< omitido no backend Go "
-                       f"(use print(...) ou >Go( ... ))")
+            self._emit(f"// [Cryo] >{n.lang}< block omitted in Go backend "
+                       f"(use print(...) or >Go( ... ))")
 
-    # ── expressoes ──────────────────────────────────────────
+    # ── expressions ──────────────────────────────────────────
 
     def _expr_typed(self, node: Node, target: str) -> str:
-        """Expressao com conhecimento do tipo alvo (trata null)."""
+        """Expression with knowledge of the target type (handles null)."""
         if isinstance(node, Literal) and node.kind == 'null':
             return zero_value(target)
         return self._expr(node)
@@ -1182,9 +1182,9 @@ class CodeGenGo:
     def _expr(self, node: Node) -> str:
         if isinstance(node, TryExpr):
             raise CodeGenGoError(
-                "propagação '?' só é suportada no nível de uma atribuição, "
-                "declaração ('T x = expr?;'), retorno ou expressão-statement — "
-                "não aninhada dentro de outra expressão.")
+                "propagation '?' is only supported at the level of an assignment, "
+                "declaration ('T x = expr?;'), return or expression-statement — "
+                "not nested inside another expression.")
         if isinstance(node, Literal):
             if node.kind == 'null':   return 'nil'
             if node.kind == 'bool':   return 'true' if node.value else 'false'
@@ -1223,7 +1223,7 @@ class CodeGenGo:
 
         if isinstance(node, ArrayLiteral):
             elems = ', '.join(self._expr(e) for e in node.elements)
-            return f"[]any{{{elems}}}"   # contexto sem tipo: fallback
+            return f"[]any{{{elems}}}"   # typeless context: fallback
 
         if isinstance(node, MapLiteral):
             return self._map_literal(node, None)
@@ -1252,7 +1252,7 @@ class CodeGenGo:
         return f"/* EXPR? {type(node).__name__} */"
 
     def _lambda_ret(self, node: 'Lambda') -> str:
-        """Infere o tipo de retorno pelo primeiro Return do corpo."""
+        """Infers the return type by the first Return in the body."""
         self.te.push()
         for pt, pn in node.params:
             self.te.set(pn, pt)
@@ -1287,7 +1287,7 @@ class CodeGenGo:
         return sig + " {\n" + body + "\n" + ('\t' * self._indent) + "}"
 
     def _spawn(self, node: SpawnExpr, elem: Optional[str] = None) -> str:
-        # spawn e  ->  goroutine + canal bufferizado (Future<T>)
+        # spawn and  ->  goroutine + buffered channel (Future<T>)
         t = elem or self.te.infer(node.expr)
         gt = go_type(t) if t not in ('unknown', 'null', 'array') else 'any'
         inner = self._expr(node.expr)
@@ -1298,7 +1298,7 @@ class CodeGenGo:
         if map_type and is_map(map_type):
             gt = go_type(map_type)
         else:
-            gt = "map[any]any"   # sem tipo alvo: fallback genérico
+            gt = "map[any]any"   # no target type: generic fallback
         pairs = ', '.join(f"{self._expr(k)}: {self._expr(v)}" for k, v in node.pairs)
         return f"{gt}{{{pairs}}}"
 
@@ -1306,13 +1306,13 @@ class CodeGenGo:
         target = node.target_type
         gt = go_type(target)
         inner = node.expr
-        # json_decode(s) as T  ->  Unmarshal tipado
+        # json_decode(s) as T  ->  typed Unmarshal
         if isinstance(inner, CallExpr) and inner.callee == 'json_decode':
             self._imports.add('encoding/json')
             src = self._expr(inner.args[0]) if inner.args else '""'
             return (f"func() {gt} {{ var _v {gt}; "
                     f"_ = json.Unmarshal([]byte({src}), &_v); return _v }}()")
-        # llm("modelo", prompt) as T  ->  structured output tipado (Fase 3)
+        # llm("model", prompt) as T  ->  typed structured output (Phase 3)
         if isinstance(inner, CallExpr) and inner.callee == 'llm':
             self._imports.add('encoding/json')
             self._helpers.update(('llm', 'sandbox'))
@@ -1322,10 +1322,10 @@ class CodeGenGo:
             return (f"func() {gt} {{ var _v {gt}; "
                     f"_ = json.Unmarshal([]byte(cryoLLM({model}, {prompt}, {schema})), &_v); "
                     f"return _v }}()")
-        # conversões numéricas
+        # numeric conversions
         if target in ('int', 'number'):
             return f"{gt}({self._expr(inner)})"
-        # asserção de tipo (any -> T)
+        # type assertion (any -> T)
         return f"{self._expr(inner)}.({gt})"
 
     def _binary(self, node: BinaryExpr) -> str:
@@ -1344,25 +1344,25 @@ class CodeGenGo:
             self._helpers.add('or')
             return f"cryoOr({l}, {r})"
 
-        # concatenacao de string (converte operando nao-string)
+        # string concatenation (converts non-string operand)
         if op == '+' and (lt == 'string' or rt == 'string'):
             ls = l if lt == 'string' else self._to_str(l, node.left)
             rs = r if rt == 'string' else self._to_str(r, node.right)
             return f"({ls} + {rs})"
 
-        # bit a bit e shift: diretos
+        # bitwise and shift: direct
         if op in ('&', '|', '^', '<<', '>>'):
             return f"({l} {op} {r})"
 
-        # coerção int<->number: Go não mistura int64 e float64. Se um lado é
-        # 'number' e o outro 'int', converte o inteiro para float64.
+        # int<->number coercion: Go does not mix int64 and float64. If one side is
+        # 'number' and the other 'int', converts the integer to float64.
         if op in ('+', '-', '*', '/', '%', '<', '>', '<=', '>=', '==', '!=') \
                 and {lt, rt} == {'int', 'number'}:
             if lt == 'int': l = f"float64({l})"
             if rt == 'int': r = f"float64({r})"
             return f"({l} {op} {r})"
 
-        # instrumentacao de seguranca (inteiros)
+        # security instrumentation (integers)
         both_int = (lt == 'int' and rt == 'int')
         if both_int and op in ('+', '-', '*') and self._safe_mode:
             fn = {'+': 'cryoAddOvf', '-': 'cryoSubOvf', '*': 'cryoMulOvf'}[op]
@@ -1376,7 +1376,7 @@ class CodeGenGo:
         return f"({l} {op} {r})"
 
     def _ternary(self, node: TernaryExpr) -> str:
-        # Go nao tem ?:; usa IIFE com tipo inferido (avaliacao preguicosa)
+        # Go has no ?:; uses IIFE with inferred type (lazy evaluation)
         t = self.te.infer(node.then_value)
         gt = go_type(t) if t not in ('unknown', 'null', 'array') else 'any'
         cond = self._expr(node.condition)
@@ -1406,7 +1406,7 @@ class CodeGenGo:
                 self._helpers.add('absi'); return f"cryoAbsI({self._expr(a[0])})"
             self._imports.add('math'); return f"math.Abs({self._expr(a[0])})"
         if c in ('min', 'max') and len(a) == 2:
-            # builtins nativos do Go (>=1.21): funcionam p/ int64 e float64
+            # Go native builtins (>=1.21): work for int64 and float64
             return f"{c}({self._expr(a[0])}, {self._expr(a[1])})"
         if c == 'floor':
             self._imports.add('math'); return f"math.Floor({self._expr(a[0])})"
@@ -1417,7 +1417,7 @@ class CodeGenGo:
         if c == 'to_string':
             self._helpers.add('str'); return f"cryoStr({self._expr(a[0])})"
         if c == 'to_int':
-            # string -> parse com strconv; numérico -> cast direto
+            # string -> parse with strconv; numeric -> direct cast
             if self.te.infer(a[0]) == 'string':
                 self._helpers.add('parseint')
                 return f"cryoParseInt({self._expr(a[0])})"
@@ -1442,10 +1442,10 @@ class CodeGenGo:
             return f"cryoJSONEncode({self._expr(a[0])})"
         if c == 'json_decode':
             raise CodeGenGoError(
-                "json_decode(s) exige um tipo alvo: use 'json_decode(s) as Tipo'.")
-        # ── mapas ──
+                "json_decode(s) requires a target type: use 'json_decode(s) as Type'.")
+        # ── maps ──
         if c == 'has' and len(a) == 2:
-            # has(map, chave) -> existência
+            # has(map, key) -> existence
             return f"func() bool {{ _, ok := {self._expr(a[0])}[{self._expr(a[1])}]; return ok }}()"
         if c == 'remove' and len(a) == 2:
             return f"delete({self._expr(a[0])}, {self._expr(a[1])})"
@@ -1482,7 +1482,7 @@ class CodeGenGo:
         if c == 'join' and len(a) == 2:
             self._imports.add('strings')
             return f"strings.Join({self._expr(a[0])}, {self._expr(a[1])})"
-        # ── Pyro: introspecção de skills nativas (sem arquivos .md) ──
+        # ── Pyro: introspection of native skills (no .md files) ──
         if c == 'skills':
             self._use_skills = True
             return "cryoSkillNames()"
@@ -1497,7 +1497,7 @@ class CodeGenGo:
             self._imports.add('encoding/json')
             self._helpers.add('jsonenc')
             return "cryoJSONEncode(cryoSkillList())"
-        # ── Pyro: acesso direto à máquina ──
+        # ── Pyro: direct machine access ──
         if c == 'pyro_exec' and len(a) == 1:
             self._helpers.update(('exec', 'sandbox'))
             return f"cryoExec({self._expr(a[0])})"
@@ -1528,7 +1528,7 @@ class CodeGenGo:
         if c == 'pyro_open' and len(a) == 1:
             self._helpers.update(('open', 'sandbox'))
             return f"cryoOpen({self._expr(a[0])})"
-        # ── Fase 2: concorrência / HTTP ──
+        # ── Phase 2: concurrency / HTTP ──
         if c == 'sleep' and len(a) == 1:
             self._imports.add('time')
             return f"time.Sleep(time.Duration({self._expr(a[0])}) * time.Millisecond)"
@@ -1541,14 +1541,14 @@ class CodeGenGo:
         if c == 'write_bytes' and len(a) == 2:
             self._helpers.update(('writebytes', 'sandbox'))
             return f"cryoWriteBytes({self._expr(a[0])}, {self._expr(a[1])})"
-        # ── Fase 3: LLM nativo ──
+        # ── Phase 3: Native LLM ──
         if c == 'schema_of' and len(a) == 1 and isinstance(a[0], Identifier):
             return self._json_schema(a[0].name)
         if c == 'llm':
             self._helpers.update(('llm', 'sandbox'))
             model  = self._expr(a[0]) if a else '""'
             prompt = self._expr(a[1]) if len(a) > 1 else '""'
-            return f'cryoLLM({model}, {prompt}, "")'   # sem schema (completion cru)
+            return f'cryoLLM({model}, {prompt}, "")'   # without schema (raw completion)
         if c == 'tools':
             self._use_tools = True
             return "cryoToolNames()"
@@ -1564,7 +1564,7 @@ class CodeGenGo:
             self._helpers.update(('llm', 'sandbox')); self._helpers.add('agent')
             model  = self._expr(a[0]) if a else '""'
             prompt = self._expr(a[1]) if len(a) > 1 else '""'
-            # 3o arg opcional: subconjunto de tools (string[]); 4o: limite de passos
+            # 3rd optional arg: subset of tools (string[]); 4th: step limit
             if len(a) > 2 and isinstance(a[2], ArrayLiteral):
                 elems = ', '.join(self._expr(e) for e in a[2].elements)
                 tools_arg = f"[]string{{{elems}}}"
@@ -1596,11 +1596,11 @@ class CodeGenGo:
             return f"{obj}[{s}:{e}]"
         if m == 'pop_last':
             return f"{obj}[len({obj})-1]"
-        # fallback: metodo desconhecido
+        # fallback: unknown method
         return f"{obj}.{gid(m)}({', '.join(args)})"
 
     def _stmt_call(self, node) -> str:
-        """Chamada em posicao de statement (trata push -> append)."""
+        """Call in statement position (handles push -> append)."""
         if isinstance(node, MethodCallExpr) and node.method == 'push':
             obj = self._expr(node.obj)
             arg = self._expr(node.args[0]) if node.args else 'nil'

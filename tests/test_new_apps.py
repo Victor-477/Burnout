@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ============================================================
-#  Burnout — Validacao das Novas Aplicacoes no C VM
+#  Burnout — Validacao das Novas Aplicacoes in the C VM
 # ============================================================
 import os
 import sys
@@ -52,17 +52,17 @@ def main():
         c_code, c_out, c_err = run_cmd(comp_args)
         
         if c_code != 0:
-            print(f"Erro ao compilar {app['name']}:")
+            print(f"Error ao compilar {app['name']}:")
             print(c_err)
             continue
-        print("Compilado com sucesso!")
+        print("Compilado with sucesso!")
         
-        print(f"Executando {app['name']} na C VM...")
+        print(f"Executando {app['name']} in the C VM...")
         run_args = [C_VM, out_pyro]
         r_code, r_out, r_err = run_cmd(run_args, stdin=app["stdin"])
         
         if r_code != 0:
-            print(f"Erro ao executar {app['name']}:")
+            print(f"Error ao executar {app['name']}:")
             print(r_err)
         else:
             print("Resultado da Execucao:")

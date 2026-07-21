@@ -1,6 +1,6 @@
 /* ============================================================
    Cryo Language — C Runtime  (v0.3)
-   Include em todo .pyro gerado.
+   Include in every generated .pyro.
    Compile: gcc -O2 programa.c cryo_runtime.c -lm -o programa
    ============================================================ */
 #pragma once
@@ -17,7 +17,7 @@
 
 /* ---------- CryoArray ----------
    Array dinamico generico — elementos sao uint64_t (8 bytes).
-   int64_t, double e ponteiros cabem em 8 bytes no x86-64.      */
+   int64_t, double and pointers fit in 8 bytes on x86-64.      */
 typedef struct CryoArray {
     uint64_t* data;
     int64_t   length;
@@ -31,7 +31,7 @@ void       cryo_array_set(CryoArray* a, int64_t i, uint64_t v);
 CryoArray* cryo_array_slice(CryoArray* a, int64_t start, int64_t end);
 void       cryo_array_free(CryoArray* a);
 
-/* Helpers para push/get por tipo */
+/* Helpers for push/get by type */
 static inline void cryo_push_i64(CryoArray* a, int64_t v)  { cryo_array_push(a, (uint64_t)v); }
 static inline void cryo_push_f64(CryoArray* a, double v)   { uint64_t u; memcpy(&u,&v,8); cryo_array_push(a,u); }
 static inline void cryo_push_str(CryoArray* a, char* v)    { cryo_array_push(a, (uint64_t)(uintptr_t)v); }
@@ -93,10 +93,10 @@ static inline double  cryo_tan(double x)             { return tan(x); }
 #define CRYO_PI 3.14159265358979323846
 #define CRYO_E  2.71828182845904523536
 
-/* ---------- Seguranca: aritmetica com verificacao ----------
-   Sob o modo --safe o compilador roteia +,-,* de inteiros por
-   estas funcoes, que abortam em overflow. Divisao/modulo por
-   zero sao sempre protegidos.                                  */
+/* ---------- Security: arithmetic with verification ----------
+   Under --safe mode the compiler routes +,-,* of integers through
+   estas functions, que abortam em overflow. Divisao/modulo por
+   zero sao always protecteds.                                  */
 int64_t cryo_add_ovf(int64_t a, int64_t b);
 int64_t cryo_sub_ovf(int64_t a, int64_t b);
 int64_t cryo_mul_ovf(int64_t a, int64_t b);
@@ -106,7 +106,7 @@ int64_t cryo_imod_chk(int64_t a, int64_t b);
 /* ---------- Seguranca: assert ---------- */
 void cryo_assert(bool cond, const char* msg);
 
-/* ---------- Seguranca: guarda de ponteiro nulo ---------- */
+/* ---------- Security: null pointer guard ---------- */
 void* cryo_check_null(void* p, const char* what);
 
 /* ---------- Excecao via setjmp ---------- */

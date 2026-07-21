@@ -10,28 +10,28 @@ CryoException _cryo_exc = {.active = false};
 /* ---------- Seguranca: aritmetica verificada ---------- */
 
 static void _cryo_fatal(const char* kind, const char* detail) {
-    fprintf(stderr, "[Cryo Seguranca] %s: %s\n", kind, detail);
-    abort();   /* aborta com core/backtrace em vez de continuar corrompido */
+    fprintf(stderr, "[Cryo Security] %s: %s\n", kind, detail);
+    abort();   /* aborts with core/backtrace instead of continuing corrupted */
 }
 
 int64_t cryo_add_ovf(int64_t a, int64_t b) {
     int64_t r;
     if (__builtin_add_overflow(a, b, &r))
-        _cryo_fatal("Overflow", "estouro em adicao de inteiros");
+        _cryo_fatal("Overflow", "integer addition overflow");
     return r;
 }
 
 int64_t cryo_sub_ovf(int64_t a, int64_t b) {
     int64_t r;
     if (__builtin_sub_overflow(a, b, &r))
-        _cryo_fatal("Overflow", "estouro em subtracao de inteiros");
+        _cryo_fatal("Overflow", "integer subtraction overflow");
     return r;
 }
 
 int64_t cryo_mul_ovf(int64_t a, int64_t b) {
     int64_t r;
     if (__builtin_mul_overflow(a, b, &r))
-        _cryo_fatal("Overflow", "estouro em multiplicacao de inteiros");
+        _cryo_fatal("Overflow", "integer multiplication overflow");
     return r;
 }
 
@@ -60,11 +60,11 @@ void cryo_assert(bool cond, const char* msg) {
     }
 }
 
-/* ---------- Seguranca: guarda de ponteiro nulo ---------- */
+/* ---------- Security: null pointer guard ---------- */
 
 void* cryo_check_null(void* p, const char* what) {
     if (!p) {
-        fprintf(stderr, "[Cryo Seguranca] NullPointer: acesso a '%s' nulo\n",
+        fprintf(stderr, "[Cryo Security] NullPointer: acesso a '%s' nulo\n",
                 what ? what : "?");
         abort();
     }
@@ -75,7 +75,7 @@ void* cryo_check_null(void* p, const char* what) {
 
 CryoArray* cryo_array_new(void) {
     CryoArray* a = malloc(sizeof(CryoArray));
-    if (!a) { fprintf(stderr, "[Cryo] malloc falhou\n"); exit(1); }
+    if (!a) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
     a->capacity = 8;
     a->length   = 0;
     a->data     = malloc(a->capacity * sizeof(uint64_t));
@@ -86,7 +86,7 @@ void cryo_array_push(CryoArray* a, uint64_t v) {
     if (a->length >= a->capacity) {
         a->capacity *= 2;
         a->data = realloc(a->data, a->capacity * sizeof(uint64_t));
-        if (!a->data) { fprintf(stderr, "[Cryo] realloc falhou\n"); exit(1); }
+        if (!a->data) { fprintf(stderr, "[Cryo] realloc failed\n"); exit(1); }
     }
     a->data[a->length++] = v;
 }
@@ -126,7 +126,7 @@ char* cryo_str_concat(const char* a, const char* b) {
     if (!a) a = ""; if (!b) b = "";
     size_t len = strlen(a) + strlen(b) + 1;
     char* r = malloc(len);
-    if (!r) { fprintf(stderr, "[Cryo] malloc falhou\n"); exit(1); }
+    if (!r) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
     strcpy(r, a); strcat(r, b);
     return r;
 }

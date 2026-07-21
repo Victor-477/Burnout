@@ -1,20 +1,20 @@
 # ============================================================
-#  Burnout — Desassemblador de bytecode Pyro (.pyro -> texto)
+#  Burnout — Pyro bytecode disassembler (.pyro -> text)
 #
-#  Lê um arquivo .pyro (a linguagem-alvo própria) e imprime um
-#  listing legível: cabeçalho, pool de constantes, tabela de
-#  funções e o código desmontado (com alvos de salto e nomes de
-#  função resolvidos). Útil para inspeção e como forma textual
-#  legível por IA do que a máquina executa.
+#  Reads a .pyro file (the proper target language) and prints a
+#  listing legível: cabeçalho, pool de constants, tabela de
+#  functions and disassembled code (with jump targets and names of
+#  function resolved). Useful for inspection and as a textual form
+#  readable by AI than what the machine executes.
 #
-#  Uso:  python burnout/disasm_pyro.py programa.pyro
+#  Usage:  python burnout/disasm_pyro.py program.pyro
 # ============================================================
 import struct
 import sys
 
 import codegen_pyro as bc
 
-# opcode -> nome  (a partir das constantes OP_* do gerador)
+# opcode -> name  (from the generator's OP_* constants)
 _OPNAMES = {v: k[3:] for k, v in vars(bc).items()
             if k.startswith('OP_') and isinstance(v, int)}
 
@@ -23,7 +23,7 @@ _TAGNAME = {bc.TAG_INT: 'int', bc.TAG_FLT: 'float',
 
 
 def _xor_decode(code: bytes) -> bytes:
-    """Inverso do XOR rolling do gerador."""
+    """Inverse of the generator's XOR rolling."""
     out = bytearray(len(code))
     k = 0x5A
     for i, e in enumerate(code):
@@ -35,7 +35,7 @@ def _xor_decode(code: bytes) -> bytes:
 
 def load(data: bytes) -> dict:
     if data[:4] != b'PYRO':
-        raise ValueError("arquivo .pyro inválido (magic)")
+        raise ValueError("invalid .pyro file (magic)")
     version = data[4]
     flags = data[5]
     pos = 6
@@ -57,7 +57,7 @@ def load(data: bytes) -> dict:
         elif tag == bc.TAG_STR:
             ln = rd('<H'); consts.append(('str', data[pos:pos+ln].decode('utf-8'))); pos += ln
         else:
-            raise ValueError(f"tag de constante desconhecida: {tag}")
+            raise ValueError(f"unknown constant tag: {tag}")
 
     funcs = []
     nfuncs = rd('<H')
@@ -91,7 +91,7 @@ def _const_str(consts, idx):
 def disassemble(data: bytes) -> str:
     p = load(data)
     consts, funcs, code = p['consts'], p['funcs'], p['code']
-    # mapeia entry-offset -> nome de função, para rótulos
+    # maps entry-offset -> function name, for labels
     entry_at = {f['entry']: f['name'] for f in funcs}
 
     out = []
@@ -102,9 +102,9 @@ def disassemble(data: bytes) -> str:
         _fl.append('sandbox')
     out.append(f"; Pyro bytecode  (versão {p['version']}, {', '.join(_fl)})")
     out.append(f"; entry = {funcs[p['entryfn']]['name']}  |  "
-               f"{len(consts)} consts, {len(funcs)} funcs, {len(code)} bytes de código")
+               f"{len(consts)} consts, {len(funcs)} funcs, {len(code)} bytes of code")
     out.append("")
-    out.append("; ── constantes ──")
+    out.append("; ── constants ──")
     for i, (kind, val) in enumerate(consts):
         shown = f'"{val}"' if kind == 'str' else val
         out.append(f";   [{i}] {kind:<5} {shown}")
@@ -121,7 +121,7 @@ def disassemble(data: bytes) -> str:
         if i in entry_at:
             out.append(f"\n{entry_at[i]}:")
         if i in dbg:
-            out.append(f"  ; linha {dbg[i]}")
+            out.append(f"  ; line {dbg[i]}")
         op = code[i]
         name = _OPNAMES.get(op, f"?0x{op:02X}")
         size = 1 + bc._OPERAND.get(op, 0)

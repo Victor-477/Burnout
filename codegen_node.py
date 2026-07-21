@@ -1,15 +1,15 @@
 # ============================================================
 #  Cryo Compiler - Node.js / JavaScript Code Generator
-#  .cryo  ->  .js  (JavaScript CommonJS, executavel com `node`)
+#  .cryo  ->  .js  (JavaScript CommonJS, executable with `node`)
 #
-#  Cobre o NUCLEO da linguagem: escalares, strings, bool, arrays,
-#  maps, structs (objetos), enums, funcoes, controle de fluxo,
-#  operadores, print/assert, JSON, e blocos/libraries estrangeiros
-#  de JavaScript (>Node( ... ) / >JS( ... ) e `library >node x<`).
+#  Covers the CORE of the language: scalars, strings, bool, arrays,
+#  maps, structs (objetos), enums, functions, controle de fluxo,
+#  operators, print/assert, JSON, and foreign blocks/libraries
+#  of JavaScript (>Node( ... ) / >JS( ... ) and `library >node x<`).
 #
-#  Recursos de LLM/agente/concorrencia (schema/tool/llm/agent/
-#  spawn/await) e acesso a maquina (pyro_*) NAO sao suportados
-#  aqui — use --backend go. O gerador emite erro claro nesses casos.
+#  LLM/agent/concurrency resources (schema/tool/llm/agent/
+#  spawn/await) and machine access (pyro_*) are NOT supported
+#  here — use --backend go. The generator emits a clear error in these cases.
 # ============================================================
 import json
 from typing import List, Set
@@ -22,7 +22,7 @@ class CodeGenNodeError(Exception):
     pass
 
 
-# linguagens estrangeiras tratadas como JavaScript por este backend
+# foreign languages treated as JavaScript by this backend
 _JS_LANGS = ('node', 'js', 'javascript')
 
 _JS_KEYWORDS = {
@@ -37,11 +37,11 @@ _JS_KEYWORDS = {
 
 
 def jsid(name: str) -> str:
-    """Evita colisao de identificadores Cryo com palavras reservadas JS."""
+    """Avoids collision of Cryo identifiers with JS reserved words."""
     return name + '_' if name in _JS_KEYWORDS else name
 
 
-# builtins Cryo nao suportados no backend Node (rota: --backend go)
+# Cryo builtins not supported in Node backend (route: --backend go)
 _UNSUPPORTED = {
     'llm', 'agent', 'tools', 'tools_json', 'tool_get', 'schema_of',
     'http_get', 'http_post', 'sleep', 'skills', 'skill_get', 'skill_has',
@@ -52,8 +52,8 @@ _UNSUPPORTED = {
 
 
 class _Types:
-    """Inferência de tipos leve para o backend Node: distingue int/number
-    (divisão inteira vs. float) e array/map (bounds-check de índice)."""
+    """Lightweight type inference for the Node backend: distinguishes int/number
+    (integer division vs. float) and array/map (index bounds-check)."""
 
     def __init__(self):
         self.scopes: List[dict] = [{}]
@@ -156,7 +156,7 @@ class CodeGenNode:
         self._helpers:  Set[str] = set()
         self._cur = self._main
         self._indent = 0
-        self._ntmp = 0                 # temporárias frescas (propagação '?')
+        self._ntmp = 0                 # fresh temporaries ('?' propagation)
         self._imported_langs: Set[str] = set()
 
     # ── util ────────────────────────────────────────────────
@@ -166,7 +166,7 @@ class CodeGenNode:
     def _err(self, msg):
         raise CodeGenNodeError(msg)
 
-    # ── entrada principal ───────────────────────────────────
+    # ── main entry ───────────────────────────────────
     def _prescan(self, program: Program):
         for n in program.statements:
             if isinstance(n, FunctionDecl):
@@ -183,7 +183,7 @@ class CodeGenNode:
         for node in program.statements:
             if isinstance(node, FunctionDecl):
                 if node.is_tool:
-                    self._err("'tool fn' (LLM) nao e suportado no backend node; "
+                    self._err("'tool fn' (LLM) is not supported in the node backend; "
                               "use --backend go.")
                 self._cur, self._indent = self._funcs, 0
                 self._function(node)
@@ -191,9 +191,9 @@ class CodeGenNode:
                 self._cur, self._indent = self._enums, 0
                 self._enum(node)
             elif isinstance(node, StructDecl):
-                pass  # structs = objetos literais; sem declaracao necessaria
+                pass  # structs = literal objects; no declaration necessary
             elif isinstance(node, SkillDecl):
-                self._err("'skill' (LLM) nao e suportado no backend node; "
+                self._err("'skill' (LLM) is not supported in the node backend; "
                           "use --backend go.")
             elif isinstance(node, Library):
                 if resolve_library_lang(node, self._imported_langs) in _JS_LANGS:
@@ -248,24 +248,24 @@ class CodeGenNode:
                   "}", ""]
         if 'div' in self._helpers:
             H += ["function cryoDiv(a, b) {",
-                  "  if (b === 0) throw new Error('[Cryo Seguranca] DivisaoPorZero');",
+                  "  if (b === 0) throw new Error('[Cryo Security] DivisaoPorZero');",
                   "  return a / b;",
                   "}", ""]
         if 'idiv' in self._helpers:
             H += ["function cryoIDiv(a, b) {",
-                  "  if (b === 0) throw new Error('[Cryo Seguranca] DivisaoPorZero');",
+                  "  if (b === 0) throw new Error('[Cryo Security] DivisaoPorZero');",
                   "  return Math.trunc(a / b);   // divisão inteira (trunca p/ zero)",
                   "}", ""]
         if 'index' in self._helpers:
             H += ["function cryoIndex(a, i) {",
                   "  if (i < 0 || i >= a.length)",
-                  "    throw new Error('[Cryo Seguranca] IndexError: índice ' + i + ' fora dos limites (len=' + a.length + ')');",
+                  "    throw new Error('[Cryo Security] IndexError: índice ' + i + ' fora dos limites (len=' + a.length + ')');",
                   "  return a[i];",
                   "}", ""]
         if 'setindex' in self._helpers:
             H += ["function cryoSetIndex(a, i, v) {",
                   "  if (i < 0 || i >= a.length)",
-                  "    throw new Error('[Cryo Seguranca] IndexError: índice ' + i + ' fora dos limites (len=' + a.length + ')');",
+                  "    throw new Error('[Cryo Security] IndexError: índice ' + i + ' fora dos limites (len=' + a.length + ')');",
                   "  a[i] = v;",
                   "}", ""]
         if 'substr' in self._helpers:
@@ -279,23 +279,23 @@ class CodeGenNode:
                   "}", ""]
         if 'mod' in self._helpers:
             H += ["function cryoMod(a, b) {",
-                  "  if (b === 0) throw new Error('[Cryo Seguranca] DivisaoPorZero');",
+                  "  if (b === 0) throw new Error('[Cryo Security] DivisaoPorZero');",
                   "  return a % b;",
                   "}", ""]
         if 'unwrap' in self._helpers:
             H += ["function cryoUnwrap(x) {",
-                  "  if (x == null) throw new Error('[Cryo Seguranca] unwrap de nulo');",
+                  "  if (x == null) throw new Error('[Cryo Security] unwrap de nulo');",
                   "  return x;",
                   "}", ""]
         return H
 
-    # ── funcoes ─────────────────────────────────────────────
+    # ── functions ─────────────────────────────────────────────
     def _function(self, n: FunctionDecl):
         params = ', '.join(jsid(p[1]) for p in n.params)
         self._emit(f"function {jsid(n.name)}({params}) {{")
         self._t.push()
         for p in n.params:
-            self._t.set(p[1], p[0])   # p = (tipo, nome)
+            self._t.set(p[1], p[0])   # p = (type, name)
         self._indent += 1
         self._block(n.body)
         self._indent -= 1
@@ -309,9 +309,9 @@ class CodeGenNode:
 
     # ── statements ──────────────────────────────────────────
     def _node_try(self, inner: Node) -> str:
-        """Propagação de erro '?': emite a temporária + guarda e devolve a
-        expressão do valor Ok (ou o próprio valor, se opcional). Na via de
-        erro/nulo, retorna cedo o Err/null."""
+        """Error propagation '?': emits the temporary + guard and returns the
+        of the Ok value expression (or the value itself, if optional). In the
+        error/null, returns early the Err/null."""
         t = self._t.infer(inner)
         self._ntmp += 1
         tmp = f"__try{self._ntmp}"
@@ -393,29 +393,29 @@ class CodeGenNode:
         elif isinstance(n, TryCatch):
             self._try(n)
         elif isinstance(n, Assert):
-            msg = self._expr(n.message) if n.message else '"assert falhou"'
+            msg = self._expr(n.message) if n.message else '"assert failed"'
             self._emit(f"if (!({self._expr(n.condition)})) throw new Error({msg});")
         elif isinstance(n, SafetyBlock):
-            self._block(n.body)   # JS nao tem 'unsafe'; emite o corpo
+            self._block(n.body)   # JS has no 'unsafe'; emits the body
         elif isinstance(n, ForeignBlock):
             self._foreign(n)
         elif isinstance(n, CallExpr) and n.callee == 'throw':
             arg = self._expr(n.args[0]) if n.args else '"erro"'
             self._emit(f"throw {arg};")
         elif isinstance(n, TryExpr):
-            self._node_try(n.operand)   # valor descartado (statement)
+            self._node_try(n.operand)   # discarded value (statement)
         else:
-            # statement-expressao (ex.: chamada de funcao, m.push(...))
+            # statement-expression (e.g.: function call, m.push(...))
             self._emit(f"{self._expr(n)};")
 
     def _if(self, n: If):
         self._emit(f"if ({self._expr(n.condition)}) {{")
         self._indent += 1; self._block(n.then_body); self._indent -= 1
         if n.else_body:
-            # else-if achatado quando o else e um unico If
+            # else-if flattened when the else is a single If
             if len(n.else_body) == 1 and isinstance(n.else_body[0], If):
                 self._emit("} else")
-                # remonta como 'else if' colando na proxima linha
+                # reassembles as 'else if' pasting on the next line
                 tail = []
                 save = self._cur; self._cur = tail
                 self._if(n.else_body[0])
@@ -499,11 +499,11 @@ class CodeGenNode:
                 self._emit(line.strip())
             self._emit(f"// -- [/bloco {n.lang}] --")
         else:
-            self._emit(f"// [Cryo] bloco >{n.lang}< omitido no backend Node "
+            self._emit(f"// [Cryo] >{n.lang}< block omitted in Node backend "
                        f"(use >Node( ... ))")
 
     def _inline(self, n: Node) -> str:
-        """Forma sem ';' para init/update de for."""
+        """Form without ';' for for init/update."""
         if isinstance(n, VarDecl):
             return f"let {jsid(n.name)} = {self._expr(n.value)}" if n.value is not None \
                 else f"let {jsid(n.name)}"
@@ -515,12 +515,12 @@ class CodeGenNode:
             return f"{jsid(n.name)}{n.op}"
         return self._expr(n)
 
-    # ── expressoes ──────────────────────────────────────────
+    # ── expressions ──────────────────────────────────────────
     def _expr(self, n: Node) -> str:
         if isinstance(n, TryExpr):
             raise CodeGenNodeError(
-                "propagação '?' só é suportada no nível de atribuição, "
-                "declaração, retorno ou expressão-statement — não aninhada.")
+                "propagation '?' is only supported at the assignment level, "
+                "declaration, return or expression-statement — not nested.")
         if isinstance(n, Literal):
             return self._literal(n)
         if isinstance(n, Identifier):
@@ -543,8 +543,8 @@ class CodeGenNode:
             return f"{self._expr(n.obj)}.{n.field}"
         if isinstance(n, IndexAccess):
             ot = self._t.infer(n.obj)
-            # bounds-check em arrays E strings (ambos têm .length e [i]);
-            # maps ficam de fora (chave ausente -> undefined é esperado)
+            # bounds-check on arrays AND strings (both have .length and [i]);
+            # maps are left out (missing key -> undefined is expected)
             if self.safe and (ot.endswith('[]') or ot == 'string'):
                 self._helpers.add('index')
                 return f"cryoIndex({self._expr(n.obj)}, {self._expr(n.index)})"
@@ -558,18 +558,18 @@ class CodeGenNode:
             fields = ", ".join(f"{k}: {self._expr(v)}" for k, v in n.fields)
             return "{" + fields + "}"
         if isinstance(n, CastExpr):
-            return self._expr(n.expr)   # tipos sao dinamicos em JS
+            return self._expr(n.expr)   # types are dynamic in JS
         if isinstance(n, UnwrapExpr):
             if self.safe:
                 self._helpers.add('unwrap')
                 return f"cryoUnwrap({self._expr(n.operand)})"
             return self._expr(n.operand)
         if isinstance(n, (SpawnExpr, AwaitExpr)):
-            self._err("concorrencia (spawn/await) nao e suportada no backend node; "
+            self._err("concurrency (spawn/await) is not supported in the node backend; "
                       "use --backend go.")
         if isinstance(n, Lambda):
             return self._lambda(n)
-        self._err(f"expressao nao suportada no backend node: {type(n).__name__}")
+        self._err(f"expression not supported in node backend: {type(n).__name__}")
 
     def _lambda(self, n: Lambda) -> str:
         params = ', '.join(jsid(pn) for _pt, pn in n.params)
@@ -621,7 +621,7 @@ class CodeGenNode:
         c = n.callee
         a = n.args
         if c in _UNSUPPORTED:
-            self._err(f"'{c}' nao e suportado no backend node; use --backend go.")
+            self._err(f"'{c}' is not supported in the node backend; use --backend go.")
 
         def A(i):
             return self._expr(a[i])
@@ -673,5 +673,5 @@ class CodeGenNode:
             return f"JSON.stringify({A(0)})"
         if c == 'json_decode':
             return f"JSON.parse({A(0)})"
-        # chamada de funcao do usuario
+        # user function call
         return f"{jsid(c)}({args})"

@@ -1,22 +1,22 @@
 # ============================================================
-#  Burnout — Gerador de bytecode Pyro  (.cryo -> .pyro)
+#  Burnout — Pyro bytecode generator  (.cryo -> .pyro)
 #
-#  O .pyro é a LINGUAGEM-ALVO PRÓPRIA do sistema: um bytecode
-#  binário com um conjunto de instruções (ISA) inventado aqui —
-#  não é x86, nem Go, nem C. É executado pela VM Pyro (em Go).
+#  .pyro is the system's OWN TARGET LANGUAGE: a bytecode
+#  binary with an instruction set (ISA) invented here —
+#  it is not x86, nor Go, nor C. It is executed by the Pyro VM (in Go).
 #
-#  Formato do arquivo .pyro (little-endian):
+#  Format of the .pyro file (little-endian):
 #    magic    4  "PYRO"
 #    version  1  0x02
-#    flags    1  bit0 = code section codificada (XOR rolling)
-#                bit1 = seção de depuração presente (pc->linha)
-#                bit2 = sandbox (VM recusa natives de rede/máquina)
-#    nconsts  u16   depois: [ tag(1) + payload ] * nconsts
+#    flags    1  bit0 = code section encoded (XOR rolling)
+#                bit1 = debugging section present (pc->line)
+#                bit2 = sandbox (VM rejects network/machine natives)
+#    nconsts  u16   after: [ tag(1) + payload ] * nconsts
 #       tag 1 int64  (8)   | tag 2 float64 (8)
 #       tag 3 string (u16 len + bytes utf8) | tag 4 bool (1)
-#    nfuncs   u16   depois: [ nameidx u16, entry u32, nparams u8, nlocals u16 ] * nfuncs
-#    entryfn  u16   (índice da função 'main')
-#    codelen  u32   depois: code bytes (possivelmente codificados)
+#    nfuncs   u16   after: [ nameidx u16, entry u32, nparams u8, nlocals u16 ] * nfuncs
+#    entryfn  u16   (index of the 'main' function)
+#    codelen  u32   after: code bytes (possibly encoded)
 # ============================================================
 import struct
 from ast_nodes import *
@@ -27,15 +27,15 @@ class CodeGenPyroError(Exception):
     pass
 
 
-# ── Opcodes da ISA Pyro ─────────────────────────────────────
+# ── Pyro ISA Opcodes ─────────────────────────────────────
 OP_HALT  = 0x00
-OP_CONST = 0x01   # u16 idx  -> empilha consts[idx]
+OP_CONST = 0x01   # u16 idx  -> pushes consts[idx]
 OP_TRUE  = 0x02
 OP_FALSE = 0x03
 OP_NULL  = 0x04
 OP_POP   = 0x05
-OP_LOAD  = 0x06   # u16 slot -> empilha local[slot]
-OP_STORE = 0x07   # u16 slot -> local[slot] = pop (mantém no topo? não: consome)
+OP_LOAD  = 0x06   # u16 slot -> pushes local[slot]
+OP_STORE = 0x07   # u16 slot -> local[slot] = pop (keeps on top? no: consumes)
 OP_ADD   = 0x10
 OP_SUB   = 0x11
 OP_MUL   = 0x12
@@ -56,31 +56,31 @@ OP_LE    = 0x24
 OP_GE    = 0x25
 OP_NOT   = 0x26
 OP_JMP   = 0x30   # i16 rel
-OP_JMPF  = 0x31   # i16 rel (pop; salta se falso)
-OP_JMPT  = 0x32   # i16 rel (pop; salta se verdadeiro)
+OP_JMPF  = 0x31   # i16 rel (pop; jumps if false)
+OP_JMPT  = 0x32   # i16 rel (pop; jumps if true)
 OP_CALL  = 0x40   # u16 funcidx, u8 argc
 OP_RET   = 0x41
-OP_PRINT = 0x50   # pop e imprime (com \n) conforme o tipo em runtime
-OP_PRINTLN = 0x52 # imprime \n
-OP_ASSERT = 0x51  # pop cond, pop msg; se cond falso aborta
-# ── containers: arrays, maps e structs (struct = map de chaves string) ──
-OP_NEWARR = 0x60  # u16 count -> array a partir dos 'count' valores do topo
-OP_NEWMAP = 0x61  # u16 count -> map a partir de 'count' pares (chave,valor)
-OP_INDEX  = 0x62  # pop key, pop cont -> empilha cont[key]
+OP_PRINT = 0x50   # pops and prints (with \n) according to the type at runtime
+OP_PRINTLN = 0x52 # prints \n
+OP_ASSERT = 0x51  # pop cond, pop msg; if cond is false aborts
+# ── containers: arrays, maps and structs (struct = map of string keys) ──
+OP_NEWARR = 0x60  # u16 count -> array from the top 'count' values
+OP_NEWMAP = 0x61  # u16 count -> map from 'count' pairs (key,value)
+OP_INDEX  = 0x62  # pop key, pop cont -> pushes cont[key]
 OP_SETIDX = 0x63  # pop val, pop key, pop cont -> cont[key] = val
-OP_LEN    = 0x64  # pop cont -> empilha tamanho (string/array/map)
-OP_APPEND = 0x65  # pop val, pop arr -> arr.push(val); empilha novo tamanho
-OP_HAS    = 0x66  # pop key, pop map -> empilha bool (existe)
-OP_KEYS   = 0x67  # pop map -> empilha array de chaves
-OP_NATIVE = 0x70  # u8 id, u8 argc -> chama builtin nativo da VM (tabela NATIVES)
-OP_TRYPUSH = 0x71 # i16 rel (catch), u16 slot (var do catch; 0xFFFF = nenhuma)
-OP_TRYPOP  = 0x72 # remove o handler de exceção do topo (try concluído)
-OP_THROW   = 0x73 # pop valor -> desenrola até o handler mais próximo
-OP_COALESCE = 0x74 # pop b, a -> a se a != null, senão b  (operador ??)
-OP_UNWRAP  = 0x75 # pop a -> a se a != null, senão aborta  (unwrap x!)
+OP_LEN    = 0x64  # pop cont -> pushes size (string/array/map)
+OP_APPEND = 0x65  # pop val, pop arr -> arr.push(val); pushes new size
+OP_HAS    = 0x66  # pop key, pop map -> pushes bool (exists)
+OP_KEYS   = 0x67  # pop map -> pushes array of keys
+OP_NATIVE = 0x70  # u8 id, u8 argc -> calls VM native builtin (NATIVES table)
+OP_TRYPUSH = 0x71 # i16 rel (catch), u16 slot (catch var; 0xFFFF = none)
+OP_TRYPOP  = 0x72 # removes the exception handler from top (try completed)
+OP_THROW   = 0x73 # pop value -> unwinds to the nearest handler
+OP_COALESCE = 0x74 # pop b, a -> a if a != null, else b  (operator ??)
+OP_UNWRAP  = 0x75 # pop a -> a if a != null, else aborts  (unwrap x!)
 
-# tamanho do operando por opcode (bytes após o opcode)
-#  v2: saltos usam i32 (antes i16) -> sem limite de ±32KB por função.
+# operand size per opcode (bytes after the opcode)
+#  v2: jumps use i32 (formerly i16) -> no limit of ±32KB per function.
 _OPERAND = {
     OP_CONST: 2, OP_LOAD: 2, OP_STORE: 2,
     OP_JMP: 4, OP_JMPF: 4, OP_JMPT: 4,
@@ -88,9 +88,9 @@ _OPERAND = {
     OP_NATIVE: 2, OP_TRYPUSH: 6,   # i32 rel + u16 slot
 }
 
-_NO_SLOT = 0xFFFF   # TRYPUSH sem variável de catch
+_NO_SLOT = 0xFFFF   # TRYPUSH without catch variable
 
-# builtins nativos da VM: nome -> (id, argc). A VM espelha esta tabela.
+# VM native builtins: name -> (id, argc). The VM mirrors this table.
 NATIVES = {
     'sqrt':      (0, 1),  'pow':      (1, 2),  'abs':    (2, 1),
     'min':       (3, 2),  'max':      (4, 2),  'floor':  (5, 1),
@@ -101,26 +101,26 @@ NATIVES = {
     'upper':     (12, 1), 'lower':    (13, 1), 'trim':   (14, 1),
     'contains':  (15, 2), 'find':     (16, 2), 'replace': (17, 3),
     'substr':    (18, 3), 'split':    (19, 2), 'join':   (20, 2),
-    # ── E/S e JSON (Fase 5) ──
+    # ── I/O and JSON (Phase 5) ──
     'input':     (21, 1),
     'json_encode': (22, 1), 'json_decode': (23, 1),
-    # ── rede / tempo (Fase 5) ──
+    # ── network / time (Phase 5) ──
     'http_get':  (24, 1), 'http_post': (25, 2), 'sleep': (26, 1),
-    # ── E/S binária (Fase 9.3): grava int[] como bytes num arquivo ──
+    # ── Binary I/O (Phase 9.3): writes int[] as bytes to a file ──
     'write_bytes': (27, 2),
 }
 
 def _isize(op: int) -> int:
     return 1 + _OPERAND.get(op, 0)
 
-# tags de constante
+# constant tags
 TAG_INT = 1
 TAG_FLT = 2
 TAG_STR = 3
 TAG_BOOL = 4
 
 _MAGIC = b"PYRO"
-_VERSION = 2         # v2: saltos i32 + seção opcional de depuração (pc->linha)
+_VERSION = 2         # v2: jumps i32 + optional debugging section (pc->line)
 _FLAG_ENCODED = 0x01
 _FLAG_DEBUG   = 0x02
 _FLAG_SANDBOX = 0x04
@@ -164,14 +164,14 @@ class CodeGenPyro:
         self._nlabels = 0
         self._loop_stack: List = []        # (break_label, continue_label)
         self._structs: Dict[str, List[str]] = {}
-        self._enum_consts: Dict[str, int] = {}   # 'Nivel_ALTO' -> 2
+        self._enum_consts: Dict[str, int] = {}   # 'Level_HIGH' -> 2
         self._enum_maps: Dict[str, str] = {}
         self._member_to_enum: Dict[str, str] = {}
-        self._global_consts: Dict[str, Literal] = {}  # const global -> literal inlined
+        self._global_consts: Dict[str, Literal] = {}  # global const -> inlined literal
         self._ntmp = 0
-        self._cur_line = 0            # última linha marcada (evita marcadores repetidos)
+        self._cur_line = 0            # last marked line (avoids repeated markers)
 
-    # ── constantes ──────────────────────────────────────────
+    # ── constants ──────────────────────────────────────────
 
     def _const(self, tag: int, value) -> int:
         key = (tag, value)
@@ -182,7 +182,7 @@ class CodeGenPyro:
         self._const_idx[key] = idx
         return idx
 
-    # ── emissao ─────────────────────────────────────────────
+    # ── emission ─────────────────────────────────────────────
 
     def _emit(self, op: int, arg=None):
         self._cur.code.append((op, arg))
@@ -202,20 +202,20 @@ class CodeGenPyro:
 
     def _get_slot(self, name: str) -> int:
         if name not in self._cur.locals:
-            raise CodeGenPyroError(f"variável '{name}' não declarada")
+            raise CodeGenPyroError(f"variable '{name}' not declared")
         return self._cur.locals[name]
 
-    # ── entrada principal ───────────────────────────────────
+    # ── main entry ───────────────────────────────────
 
     def generate(self, program: Program) -> bytes:
-        # coleta funções (índices) — inclui 'main' sintético
+        # collects functions (indices) — includes synthetic 'main'
         top = []
         user_fns = []
         for n in program.statements:
             if isinstance(n, FunctionDecl):
                 user_fns.append(n)
             elif isinstance(n, StructDecl):
-                # struct = map de chaves string; registramos os campos
+                # struct = map of string keys; we register the fields
                 self._structs[n.name] = [f.name for f in n.fields]
             elif isinstance(n, EnumDecl):
                 has_data = any(len(m.fields) > 0 for m in n.members)
@@ -240,14 +240,14 @@ class CodeGenPyro:
                         user_fns.append(fn_short)
                         user_fns.append(fn_prefixed)
             elif isinstance(n, ConstDecl) and isinstance(n.value, Literal):
-                # const global com valor literal: inlined em todo uso
-                # (visível dentro de funções, sem precisar de globais na VM)
+                # global const with literal value: inlined in all uses
+                # (visible inside functions, without needing globals in the VM)
                 self._global_consts[n.name] = n.value
             elif isinstance(n, (Import, Library)):
                 pass
             elif isinstance(n, (SkillDecl, ForeignBlock)):
                 raise CodeGenPyroError(
-                    f"'{type(n).__name__}' ainda não é suportado no backend pyro "
+                    f"'{type(n).__name__}' is not yet supported in the pyro backend "
                     f"(bytecode: escalares, arrays, maps, structs, enums, funções e fluxo).")
             else:
                 top.append(n)
@@ -272,7 +272,7 @@ class CodeGenPyro:
             self._slot(pn)
         for s in body:
             self._stmt(s)
-        # retorno implícito (0 para main; null caso contrário)
+        # implicit return (0 for main; null otherwise)
         self._emit(OP_NULL)
         self._emit(OP_RET)
         self._funcs.append(f)
@@ -281,8 +281,8 @@ class CodeGenPyro:
     # ── statements ──────────────────────────────────────────
 
     def _mark_line(self, line):
-        # marcador de linha (pseudo-instrução de tamanho zero, como um label).
-        # A montagem transforma em entradas pc->linha da seção de depuração.
+        # line marker (pseudo-instruction of size zero, like a label).
+        # Assembly transforms into pc->line entries of the debugging section.
         if line and line != self._cur_line:
             self._cur_line = line
             self._cur.code.append((-2, line))
@@ -290,7 +290,7 @@ class CodeGenPyro:
     def _stmt(self, n: Node):
         self._mark_line(getattr(n, 'line', 0))
         if   isinstance(n, ConstDecl):
-            # const não-literal (ou local): tratada como variável imutável
+            # non-literal const (or local): treated as immutable variable
             slot = self._slot(n.name)
             self._expr(n.value)
             self._emit(OP_STORE, slot)
@@ -317,18 +317,18 @@ class CodeGenPyro:
             arg = n.args[0] if n.args else Literal('null', None)
             self._expr(arg); self._emit(OP_THROW)
         elif isinstance(n, TryExpr):
-            self._try_prop(n); self._emit(OP_POP)   # descarta o valor Ok
+            self._try_prop(n); self._emit(OP_POP)   # discards the Ok value
         elif isinstance(n, (CallExpr, MethodCallExpr)):
-            self._expr(n); self._emit(OP_POP)   # descarta resultado
+            self._expr(n); self._emit(OP_POP)   # discards result
         else:
             raise CodeGenPyroError(
-                f"'{type(n).__name__}' não suportado no backend pyro (use --backend go).")
+                f"'{type(n).__name__}' not supported in the pyro backend (use --backend go).")
 
     def _try_prop(self, n):
-        """Propagação de erro 'expr?' (Fase 8.3): avalia o operando, e se a
-        variante for Ok deixa o payload val0 no topo; caso contrário, a função
-        retorna cedo com o valor (Err). Requer um enum tipo Result (com 'tag').
-        Deixa o valor Ok no topo da pilha."""
+        """Error propagation 'expr?' (Phase 8.3): evaluates the operand, and if the
+        variant is Ok leaves the val0 payload on top; otherwise, the function
+        returns early with the value (Err). Requires a Result type enum (with 'tag').
+        Leaves the Ok value on top of the stack."""
         self._ntmp += 1
         tmp = self._slot(f"__try{self._ntmp}")
         self._expr(n.operand)
@@ -339,12 +339,12 @@ class CodeGenPyro:
         self._emit(OP_INDEX)
         self._emit(OP_CONST, self._const(TAG_STR, "Ok"))
         self._emit(OP_EQ)
-        self._emit(OP_JMPT, l_ok)                 # tag == "Ok" -> desempacota
-        self._emit(OP_LOAD, tmp); self._emit(OP_RET)   # senão: propaga o Err
+        self._emit(OP_JMPT, l_ok)                 # tag == "Ok" -> unpacks
+        self._emit(OP_LOAD, tmp); self._emit(OP_RET)   # else: propagates the Err
         self._place(l_ok)
         self._emit(OP_LOAD, tmp)
         self._emit(OP_CONST, self._const(TAG_STR, "val0"))
-        self._emit(OP_INDEX)                      # topo = tmp["val0"]
+        self._emit(OP_INDEX)                      # top = tmp["val0"]
 
     def _var(self, n: VarDecl):
         slot = self._slot(n.name)
@@ -371,7 +371,7 @@ class CodeGenPyro:
         self._emit(OP_SETIDX)
 
     def _foreach(self, n: ForEach):
-        # for (T x in iter): itera por índice (arrays; maps via keys(m))
+        # for (T x in iter): iterates by index (arrays; maps via keys(m))
         #   __it = iter; __i = 0
         #   while (__i < len(__it)) { x = __it[__i]; <body>; __i++ }
         self._ntmp += 1
@@ -532,12 +532,12 @@ class CodeGenPyro:
 
     def _break(self):
         if not self._loop_stack:
-            raise CodeGenPyroError("'break' fora de laço/switch")
+            raise CodeGenPyroError("'break' out of loop/switch")
         self._emit(OP_JMP, self._loop_stack[-1][0])
 
     def _continue(self):
         if not self._loop_stack:
-            raise CodeGenPyroError("'continue' fora de laço")
+            raise CodeGenPyroError("'continue' out of loop")
         self._emit(OP_JMP, self._loop_stack[-1][1])
 
     def _assert(self, n: Assert):
@@ -545,9 +545,9 @@ class CodeGenPyro:
                 and n.message.kind == 'string':
             msg = n.message.value
         else:
-            msg = f"assert falhou (linha {n.line})"
-        self._emit(OP_CONST, self._const(TAG_STR, msg))   # msg no topo
-        self._expr(n.condition)                            # cond acima da msg
+            msg = f"assert failed (line {n.line})"
+        self._emit(OP_CONST, self._const(TAG_STR, msg))   # msg on top
+        self._expr(n.condition)                            # cond above the msg
         self._emit(OP_ASSERT)
 
     def _try(self, n: TryCatch):
@@ -560,7 +560,7 @@ class CodeGenPyro:
             self._stmt(s)
         self._emit(OP_TRYPOP)
         self._emit(OP_JMP, l_finally)
-        self._place(l_catch)             # o valor lançado já foi guardado no slot
+        self._place(l_catch)             # the thrown value has already been saved in the slot
         if n.catch_body:
             for s in n.catch_body:
                 self._stmt(s)
@@ -569,27 +569,27 @@ class CodeGenPyro:
             for s in n.finally_body:
                 self._stmt(s)
 
-    # ── expressoes ──────────────────────────────────────────
+    # ── expressions ──────────────────────────────────────────
 
     def _expr(self, n: Node):
         if isinstance(n, TryExpr):
             raise CodeGenPyroError(
-                "propagação '?' só é suportada no nível de atribuição, "
-                "declaração, retorno ou expressão-statement — não aninhada.")
+                "propagation '?' is only supported at the assignment level, "
+                "declaration, return or expression-statement — not nested.")
         if isinstance(n, Literal):
             self._literal(n); return
         if isinstance(n, Lambda):
             raise CodeGenPyroError(
-                "funções de primeira classe (lambdas) ainda não são suportadas "
-                "no backend pyro; use --backend go ou node. "
-                "(valores-função na VM Pyro estão planejados — Fase 9)")
+                "first-class functions (lambdas) are not yet supported "
+                "in pyro backend; use --backend go or node. "
+                "(function-values in the Pyro VM are planned — Phase 9)")
         if isinstance(n, Identifier):
-            # nome de função usado como valor (1ª classe) — ainda não na VM
+            # function name used as value (1st class) — not yet in the VM
             if n.name in self._fnindex and n.name not in self._cur.locals:
                 raise CodeGenPyroError(
-                    f"função '{n.name}' usada como valor (1ª classe) ainda não é "
-                    f"suportada no backend pyro; use --backend go ou node.")
-            if n.name in self._enum_consts:      # membro de enum -> const int
+                    f"function '{n.name}' used as value (1st class) is not yet "
+                    f"supported in the pyro backend; use --backend go or node.")
+            if n.name in self._enum_consts:      # enum member -> const int
                 self._emit(OP_CONST, self._const(TAG_INT, self._enum_consts[n.name]))
                 return
             if n.name in self._enum_maps:
@@ -597,8 +597,8 @@ class CodeGenPyro:
                 self._emit(OP_CONST, self._const(TAG_STR, self._enum_maps[n.name]))
                 self._emit(OP_NEWMAP, 1)
                 return
-            # const global inlined (visível em qualquer função), exceto se
-            # houver uma variável local com o mesmo nome (sombra)
+            # global const inlined (visible in any function), except if
+            # there is a local variable with the same name (shadow)
             if n.name in self._global_consts and n.name not in self._cur.locals:
                 self._literal(self._global_consts[n.name])
                 return
@@ -608,16 +608,16 @@ class CodeGenPyro:
             if   n.op == '-': self._emit(OP_NEG)
             elif n.op == '!': self._emit(OP_NOT)
             elif n.op == '~': self._emit(OP_BNOT)
-            else: raise CodeGenPyroError(f"unário '{n.op}' não suportado")
+            else: raise CodeGenPyroError(f"unary '{n.op}' not supported")
             return
         if isinstance(n, UnwrapExpr):
-            # x! : aborta se nulo, senão devolve o valor (COALESCE c/ THROW)
+            # x! : aborts if null, else returns the value (COALESCE w/ THROW)
             self._expr(n.operand)
             self._emit(OP_UNWRAP); return
         if isinstance(n, CastExpr):
-            # tipos são dinâmicos na VM: 'expr as T' é identidade.
-            # json_decode(s) as T -> decodifica p/ valor dinâmico (structs
-            # são maps, então acesso a campo funciona por indexação).
+            # types are dynamic in the VM: 'expr as T' is identity.
+            # json_decode(s) as T -> decodes to dynamic value (structs
+            # are maps, so field access works by indexing).
             self._expr(n.expr); return
         if isinstance(n, BinaryExpr):
             self._binary(n); return
@@ -638,7 +638,7 @@ class CodeGenPyro:
                 self._expr(k); self._expr(v)
             self._emit(OP_NEWMAP, len(n.pairs)); return
         if isinstance(n, StructInit):
-            # struct = map de chaves string (nome do campo)
+            # struct = map of string keys (field name)
             for fname, val in n.fields:
                 self._emit(OP_CONST, self._const(TAG_STR, fname))
                 self._expr(val)
@@ -654,18 +654,18 @@ class CodeGenPyro:
         if isinstance(n, MethodCallExpr):
             self._method(n); return
         raise CodeGenPyroError(
-            f"expressão '{type(n).__name__}' não suportada no backend pyro.")
+            f"expression '{type(n).__name__}' not supported in the pyro backend.")
 
     def _method(self, n: MethodCallExpr):
         m = n.method
         if m == 'push':
             self._expr(n.obj)
             self._expr(n.args[0] if n.args else Literal('null', None))
-            self._emit(OP_APPEND); return       # empilha novo tamanho
+            self._emit(OP_APPEND); return       # pushes new size
         if m in ('length', 'size'):
             self._expr(n.obj); self._emit(OP_LEN); return
         raise CodeGenPyroError(
-            f"método '.{m}()' não suportado no backend pyro.")
+            f"method '.{m}()' not supported in pyro backend.")
 
     def _literal(self, n: Literal):
         if n.kind == 'int':    self._emit(OP_CONST, self._const(TAG_INT, int(n.value)))
@@ -673,7 +673,7 @@ class CodeGenPyro:
         elif n.kind == 'string': self._emit(OP_CONST, self._const(TAG_STR, n.value))
         elif n.kind == 'bool':  self._emit(OP_TRUE if n.value else OP_FALSE)
         elif n.kind == 'null':  self._emit(OP_NULL)
-        else: raise CodeGenPyroError(f"literal '{n.kind}' não suportado")
+        else: raise CodeGenPyroError(f"literal '{n.kind}' not supported")
 
     _BINOP = {
         '+': OP_ADD, '-': OP_SUB, '*': OP_MUL, '/': OP_DIV, '%': OP_MOD,
@@ -697,13 +697,13 @@ class CodeGenPyro:
             self._place(l_true); self._emit(OP_TRUE)
             self._place(l_end); return
         if n.op == '??':
-            # a ?? b : a se a != null, senão b (avaliação simples de ambos)
+            # a ?? b : a if a != null, else b (simple evaluation of both)
             self._expr(n.left)
             self._expr(n.right)
             self._emit(OP_COALESCE); return
         op = self._BINOP.get(n.op)
         if op is None:
-            raise CodeGenPyroError(f"operador '{n.op}' não suportado no backend pyro")
+            raise CodeGenPyroError(f"operator '{n.op}' not supported in the pyro backend")
         self._expr(n.left)
         self._expr(n.right)
         self._emit(op)
@@ -712,7 +712,7 @@ class CodeGenPyro:
         if n.callee == 'print':
             if not n.args:
                 self._emit(OP_PRINTLN)
-                self._emit(OP_NULL)     # valor de expressão (descartado no stmt)
+                self._emit(OP_NULL)     # expression value (discarded in stmt)
                 return
             self._expr(n.args[0])
             self._emit(OP_PRINT)
@@ -724,7 +724,7 @@ class CodeGenPyro:
             self._expr(n.args[0]); self._expr(n.args[1]); self._emit(OP_HAS); return
         if n.callee == 'keys' and len(n.args) == 1:
             self._expr(n.args[0]); self._emit(OP_KEYS); return
-        # builtins nativos da VM (matemática, conversões, strings, remove)
+        # VM native builtins (math, conversions, strings, remove)
         nat = NATIVES.get(n.callee)
         if nat is not None:
             nid, argc = nat
@@ -735,26 +735,26 @@ class CodeGenPyro:
                 self._expr(a)
             self._emit(OP_NATIVE, (nid, argc))
             return
-        # função do usuário
+        # user function
         fi = self._fnindex.get(n.callee)
         if fi is None:
             raise CodeGenPyroError(
-                f"função '{n.callee}' desconhecida no backend pyro "
+                f"function '{n.callee}' unknown in pyro backend "
                 f"(builtins: print, len, has, keys, {', '.join(sorted(NATIVES))}).")
         for a in n.args:
             self._expr(a)
         self._emit(OP_CALL, (fi, len(n.args)))
 
-    # ── otimizador de bytecode ──────────────────────────────
-    #  Peephole sobre a lista (op, arg) de cada função. Como os
-    #  saltos referenciam LABELS (resolvidos só em _assemble),
-    #  remover/dobrar instruções é seguro — os rótulos ficam
-    #  intactos e reancoram nos offsets certos.
+    # ── bytecode optimizer ──────────────────────────────
+    #  Peephole over the (op, arg) list of each function. Since the
+    #  jumps reference LABELS (resolved only in _assemble),
+    #  removing/folding instructions is safe — the labels remain
+    #  intact and reanchor at the right offsets.
 
     def _optimize_all(self):
         for f in self._funcs:
             code = f.code
-            for _ in range(8):                 # itera até estabilizar
+            for _ in range(8):                 # iterates until stable
                 code, c1 = self._fold_pass(code)
                 code, c2 = self._dce_pass(code)
                 code, c3 = self._peephole_pass(code)
@@ -764,8 +764,8 @@ class CodeGenPyro:
         self._prune_consts()
 
     def _prune_consts(self):
-        # remove do pool as constantes que ninguém referencia mais
-        # (ex.: operandos intermediários que o folding tornou mortos)
+        # removes from the pool the constants that no one references anymore
+        # (e.g.: intermediate operands that folding made dead)
         used = set()
         for f in self._funcs:
             for (op, arg) in f.code:
@@ -786,13 +786,13 @@ class CodeGenPyro:
         out, i, changed = [], 0, False
         n = len(code)
         while i < n:
-            # unário: CONST a ; NEG|BNOT
+            # unary: CONST a ; NEG|BNOT
             if (i + 1 < n and code[i][0] == OP_CONST
                     and code[i + 1][0] in (OP_NEG, OP_BNOT)):
                 r = self._fold_unary(code[i + 1][0], self._consts[code[i][1]])
                 if r is not None:
                     out.append(r); i += 2; changed = True; continue
-            # binário: CONST a ; CONST b ; <op>
+            # binary: CONST a ; CONST b ; <op>
             if (i + 2 < n and code[i][0] == OP_CONST and code[i + 1][0] == OP_CONST
                     and code[i + 2][0] in _FOLD_BIN):
                 r = self._fold_binary(code[i + 2][0],
@@ -820,7 +820,7 @@ class CodeGenPyro:
         numeric = ta in (TAG_INT, TAG_FLT) and tb in (TAG_INT, TAG_FLT)
         both_int = ta == TAG_INT and tb == TAG_INT
         both_str = ta == TAG_STR and tb == TAG_STR
-        # comparações -> bool
+        # comparisons -> bool
         if opc in (OP_EQ, OP_NE):
             if not (numeric or both_str):
                 return None
@@ -831,17 +831,17 @@ class CodeGenPyro:
                 return None
             r = {OP_LT: a < b, OP_GT: a > b, OP_LE: a <= b, OP_GE: a >= b}[opc]
             return (OP_TRUE if r else OP_FALSE, None)
-        # concatenação de literais string
+        # string literal concatenation
         if both_str and opc == OP_ADD:
             return (OP_CONST, self._const(TAG_STR, a + b))
         if not numeric:
             return None
-        # aritmética / bitwise
+        # arithmetic / bitwise
         if opc == OP_ADD:   r = a + b
         elif opc == OP_SUB: r = a - b
         elif opc == OP_MUL: r = a * b
         elif opc == OP_DIV:
-            if both_int or b == 0:      # int/int e div-por-zero: deixa p/ runtime
+            if both_int or b == 0:      # int/int and div-by-zero: leave to runtime
                 return None
             r = a / b
         elif opc in (OP_BAND, OP_BOR, OP_BXOR, OP_SHL, OP_SHR):
@@ -854,7 +854,7 @@ class CodeGenPyro:
         else:
             return None
         if both_int:
-            if not (_I64_MIN <= r <= _I64_MAX):   # estouraria int64: runtime resolve
+            if not (_I64_MIN <= r <= _I64_MAX):   # would overflow int64: runtime resolves
                 return None
             return (OP_CONST, self._const(TAG_INT, int(r)))
         return (OP_CONST, self._const(TAG_FLT, float(r)))
@@ -863,7 +863,7 @@ class CodeGenPyro:
         out, reachable, changed = [], True, False
         for entry in code:
             op = entry[0]
-            if op == -1:                    # LABEL: religa o fluxo
+            if op == -1:                    # LABEL: rewires the flow
                 reachable = True
                 out.append(entry); continue
             if reachable:
@@ -871,7 +871,7 @@ class CodeGenPyro:
                 if op in (OP_JMP, OP_RET, OP_HALT):
                     reachable = False
             else:
-                changed = True              # instrução morta, descartada
+                changed = True              # dead instruction, discarded
         return out, changed
 
     def _peephole_pass(self, code):
@@ -879,10 +879,10 @@ class CodeGenPyro:
         n = len(code)
         while i < n:
             op = code[i][0]
-            # push puro seguido de POP: some com os dois
+            # pure push followed by POP: eliminates both
             if (i + 1 < n and op in _PUSH_PURE and code[i + 1][0] == OP_POP):
                 i += 2; changed = True; continue
-            # JMP para o rótulo imediatamente à frente (só labels entre eles)
+            # JMP to the label immediately ahead (only labels between them)
             if op == OP_JMP:
                 tgt = code[i][1]
                 j = i + 1
@@ -896,17 +896,17 @@ class CodeGenPyro:
             out.append(code[i]); i += 1
         return out, changed
 
-    # ── montagem final (.pyro) ──────────────────────────────
+    # ── final assembly (.pyro) ──────────────────────────────
 
     def _assemble(self) -> bytes:
         if self.optimize:
             self._optimize_all()
-        # registra os nomes das funções no pool ANTES de serializar as consts
+        # registers function names in the pool BEFORE serializing consts
         for f in self._funcs:
             self._const(TAG_STR, f.name)
-        # layout: offsets de instruções, labels e marcadores de linha
+        # layout: instruction offsets, labels and line markers
         label_off: Dict[int, int] = {}
-        debug = []     # (offset, line) — seção de depuração
+        debug = []     # (offset, line) — debugging section
         flat = []      # (op, arg, offset)
         offset = 0
         for f in self._funcs:
@@ -914,7 +914,7 @@ class CodeGenPyro:
             for (op, arg) in f.code:
                 if op == -1:                    # LABEL
                     label_off[arg.id] = offset
-                elif op == -2:                  # marcador de linha (0 bytes)
+                elif op == -2:                  # line marker (0 bytes)
                     if not debug or debug[-1][0] != offset:
                         debug.append((offset, arg))
                 else:
@@ -958,7 +958,7 @@ class CodeGenPyro:
         out += _MAGIC
         out.append(_VERSION)
         out.append(flags)
-        # constantes
+        # constants
         out += struct.pack('<H', len(self._consts))
         for tag, val in self._consts:
             out.append(tag)
@@ -968,7 +968,7 @@ class CodeGenPyro:
             elif tag == TAG_STR:
                 b = val.encode('utf-8')
                 out += struct.pack('<H', len(b)); out += b
-        # funcoes
+        # functions
         out += struct.pack('<H', len(self._funcs))
         for f in self._funcs:
             nameidx = self._const_idx[(TAG_STR, f.name)]
@@ -981,7 +981,7 @@ class CodeGenPyro:
         # code
         out += struct.pack('<I', code_len)
         out += code
-        # seção de depuração (pc -> linha), se houver
+        # debugging section (pc -> line), if any
         if debug:
             out += struct.pack('<I', len(debug))
             for pc, line in debug:
@@ -991,8 +991,8 @@ class CodeGenPyro:
 
     @staticmethod
     def _xor_encode(code: bytes) -> bytes:
-        # Camada de ofuscação leve (NÃO é criptografia forte): XOR rolling
-        # com chave derivada de uma semente fixa. A VM aplica o inverso.
+        # Light obfuscation layer (NOT strong encryption): XOR rolling
+        # with key derived from a fixed seed. The VM applies the inverse.
         out = bytearray(len(code))
         k = 0x5A
         for i, b in enumerate(code):
