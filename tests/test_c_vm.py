@@ -31,7 +31,7 @@ def compile_c_vm():
     print("Compilando C VM...")
     # /utf-8: mantém os literais UTF-8 do fonte (mensagens de erro acentuadas)
     # idênticos aos da VM Go — essencial para a paridade de stderr.
-    cmd = 'call "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat" && cl /O2 /utf-8 /Fe:Pyro\\vm\\pyrovm.exe Pyro\\vm\\main.c'
+    cmd = 'call "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat" && cl /O2 /utf-8 /Fe:Pyro\\vm\\pyrovm.exe Pyro\\vm\\main.c Pyro\\vm\\pyro_runtime.c'
     res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
     if res.returncode != 0:
         print("Erro de compilacao da C VM:")
