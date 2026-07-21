@@ -29,7 +29,9 @@ def compile_c_vm():
         sys.exit(1)
         
     print("Compilando C VM...")
-    cmd = 'call "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat" && cl /O2 /Fe:Pyro\\vm\\pyrovm.exe Pyro\\vm\\main.c'
+    # /utf-8: mantém os literais UTF-8 do fonte (mensagens de erro acentuadas)
+    # idênticos aos da VM Go — essencial para a paridade de stderr.
+    cmd = 'call "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat" && cl /O2 /utf-8 /Fe:Pyro\\vm\\pyrovm.exe Pyro\\vm\\main.c'
     res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
     if res.returncode != 0:
         print("Erro de compilacao da C VM:")
@@ -125,6 +127,56 @@ def test_parity():
             print(f"[OK] {filename} ok")
             passed += 1
             
+    # ── paridade de ABORTS (stdout + stderr + exit code) ─────────
+    # Programas que abortam devem produzir mensagens/stack traces
+    # idênticos nas duas VMs — o loop acima só cobre execuções limpas.
+    C_VM = os.path.join(_root, "Pyro", "vm", "pyrovm.exe")
+    aborts = [
+        ("div-zero",     'int x = 10; int y = 0; print(x / y);', []),
+        ("array-oob",    'int[] a = [1, 2]; print(a[5]);', []),
+        ("array-set-oob",'int[] a = [1, 2]; a[5] = 9;', []),
+        ("string-oob",   'string s = "hi"; print(s[9]);', []),
+        ("uncaught",     'throw("boom");', []),
+        ("unwrap-null",  'int? x = null; int y = x!; print(y);', []),
+        ("assert-fail",  'assert(1 == 2, "nope");', []),
+        ("sandbox-http", 'string b = http_get("http://127.0.0.1:9/x"); print(b);', ["--sandbox"]),
+        # try/catch: o valor capturado deve ser idêntico nas duas VMs
+        ("catch-throw",  'try { throw("x"); } catch (string e) { print("cap: " + e); }', []),
+        ("catch-assert", 'try { assert(false, "boom"); } catch (string e) { print(e); }', []),
+        ("catch-unwrap", 'try { int? z = null; int y = z!; print(y); } catch (string e) { print(e); }', []),
+    ]
+    print("\n-- paridade de aborts (stdout+stderr+exit) --")
+    for name, src, extra in aborts:
+        with tempfile.NamedTemporaryFile(suffix=".cryo", delete=False, mode="w", encoding="utf-8") as tc:
+            tc.write(src); src_path = tc.name
+        with tempfile.NamedTemporaryFile(suffix=".pyro", delete=False) as tp:
+            pyro_path = tp.name
+        comp = [sys.executable, CRYOC, src_path, "--backend", "pyro", "-o", pyro_path, "--no-banner"] + extra
+        rc, _o, _e = run_command(comp)
+        if rc != 0:
+            print(f"[FAIL] abort '{name}': não compilou p/ pyro: {_e.strip()[:120]}")
+            failed += 1
+            for p in (src_path, pyro_path):
+                try: os.remove(p)
+                except OSError: pass
+            continue
+        gc, go_o, go_e = run_command([GO_VM, pyro_path])
+        cc, c_o, c_e = run_command([C_VM, pyro_path])
+        for p in (src_path, pyro_path):
+            try: os.remove(p)
+            except OSError: pass
+        go_o, c_o = go_o.replace("\r\n","\n"), c_o.replace("\r\n","\n")
+        go_e, c_e = go_e.replace("\r\n","\n").strip(), c_e.replace("\r\n","\n").strip()
+        if gc == cc and go_o == c_o and go_e == c_e:
+            print(f"[OK] abort '{name}' (exit={cc})")
+            passed += 1
+        else:
+            print(f"[FAIL] abort '{name}'")
+            print(f"  exit: Go={gc} C={cc}")
+            if go_o != c_o: print(f"  stdout Go={go_o!r} C={c_o!r}")
+            if go_e != c_e: print(f"  stderr Go={go_e!r}\n         C={c_e!r}")
+            failed += 1
+
     print(f"\nResumo: {passed} passaram, {failed} falharam, {skipped} pulados.")
     if failed > 0:
         sys.exit(1)
