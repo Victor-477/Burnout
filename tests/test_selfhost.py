@@ -22,6 +22,11 @@ CRYOC = os.path.join(_root, "Burnout", "cryoc.py")
 SELFHOST = os.path.join(_root, "Cryo", "selfhost")
 
 from lexer import Lexer   # lexer de referência (oráculo)
+from parser import Parser  # parser de referência (oráculo do estágio 2)
+from ast_nodes import (
+    FunctionDecl, VarDecl, Assignment, Return, If, While,
+    BinaryExpr, UnaryExpr, CallExpr, Identifier, Literal,
+)
 
 # Fonte de teste em uma linha (sem quebras/escapes internos além de aspas),
 # exercitando palavras-chave, tipos, ident, int/float, string, comentário de
@@ -37,6 +42,70 @@ def reference_tokens(src):
     for t in Lexer(src).tokenize():
         out.append(f"{t.type.name} {t.value}")
     return out
+
+
+def ser(n):
+    """Serializa a AST de referência na MESMA S-expression que o parser Cryo."""
+    if isinstance(n, FunctionDecl):
+        params = "".join(f" (p {pt} {pn})" for (pt, pn) in n.params)
+        ret = n.return_type or "void"
+        body = "".join(" " + ser(s) for s in n.body)
+        return f"(fn {n.name} (params{params}) {ret} (body{body}))"
+    if isinstance(n, VarDecl):
+        init = ser(n.value) if n.value is not None else "nil"
+        return f"(var {n.var_type} {n.name} {init})"
+    if isinstance(n, Assignment):
+        return f"(assign {n.name} {ser(n.value)})"
+    if isinstance(n, Return):
+        return "(return nil)" if n.value is None else f"(return {ser(n.value)})"
+    if isinstance(n, If):
+        s = f"(if {ser(n.condition)} (then" + "".join(" " + ser(x) for x in n.then_body) + ")"
+        if n.else_body is not None:
+            if len(n.else_body) == 1 and isinstance(n.else_body[0], If):
+                s += " (else " + ser(n.else_body[0]) + ")"
+            else:
+                s += " (else" + "".join(" " + ser(x) for x in n.else_body) + ")"
+        return s + ")"
+    if isinstance(n, While):
+        return f"(while {ser(n.condition)} (body" + "".join(" " + ser(x) for x in n.body) + "))"
+    if isinstance(n, BinaryExpr):
+        return f"(bin {n.op} {ser(n.left)} {ser(n.right)})"
+    if isinstance(n, UnaryExpr):
+        return f"(un {n.op} {ser(n.operand)})"
+    if isinstance(n, CallExpr):
+        return f"(call {n.callee}" + "".join(" " + ser(a) for a in n.args) + ")"
+    if isinstance(n, Identifier):
+        return f"(id {n.name})"
+    if isinstance(n, Literal):
+        if n.kind == "int":    return f"(int {n.value})"
+        if n.kind == "float":  return f"(float {n.value})"
+        if n.kind == "string": return f"(str {n.value})"
+        if n.kind == "bool":   return f"(bool {'true' if n.value else 'false'})"
+        if n.kind == "null":   return "(null)"
+    return f"(? {type(n).__name__})"
+
+
+def reference_ast(src):
+    prog = Parser(Lexer(src).tokenize()).parse()
+    return [ser(s) for s in prog.statements]
+
+
+def _run_vm(driver_body):
+    """Escreve um driver no dir selfhost, compila p/ .pyro, roda na VM e
+    devolve as linhas de saída que são S-expressions (começam com '(')."""
+    driver = os.path.join(SELFHOST, "_test_driver.cryo")
+    with open(driver, "w", encoding="utf-8") as f:
+        f.write(driver_body)
+    try:
+        res = subprocess.run(
+            [sys.executable, CRYOC, driver, "--backend", "pyro", "--run", "--no-banner"],
+            capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+    finally:
+        try:
+            os.remove(driver)
+        except OSError:
+            pass
+    return res
 
 
 def selfhost_tokens(src):
@@ -99,6 +168,45 @@ if got != expected:
 
 check("fluxo de tokens idêntico ao lexer de referência", got == expected)
 check("termina com EOF", len(got) > 0 and got[-1] == "EOF ")
+
+print("[9.3] parser auto-hospedado (Cryo na VM Pyro) vs. parser de referência")
+_esc = SAMPLE.replace("\\", "\\\\").replace('"', '\\"')
+res2 = _run_vm('import "parser.cryo"\nparse("' + _esc + '");\n')
+got2 = [ln for ln in (res2.stdout or "").replace("\r\n", "\n").split("\n") if ln.startswith("(")]
+exp2 = reference_ast(SAMPLE)
+
+check("o parser Cryo compilou e rodou na VM", res2.returncode == 0 and len(got2) > 0)
+check("mesmo número de statements de topo", len(got2) == len(exp2))
+if got2 != exp2:
+    for i in range(max(len(got2), len(exp2))):
+        g = got2[i] if i < len(got2) else "<falta>"
+        e = exp2[i] if i < len(exp2) else "<extra>"
+        if g != e:
+            print(f"    divergência no statement {i}:")
+            print(f"      esperado: {e}")
+            print(f"      obtido:   {g}")
+            break
+check("AST idêntica ao parser de referência", got2 == exp2)
+
+# segunda fonte: while, if/else-if/else, unário, chamada, precedência mista
+SAMPLE2 = ('fn g(int a, int b) -> bool ={ int r = a + b * 2 - 1; '
+           'while (r > 0) { r = r - 1; } '
+           'if (a == b) { return true; } else if (a > b) { return false; } '
+           'else { return !false; } } bool z = g(1, 2);')
+_esc2 = SAMPLE2.replace("\\", "\\\\").replace('"', '\\"')
+res3 = _run_vm('import "parser.cryo"\nparse("' + _esc2 + '");\n')
+got3 = [ln for ln in (res3.stdout or "").replace("\r\n", "\n").split("\n") if ln.startswith("(")]
+exp3 = reference_ast(SAMPLE2)
+if got3 != exp3:
+    for i in range(max(len(got3), len(exp3))):
+        g = got3[i] if i < len(got3) else "<falta>"
+        e = exp3[i] if i < len(exp3) else "<extra>"
+        if g != e:
+            print(f"    divergência (fonte 2) no statement {i}:")
+            print(f"      esperado: {e}")
+            print(f"      obtido:   {g}")
+            break
+check("AST idêntica (fonte 2: while/else-if/unário/chamada)", got3 == exp3)
 
 print(f"\n{_passed} passaram, {_failed} falharam")
 sys.exit(1 if _failed else 0)
