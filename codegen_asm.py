@@ -212,7 +212,7 @@ class CodeGenAsm:
         raise CodeGenAsmError(
             f"struct '{struct_type}' ({self._type_size(struct_type)} bytes) e "
             f"too large for register return in ABI {self._abi}; "
-            f"o backend assembly ainda nao implementa retorno via ponteiro "
+            f"the assembly backend does not yet implement pointer return "
             f"(sret). Use --backend c or reduce the struct.")
 
     # ── functions ─────────────────────────────────────────────

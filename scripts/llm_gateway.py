@@ -1,27 +1,27 @@
 #!/usr/bin/env python3
 # ============================================================
-#  Gateway LLM para o Cryo — traduz o contrato do agente Cryo
-#  para a API de Chat Completions (OpenAI-compatível) e volta.
+#  LLM gateway for Cryo — translates the Cryo agent contract
+#  to the Chat Completions API (OpenAI-compatible) and back.
 #
 #  Serve: OpenAI, Azure OpenAI, Anthropic (endpoint /v1 compat),
 #  Groq, Mistral, e LLMs locais (Ollama, LM Studio, vLLM...).
 #
-#  Uso:
-#    set OPENAI_API_KEY=sk-...           (a chave do provedor)
-#    set OPENAI_BASE_URL=https://api.openai.com/v1   (opcional)
+#  Usage:
+#    set OPENAI_API_KEY=sk-...           (the provider key)
+#    set OPENAI_BASE_URL=https://api.openai.com/v1   (optional)
 #    python burnout/scripts/llm_gateway.py 8801
 #
-#  Depois, rode o agente Cryo apontando para o gateway:
+#  Then run the Cryo agent pointing at the gateway:
 #    set CRYO_LLM_URL=http://127.0.0.1:8801
 #    python burnout/cryoc.py cryo/examples/example_agent.cryo --backend go --run
 #
-#  Contrato Cryo (o que o cryoAgent envia/espera):
+#  Cryo contract (what cryoAgent sends/expects):
 #    POST {model, messages, tools}
 #      messages: [{role:user,content}, {role:assistant,tool_call:{name,arguments}},
 #                 {role:tool,name,content}]
-#      tools:    [{name, parameters:<JSON Schema em string>}]
-#    <- {"tool_call": {"name","arguments"}}   (o modelo pede uma tool)
-#    <- {"content": "resposta final"}
+#      tools:    [{name, parameters:<JSON Schema as string>}]
+#    <- {"tool_call": {"name","arguments"}}   (the model requests a tool)
+#    <- {"content": "final response"}
 # ============================================================
 import json
 import os
@@ -76,7 +76,7 @@ def to_openai(req: dict) -> dict:
 
 
 def from_openai(resp: dict) -> dict:
-    """Resposta OpenAI -> contrato Cryo."""
+    """OpenAI response -> Cryo contract."""
     try:
         msg = resp["choices"][0]["message"]
     except Exception:
@@ -113,7 +113,7 @@ class Handler(BaseHTTPRequestHandler):
             openai_resp = call_llm(to_openai(cryo_req))
             out = from_openai(openai_resp)
         except Exception as e:
-            sys.stderr.write(f"[gateway] erro: {e}\n")
+            sys.stderr.write(f"[gateway] error: {e}\n")
             out = {"content": ""}
         body = json.dumps(out, ensure_ascii=False).encode("utf-8")
         self.send_response(200)
@@ -126,6 +126,6 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     port = int(sys.argv[1]) if len(sys.argv) > 1 else 8801
     if not API_KEY:
-        sys.stderr.write("[gateway] AVISO: OPENAI_API_KEY não definido.\n")
+        sys.stderr.write("[gateway] WARNING: OPENAI_API_KEY not defined.\n")
     sys.stderr.write(f"[gateway] escutando em http://127.0.0.1:{port}  ->  {BASE_URL}\n")
     HTTPServer(("127.0.0.1", port), Handler).serve_forever()

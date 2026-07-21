@@ -561,7 +561,7 @@ class CodeGenC:
             lib = n.name.lower()
             self._emit(f'#include <{lib}.h>  /* [CRYO] library >c {n.name}< */')
         else:
-            self._emit(f'/* [CRYO] library >{n.name}< (linguagem {lang or "?"}) '
+            self._emit(f'/* [CRYO] library >{n.name}< (language {lang or "?"}) '
                        f'ignored in C backend */')
 
     def _foreign(self, n: ForeignBlock):
@@ -578,8 +578,8 @@ class CodeGenC:
     def _expr(self, node: Node) -> str:
         if isinstance(node, (MapLiteral, CastExpr, UnwrapExpr, TryExpr, SpawnExpr, AwaitExpr)):
             raise CodeGenError(
-                f"'{type(node).__name__}' (map/JSON/opcional/propagação '?'/async) "
-                f"ainda não é supported in C backend; use --backend go.")
+                f"'{type(node).__name__}' (map/JSON/optional/'?' propagation/async) "
+                f"is not yet supported in the C backend; use --backend go.")
         if isinstance(node, Literal):
             if node.kind == 'null':   return 'NULL'
             if node.kind == 'bool':   return 'true' if node.value else 'false'
@@ -670,7 +670,7 @@ class CodeGenC:
             if node.op == '*': return f"cryo_mul_ovf({l}, {r})"
             if node.op == '/': return f"cryo_idiv_chk({l}, {r})"
             if node.op == '%': return f"cryo_imod_chk({l}, {r})"
-        # Divisao/modulo por zero: always protecteds em inteiros
+        # Division/modulo by zero: always protected on integers
         elif both_int and node.op in ('/', '%'):
             fn = 'cryo_idiv_chk' if node.op == '/' else 'cryo_imod_chk'
             return f"{fn}({l}, {r})"

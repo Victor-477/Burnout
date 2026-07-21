@@ -87,8 +87,8 @@ class CodeGen:
     def generate(self, program):
         self._scan(program.statements)
         self._emit("# ================================================")
-        self._emit("#  [PYRO] Compilado a partir de codigo-fonte Cryo")
-        self._emit("#  Gerado automaticamente - nao edite manualmente")
+        self._emit("#  [PYRO] Compiled from Cryo source code")
+        self._emit("#  Automatically generated - do not edit manually")
         self._emit("# ================================================")
         self._emit()
         self._emit("from pyro_runtime import *")
@@ -304,4 +304,4 @@ class CodeGen:
             fields = ', '.join(f"{k}={self._expr(v)}" for k, v in node.fields)
             return f"{node.struct_name}({fields})"
 
-        raise CodeGenError(f"[CodeGen] Expressao desconhecida: {type(node).__name__}")
+        raise CodeGenError(f"[CodeGen] Unknown expression: {type(node).__name__}")

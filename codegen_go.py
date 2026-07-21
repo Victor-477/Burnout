@@ -395,27 +395,27 @@ class CodeGenGo:
             H += ["func cryoAddOvf(a, b int64) int64 {",
                   "\ts := a + b",
                   "\tif (b > 0 && s < a) || (b < 0 && s > a) {",
-                  '\t\tpanic("[Cryo Security] Overflow: adicao de inteiros")', "\t}",
+                  '\t\tpanic("[Cryo Security] Overflow: integer addition")', "\t}",
                   "\treturn s", "}", ""]
         if 'subovf' in self._helpers:
             H += ["func cryoSubOvf(a, b int64) int64 {",
                   "\ts := a - b",
                   "\tif (b < 0 && s < a) || (b > 0 && s > a) {",
-                  '\t\tpanic("[Cryo Security] Overflow: subtracao de inteiros")', "\t}",
+                  '\t\tpanic("[Cryo Security] Overflow: integer subtraction")', "\t}",
                   "\treturn s", "}", ""]
         if 'mulovf' in self._helpers:
             H += ["func cryoMulOvf(a, b int64) int64 {",
                   "\tif a == 0 || b == 0 {", "\t\treturn 0", "\t}",
                   "\tif a == -1<<63 && b == -1 || b == -1<<63 && a == -1 {",
-                  '\t\tpanic("[Cryo Security] Overflow: multiplicacao de inteiros")', "\t}",
+                  '\t\tpanic("[Cryo Security] Overflow: integer multiplication")', "\t}",
                   "\ts := a * b",
                   "\tif s/b != a {",
-                  '\t\tpanic("[Cryo Security] Overflow: multiplicacao de inteiros")', "\t}",
+                  '\t\tpanic("[Cryo Security] Overflow: integer multiplication")', "\t}",
                   "\treturn s", "}", ""]
         if 'idiv' in self._helpers:
             H += ["func cryoIDivChk(a, b int64) int64 {",
                   "\tif b == 0 {",
-                  '\t\tpanic("[Cryo Security] DivisaoPorZero: divisao inteira")', "\t}",
+                  '\t\tpanic("[Cryo Security] DivByZero: integer division")', "\t}",
                   "\tif a == -1<<63 && b == -1 {",
                   '\t\tpanic("[Cryo Security] Overflow: INT64_MIN / -1")', "\t}",
                   "\treturn a / b", "}", ""]
@@ -423,7 +423,7 @@ class CodeGenGo:
             # INT64_MIN % -1 is 0 (well-defined in Go); only division overflows.
             H += ["func cryoIModChk(a, b int64) int64 {",
                   "\tif b == 0 {",
-                  '\t\tpanic("[Cryo Security] DivisaoPorZero: modulo")', "\t}",
+                  '\t\tpanic("[Cryo Security] DivByZero: modulo")', "\t}",
                   "\tif a == -1<<63 && b == -1 {",
                   "\t\treturn 0", "\t}",
                   "\treturn a % b", "}", ""]
@@ -442,7 +442,7 @@ class CodeGenGo:
                   "\treturn d", "}", ""]
         if 'unwrap' in self._helpers:
             H += ["func cryoUnwrap[T any](p *T) T {",
-                  "\tif p == nil {", '\t\tpanic("[Cryo Security] NullPointer: unwrap de opcional nulo")', "\t}",
+                  "\tif p == nil {", '\t\tpanic("[Cryo Security] NullPointer: unwrap of null optional")', "\t}",
                   "\treturn *p", "}", ""]
         if 'keys' in self._helpers:
             H += ["func cryoKeys[K comparable, V any](m map[K]V) []K {",
@@ -454,7 +454,7 @@ class CodeGenGo:
             H += ["func cryoParseInt(s string) int64 {",
                   "\tn, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)",
                   "\tif err != nil {",
-                  "\t\tpanic(\"[Cryo Security] to_int: '\" + s + \"' não é um inteiro válido\")",
+                  "\t\tpanic(\"[Cryo Security] to_int: '\" + s + \"' is not a valid integer\")",
                   "\t}",
                   "\treturn n", "}", ""]
         if 'parsenum' in self._helpers:
@@ -462,7 +462,7 @@ class CodeGenGo:
             H += ["func cryoParseNum(s string) float64 {",
                   "\tf, err := strconv.ParseFloat(strings.TrimSpace(s), 64)",
                   "\tif err != nil {",
-                  "\t\tpanic(\"[Cryo Security] to_number: '\" + s + \"' não é um número válido\")",
+                  "\t\tpanic(\"[Cryo Security] to_number: '\" + s + \"' is not a valid number\")",
                   "\t}",
                   "\treturn f", "}", ""]
         if 'substr' in self._helpers:
@@ -702,7 +702,7 @@ class CodeGenGo:
                 "required": [pn for _pt, pn in fn.params]}
 
     def _tool_defs(self) -> List[str]:
-        """Tipo Tool + global registry + helpers de introspecção."""
+        """Tool type + global registry + introspection helpers."""
         D = ["// [PYRO] LLM Tools — schema derived from function signature",
              "type Tool struct {",
              '\tName       string `json:"name"`',

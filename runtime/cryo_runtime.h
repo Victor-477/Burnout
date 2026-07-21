@@ -103,7 +103,7 @@ int64_t cryo_mul_ovf(int64_t a, int64_t b);
 int64_t cryo_idiv_chk(int64_t a, int64_t b);
 int64_t cryo_imod_chk(int64_t a, int64_t b);
 
-/* ---------- Seguranca: assert ---------- */
+/* ---------- Security: assert ---------- */
 void cryo_assert(bool cond, const char* msg);
 
 /* ---------- Security: null pointer guard ---------- */

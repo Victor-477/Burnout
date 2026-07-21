@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 # ============================================================
-#  Burnout — Validacao das Novas Aplicacoes in the C VM
+#  Burnout — Validation of the New Applications on the C VM
 # ============================================================
 import os
 import sys
 import subprocess
 
 _here = os.path.dirname(os.path.abspath(__file__))   # Burnout/tests/
-_root = os.path.dirname(os.path.dirname(_here))       # raiz do projeto
+_root = os.path.dirname(os.path.dirname(_here))       # project root
 
 try:
     sys.stdout.reconfigure(encoding='utf-8')
@@ -27,7 +27,7 @@ def run_cmd(args, stdin=""):
 def main():
     apps = [
         {
-            "name": "Calculadora",
+            "name": "Calculator",
             "file": "example_calc.cryo",
             "stdin": "+\n12.5\n7.5\nq\n"
         },
@@ -37,7 +37,7 @@ def main():
             "stdin": ""
         },
         {
-            "name": "Grafico em Tempo Real",
+            "name": "Real-Time Chart",
             "file": "example_chart.cryo",
             "stdin": ""
         }
@@ -47,25 +47,25 @@ def main():
         filepath = os.path.join(_root, "Cryo", "examples", app["file"])
         out_pyro = filepath.replace(".cryo", ".pyro")
         
-        print(f"\n========================================\nCompilando {app['name']}...")
+        print(f"\n========================================\nCompiling {app['name']}...")
         comp_args = [sys.executable, CRYOC, filepath, "--backend", "pyro", "-o", out_pyro, "--no-banner"]
         c_code, c_out, c_err = run_cmd(comp_args)
         
         if c_code != 0:
-            print(f"Error ao compilar {app['name']}:")
+            print(f"Error compiling {app['name']}:")
             print(c_err)
             continue
-        print("Compilado with sucesso!")
-        
-        print(f"Executando {app['name']} in the C VM...")
+        print("Compiled successfully!")
+
+        print(f"Running {app['name']} on the C VM...")
         run_args = [C_VM, out_pyro]
         r_code, r_out, r_err = run_cmd(run_args, stdin=app["stdin"])
         
         if r_code != 0:
-            print(f"Error ao executar {app['name']}:")
+            print(f"Error running {app['name']}:")
             print(r_err)
         else:
-            print("Resultado da Execucao:")
+            print("Execution Result:")
             print(r_out)
             
         # Clean up bytecode file

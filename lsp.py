@@ -7,8 +7,8 @@
 #  from the compiler (lexer/parser/semantics/foreign/modules).
 #
 #  Resources:
-#    - textDocument/publishDiagnostics  (lexical, syntax, semântico,
-#      módulos e foreign blocks) ao abrir/editar
+#    - textDocument/publishDiagnostics  (lexical, syntax, semantic,
+#      modules and foreign blocks) on open/edit
 #    - textDocument/hover               (builtins, keywords,
 #      user functions/structs/enums)
 #    - textDocument/definition          (functions/structs/enums)
@@ -199,7 +199,7 @@ def compute_diagnostics(uri, text):
         base = os.path.dirname(_uri_to_path(uri))
         resolved = resolve_modules(ast, base)
     except ModuleError as e:
-        diags.append(_diag(0, 0, 1, f"módulo: {e}"))
+        diags.append(_diag(0, 0, 1, f"module: {e}"))
         resolved = ast
     # semantics
     try:

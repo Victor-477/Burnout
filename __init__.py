@@ -23,7 +23,7 @@ Uso rápido::
     # disassembles an already generated .pyro
     print(burnout.disassemble(open("build/app.pyro", "rb").read()))
 
-Backends: ``"go"`` (padrão, mais completo), ``"pyro"`` (bytecode próprio),
+Backends: ``"go"`` (default, most complete), ``"pyro"`` (own bytecode),
 ``"c"`` and ``"asm"``. See Burnout README for coverage matrix.
 """
 
@@ -91,7 +91,7 @@ def compile_source(source, backend="go", safe=True, abi=None, base_dir=None,
     Returns ``str`` for ``go``/``c``/``asm`` targets and ``bytes`` for target
     ``pyro`` (bytecode). ``safe`` turns on security instrumentation (default);
     ``abi`` only affects the ``asm`` backend; ``base_dir`` is the folder used for
-    resolver ``import "arquivo.cryo"`` (padrão: diretório atual).
+    resolving ``import "file.cryo"`` (default: current directory).
     """
     if abi is None:
         abi = default_abi()

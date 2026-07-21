@@ -248,7 +248,7 @@ class CodeGenPyro:
             elif isinstance(n, (SkillDecl, ForeignBlock)):
                 raise CodeGenPyroError(
                     f"'{type(n).__name__}' is not yet supported in the pyro backend "
-                    f"(bytecode: escalares, arrays, maps, structs, enums, funções e fluxo).")
+                    f"(bytecode: scalars, arrays, maps, structs, enums, functions and flow).")
             else:
                 top.append(n)
 

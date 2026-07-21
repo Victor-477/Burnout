@@ -95,12 +95,12 @@ def disassemble(data: bytes) -> str:
     entry_at = {f['entry']: f['name'] for f in funcs}
 
     out = []
-    _fl = [('codificado' if p['flags'] & 1 else 'texto-claro')]
+    _fl = [('encoded' if p['flags'] & 1 else 'plaintext')]
     if p['flags'] & 0x02:
         _fl.append('debug')
     if p['flags'] & 0x04:
         _fl.append('sandbox')
-    out.append(f"; Pyro bytecode  (versão {p['version']}, {', '.join(_fl)})")
+    out.append(f"; Pyro bytecode  (version {p['version']}, {', '.join(_fl)})")
     out.append(f"; entry = {funcs[p['entryfn']]['name']}  |  "
                f"{len(consts)} consts, {len(funcs)} funcs, {len(code)} bytes of code")
     out.append("")
@@ -109,7 +109,7 @@ def disassemble(data: bytes) -> str:
         shown = f'"{val}"' if kind == 'str' else val
         out.append(f";   [{i}] {kind:<5} {shown}")
     out.append("")
-    out.append("; ── funções ──")
+    out.append("; ── functions ──")
     for i, f in enumerate(funcs):
         out.append(f";   #{i} {f['name']}  entry={f['entry']} "
                    f"params={f['nparams']} locals={f['nlocals']}")
@@ -158,7 +158,7 @@ def disassemble(data: bytes) -> str:
 
 def main():
     if len(sys.argv) < 2:
-        print("uso: python burnout/disasm_pyro.py programa.pyro", file=sys.stderr)
+        print("usage: python burnout/disasm_pyro.py program.pyro", file=sys.stderr)
         sys.exit(2)
     with open(sys.argv[1], 'rb') as f:
         print(disassemble(f.read()))

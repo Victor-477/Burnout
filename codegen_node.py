@@ -253,8 +253,8 @@ class CodeGenNode:
                   "}", ""]
         if 'idiv' in self._helpers:
             H += ["function cryoIDiv(a, b) {",
-                  "  if (b === 0) throw new Error('[Cryo Security] DivisaoPorZero');",
-                  "  return Math.trunc(a / b);   // divisão inteira (trunca p/ zero)",
+                  "  if (b === 0) throw new Error('[Cryo Security] DivByZero');",
+                  "  return Math.trunc(a / b);   // integer division (truncates toward zero)",
                   "}", ""]
         if 'index' in self._helpers:
             H += ["function cryoIndex(a, i) {",
@@ -284,7 +284,7 @@ class CodeGenNode:
                   "}", ""]
         if 'unwrap' in self._helpers:
             H += ["function cryoUnwrap(x) {",
-                  "  if (x == null) throw new Error('[Cryo Security] unwrap de nulo');",
+                  "  if (x == null) throw new Error('[Cryo Security] unwrap of null');",
                   "  return x;",
                   "}", ""]
         return H

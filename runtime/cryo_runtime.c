@@ -7,7 +7,7 @@
 /* Excecao global */
 CryoException _cryo_exc = {.active = false};
 
-/* ---------- Seguranca: aritmetica verificada ---------- */
+/* ---------- Security: checked arithmetic ---------- */
 
 static void _cryo_fatal(const char* kind, const char* detail) {
     fprintf(stderr, "[Cryo Security] %s: %s\n", kind, detail);
@@ -37,25 +37,25 @@ int64_t cryo_mul_ovf(int64_t a, int64_t b) {
 
 int64_t cryo_idiv_chk(int64_t a, int64_t b) {
     if (b == 0)
-        _cryo_fatal("DivisaoPorZero", "divisao inteira por zero");
+        _cryo_fatal("DivByZero", "integer division by zero");
     if (a == INT64_MIN && b == -1)
-        _cryo_fatal("Overflow", "INT64_MIN / -1 estoura");
+        _cryo_fatal("Overflow", "INT64_MIN / -1 overflows");
     return a / b;
 }
 
 int64_t cryo_imod_chk(int64_t a, int64_t b) {
     if (b == 0)
-        _cryo_fatal("DivisaoPorZero", "modulo por zero");
+        _cryo_fatal("DivByZero", "modulo by zero");
     if (a == INT64_MIN && b == -1)
         return 0;
     return a % b;
 }
 
-/* ---------- Seguranca: assert ---------- */
+/* ---------- Security: assert ---------- */
 
 void cryo_assert(bool cond, const char* msg) {
     if (!cond) {
-        fprintf(stderr, "[Cryo Assert] %s\n", msg ? msg : "condicao falsa");
+        fprintf(stderr, "[Cryo Assert] %s\n", msg ? msg : "false condition");
         abort();
     }
 }
@@ -64,7 +64,7 @@ void cryo_assert(bool cond, const char* msg) {
 
 void* cryo_check_null(void* p, const char* what) {
     if (!p) {
-        fprintf(stderr, "[Cryo Security] NullPointer: acesso a '%s' nulo\n",
+        fprintf(stderr, "[Cryo Security] NullPointer: access to '%s' null\n",
                 what ? what : "?");
         abort();
     }
@@ -145,7 +145,7 @@ char* cryo_f64_to_str(double n) {
 }
 
 char* cryo_bool_to_str(bool b) {
-    /* Retorna string estatica — nao liberar */
+    /* Returns a static string — do not free */
     return b ? "true" : "false";
 }
 
