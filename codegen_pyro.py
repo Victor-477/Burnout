@@ -314,22 +314,51 @@ class CodeGenPyro:
         elif isinstance(n, CallExpr) and n.callee == 'throw':
             arg = n.args[0] if n.args else Literal('null', None)
             self._expr(arg); self._emit(OP_THROW)
+        elif isinstance(n, TryExpr):
+            self._try_prop(n); self._emit(OP_POP)   # descarta o valor Ok
         elif isinstance(n, (CallExpr, MethodCallExpr)):
             self._expr(n); self._emit(OP_POP)   # descarta resultado
         else:
             raise CodeGenPyroError(
                 f"'{type(n).__name__}' não suportado no backend pyro (use --backend go).")
 
+    def _try_prop(self, n):
+        """Propagação de erro 'expr?' (Fase 8.3): avalia o operando, e se a
+        variante for Ok deixa o payload val0 no topo; caso contrário, a função
+        retorna cedo com o valor (Err). Requer um enum tipo Result (com 'tag').
+        Deixa o valor Ok no topo da pilha."""
+        self._ntmp += 1
+        tmp = self._slot(f"__try{self._ntmp}")
+        self._expr(n.operand)
+        self._emit(OP_STORE, tmp)
+        l_ok = self._label()
+        self._emit(OP_LOAD, tmp)
+        self._emit(OP_CONST, self._const(TAG_STR, "tag"))
+        self._emit(OP_INDEX)
+        self._emit(OP_CONST, self._const(TAG_STR, "Ok"))
+        self._emit(OP_EQ)
+        self._emit(OP_JMPT, l_ok)                 # tag == "Ok" -> desempacota
+        self._emit(OP_LOAD, tmp); self._emit(OP_RET)   # senão: propaga o Err
+        self._place(l_ok)
+        self._emit(OP_LOAD, tmp)
+        self._emit(OP_CONST, self._const(TAG_STR, "val0"))
+        self._emit(OP_INDEX)                      # topo = tmp["val0"]
+
     def _var(self, n: VarDecl):
         slot = self._slot(n.name)
-        if n.value is not None:
+        if isinstance(n.value, TryExpr):
+            self._try_prop(n.value)
+        elif n.value is not None:
             self._expr(n.value)
         else:
             self._emit(OP_NULL)
         self._emit(OP_STORE, slot)
 
     def _assign(self, n: Assignment):
-        self._expr(n.value)
+        if isinstance(n.value, TryExpr):
+            self._try_prop(n.value)
+        else:
+            self._expr(n.value)
         self._emit(OP_STORE, self._get_slot(n.name))
 
     def _index_assign(self, n: IndexAssignment):
@@ -380,7 +409,9 @@ class CodeGenPyro:
         self._emit(OP_STORE, self._get_slot(n.name))
 
     def _return(self, n: Return):
-        if n.value is not None:
+        if isinstance(n.value, TryExpr):
+            self._try_prop(n.value)
+        elif n.value is not None:
             self._expr(n.value)
         else:
             self._emit(OP_NULL)
@@ -539,6 +570,10 @@ class CodeGenPyro:
     # ── expressoes ──────────────────────────────────────────
 
     def _expr(self, n: Node):
+        if isinstance(n, TryExpr):
+            raise CodeGenPyroError(
+                "propagação '?' só é suportada no nível de atribuição, "
+                "declaração, retorno ou expressão-statement — não aninhada.")
         if isinstance(n, Literal):
             self._literal(n); return
         if isinstance(n, Lambda):

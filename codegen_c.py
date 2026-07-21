@@ -576,10 +576,10 @@ class CodeGenC:
     # ── expressoes ──────────────────────────────────────────
 
     def _expr(self, node: Node) -> str:
-        if isinstance(node, (MapLiteral, CastExpr, UnwrapExpr, SpawnExpr, AwaitExpr)):
+        if isinstance(node, (MapLiteral, CastExpr, UnwrapExpr, TryExpr, SpawnExpr, AwaitExpr)):
             raise CodeGenError(
-                f"'{type(node).__name__}' (map/JSON/opcional/async) ainda não é "
-                f"suportado no backend C; use --backend go.")
+                f"'{type(node).__name__}' (map/JSON/opcional/propagação '?'/async) "
+                f"ainda não é suportado no backend C; use --backend go.")
         if isinstance(node, Literal):
             if node.kind == 'null':   return 'NULL'
             if node.kind == 'bool':   return 'true' if node.value else 'false'

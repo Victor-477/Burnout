@@ -259,6 +259,7 @@ class CodeGenGo:
         self._indent = 1
         self._safe_stack: List[bool] = []
         self._loop_depth = 0
+        self._ntmp = 0                 # temporárias frescas (ex.: propagação '?')
         self._cur_fn_ret = 'void'
         # ── camada Pyro: skills nativas e acesso à máquina ──
         self._skills: List[SkillDecl] = []
@@ -763,10 +764,9 @@ class CodeGenGo:
                 params = ', '.join(f"v{idx} {go_type(t)}" for idx, t in enumerate(m.fields))
                 args_struct = ', '.join(f"Val{idx}: v{idx}" for idx in range(len(m.fields)))
                 
+                # construtor canônico curto: Ok(...) / Err(...).
+                # (o prefixado 'Result_Ok' colidiria com o tipo-struct homônimo.)
                 self._enum_defs.append(f"func {gid(m.name)}({params}) {gid(n.name)} {{")
-                self._enum_defs.append(f"\treturn {struct_name}{{{args_struct}}}")
-                self._enum_defs.append("}")
-                self._enum_defs.append(f"func {gid(n.name)}_{gid(m.name)}({params}) {gid(n.name)} {{")
                 self._enum_defs.append(f"\treturn {struct_name}{{{args_struct}}}")
                 self._enum_defs.append("}")
 
@@ -829,12 +829,38 @@ class CodeGenGo:
         elif isinstance(node, SafetyBlock):        self._safety(node)
         elif isinstance(node, TryCatch):           self._try(node)
         elif isinstance(node, ForeignBlock):       self._foreign(node)
+        elif isinstance(node, TryExpr):
+            okv = self._go_try(node.operand)
+            self._emit(f"_ = {okv}")
         elif isinstance(node, (CallExpr, MethodCallExpr)):
             self._emit(self._stmt_call(node))
         else:
             self._emit(f"// [Go] NAO SUPORTADO: {type(node).__name__}")
 
+    # ── propagação de erro: expr?  (Fase 8.3) ───────────────
+    def _go_try(self, inner: Node) -> str:
+        """Emite a temporária + guarda de propagação e devolve a string
+        da expressão 'valor Ok' (ou base do opcional). Na via de erro/nulo,
+        a função retorna cedo com o Err/nil — o tipo de retorno da função
+        deve ser o mesmo Result (ou um opcional)."""
+        t = self.te.infer(inner)
+        self._ntmp += 1
+        tmp = f"__try{self._ntmp}"
+        self._emit(f"{tmp} := {self._expr(inner)}")
+        if is_optional(t):
+            self._emit(f"if {tmp} == nil {{ return nil }}")
+            return f"(*{tmp})"
+        ok = f"{gid(t)}_Ok"
+        self._emit(f"if _, __ok := interface{{}}({tmp}).({ok}); !__ok {{ return {tmp} }}")
+        return f"{tmp}.({ok}).Val0"
+
     def _var(self, n: VarDecl):
+        if isinstance(n.value, TryExpr):
+            self.te.set(n.name, n.var_type)
+            okv = self._go_try(n.value.operand)
+            self._emit(f"var {gid(n.name)} {go_type(n.var_type)} = {okv}")
+            self._emit(f"_ = {gid(n.name)}")
+            return
         self.te.set(n.name, n.var_type)
         gt = go_type(n.var_type)
         vt = n.var_type
@@ -879,6 +905,10 @@ class CodeGenGo:
         self._emit(f"const {gid(n.name)} {go_type(n.var_type)} = {self._expr(n.value)}")
 
     def _assign(self, n: Assignment):
+        if isinstance(n.value, TryExpr):
+            okv = self._go_try(n.value.operand)
+            self._emit(f"{gid(n.name)} = {okv}")
+            return
         self._emit(f"{gid(n.name)} = {self._expr(n.value)}")
 
     def _index_assign(self, n: IndexAssignment):
@@ -891,6 +921,10 @@ class CodeGenGo:
         self._emit(f"{gid(n.name)}{n.op}")
 
     def _return(self, n: Return):
+        if isinstance(n.value, TryExpr):
+            okv = self._go_try(n.value.operand)
+            self._emit(f"return {okv}")
+            return
         if n.value is None:
             self._emit("return")
         elif is_optional(self._cur_fn_ret):
@@ -1042,7 +1076,7 @@ class CodeGenGo:
 
     def _match(self, n: MatchStatement):
         expr_str = self._expr(n.subject)
-        self._emit(f"switch v := interface{{}}({expr_str}).(type) {{")
+        self._emit(f"switch __m := interface{{}}({expr_str}).(type) {{")
         for case in n.cases:
             if case.pattern_name == '_':
                 self._emit("default:")
@@ -1060,7 +1094,7 @@ class CodeGenGo:
             self._indent += 1
             self.te.push()
             for idx, var_name in enumerate(case.pattern_vars):
-                self._emit(f"{gid(var_name)} := v.Val{idx}")
+                self._emit(f"{gid(var_name)} := __m.Val{idx}")
                 self.te.set(var_name, "any")
             for s in case.body:
                 self._gen(s)
@@ -1138,6 +1172,11 @@ class CodeGenGo:
         return self._expr(node)
 
     def _expr(self, node: Node) -> str:
+        if isinstance(node, TryExpr):
+            raise CodeGenGoError(
+                "propagação '?' só é suportada no nível de uma atribuição, "
+                "declaração ('T x = expr?;'), retorno ou expressão-statement — "
+                "não aninhada dentro de outra expressão.")
         if isinstance(node, Literal):
             if node.kind == 'null':   return 'nil'
             if node.kind == 'bool':   return 'true' if node.value else 'false'

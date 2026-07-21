@@ -156,6 +156,7 @@ class CodeGenNode:
         self._helpers:  Set[str] = set()
         self._cur = self._main
         self._indent = 0
+        self._ntmp = 0                 # temporárias frescas (propagação '?')
         self._imported_langs: Set[str] = set()
 
     # ── util ────────────────────────────────────────────────
@@ -307,9 +308,26 @@ class CodeGenNode:
             self._stmt(s)
 
     # ── statements ──────────────────────────────────────────
+    def _node_try(self, inner: Node) -> str:
+        """Propagação de erro '?': emite a temporária + guarda e devolve a
+        expressão do valor Ok (ou o próprio valor, se opcional). Na via de
+        erro/nulo, retorna cedo o Err/null."""
+        t = self._t.infer(inner)
+        self._ntmp += 1
+        tmp = f"__try{self._ntmp}"
+        self._emit(f"const {tmp} = {self._expr(inner)};")
+        if t.endswith('?') or t == 'null':
+            self._emit(f"if ({tmp} === null || {tmp} === undefined) return null;")
+            return tmp
+        self._emit(f'if ({tmp}.tag !== "Ok") return {tmp};')
+        return f"{tmp}.val0"
+
     def _stmt(self, n: Node):
         if isinstance(n, VarDecl):
-            if n.value is None:
+            if isinstance(n.value, TryExpr):
+                okv = self._node_try(n.value.operand)
+                self._emit(f"let {jsid(n.name)} = {okv};")
+            elif n.value is None:
                 self._emit(f"let {jsid(n.name)};")
             else:
                 self._emit(f"let {jsid(n.name)} = {self._expr(n.value)};")
@@ -318,7 +336,11 @@ class CodeGenNode:
             self._emit(f"const {jsid(n.name)} = {self._expr(n.value)};")
             self._t.set(n.name, n.var_type)
         elif isinstance(n, Assignment):
-            self._emit(f"{jsid(n.name)} = {self._expr(n.value)};")
+            if isinstance(n.value, TryExpr):
+                okv = self._node_try(n.value.operand)
+                self._emit(f"{jsid(n.name)} = {okv};")
+            else:
+                self._emit(f"{jsid(n.name)} = {self._expr(n.value)};")
         elif isinstance(n, IndexAssignment):
             if self.safe and self._t.is_array(n.obj):
                 self._helpers.add('setindex')
@@ -331,7 +353,11 @@ class CodeGenNode:
         elif isinstance(n, Increment):
             self._emit(f"{jsid(n.name)}{n.op};")
         elif isinstance(n, Return):
-            self._emit("return;" if n.value is None else f"return {self._expr(n.value)};")
+            if isinstance(n.value, TryExpr):
+                okv = self._node_try(n.value.operand)
+                self._emit(f"return {okv};")
+            else:
+                self._emit("return;" if n.value is None else f"return {self._expr(n.value)};")
         elif isinstance(n, If):
             self._if(n)
         elif isinstance(n, While):
@@ -376,6 +402,8 @@ class CodeGenNode:
         elif isinstance(n, CallExpr) and n.callee == 'throw':
             arg = self._expr(n.args[0]) if n.args else '"erro"'
             self._emit(f"throw {arg};")
+        elif isinstance(n, TryExpr):
+            self._node_try(n.operand)   # valor descartado (statement)
         else:
             # statement-expressao (ex.: chamada de funcao, m.push(...))
             self._emit(f"{self._expr(n)};")
@@ -489,6 +517,10 @@ class CodeGenNode:
 
     # ── expressoes ──────────────────────────────────────────
     def _expr(self, n: Node) -> str:
+        if isinstance(n, TryExpr):
+            raise CodeGenNodeError(
+                "propagação '?' só é suportada no nível de atribuição, "
+                "declaração, retorno ou expressão-statement — não aninhada.")
         if isinstance(n, Literal):
             return self._literal(n)
         if isinstance(n, Identifier):

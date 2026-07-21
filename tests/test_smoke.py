@@ -1137,7 +1137,7 @@ go_code = gen_go(src_adt)
 check("go: Result interface", "type Result interface" in go_code)
 check("go: Result_Ok struct", "type Result_Ok struct" in go_code)
 check("go: Ok constructor", "func Ok(" in go_code)
-check("go: type switch in match", "switch v := interface{}(" in go_code)
+check("go: type switch in match", "switch __m := interface{}(" in go_code)
 
 node_code = gen_node(src_adt)
 check("node: Ok constructor factory", "const Ok = (val0)" in node_code)
@@ -1158,6 +1158,58 @@ try:
     check("asm: enums com dados barrado", False)
 except Exception:
     check("asm: enums com dados barrado (correto)", True)
+
+# ── [8.3] propagação de erro com '?' ────────────────────────
+print("[8.3] propagação de erro com '?'")
+
+# parser: expr? vira TryExpr; ternário continua ternário
+from ast_nodes import TryExpr as _TryExpr, TernaryExpr as _TernaryExpr
+_p83 = ast_of('int v = parse(s)?;')
+check("parser: expr? vira TryExpr", isinstance(_p83.statements[0].value, _TryExpr))
+_pt = ast_of('int x = c > 0 ? 1 : 2;')
+check("parser: ternário não vira propagação",
+      isinstance(_pt.statements[0].value, _TernaryExpr))
+
+src_try = (
+    'enum Result { Ok(int), Err(string) }\n'
+    'fn parse(string s) -> Result ={ if (s == "42") { return Ok(42); } return Err("x"); }\n'
+    'fn dobro(string s) -> Result ={ int v = parse(s)?; return Ok(v * 2); }\n'
+    'Result r = dobro("42");\n'
+)
+
+g83 = gen_go(src_try)
+check("go: propagação gera temporária + guarda",
+      "__try" in g83 and ".(Result_Ok)" in g83)
+check("go: via de erro retorna cedo", "!__ok { return __try" in g83)
+
+n83 = gen_node(src_try)
+check("node: propagação testa tag Ok", '.tag !== "Ok"' in n83 and "return __try" in n83)
+check("node: desempacota val0", ".val0" in n83)
+
+d83 = disasm_pyro.disassemble(gen_pyro(src_try, encode=False))
+check("pyro: propagação usa JMPT + RET", "JMPT" in d83 and "RET" in d83)
+check("pyro: propagação indexa tag/val0/Ok",
+      '"tag"' in d83 and '"val0"' in d83 and '"Ok"' in d83)
+
+# '?' aninhado em outra expressão é barrado com erro claro (go)
+try:
+    gen_go('enum R { Ok(int), Err(string) }\n'
+           'fn f(string s) -> R ={ int v = parse(s)? + 1; return Ok(v); }')
+    check("go: '?' aninhado barrado", False)
+except Exception:
+    check("go: '?' aninhado barrado (correto)", True)
+
+# c/asm barram a propagação com erro claro
+try:
+    gen_c('fn f(int x) -> int ={ int v = g(x)?; return v; }')
+    check("c: propagação barrada", False)
+except Exception:
+    check("c: propagação barrada (correto)", True)
+try:
+    gen_asm('fn f(int x) -> int ={ int v = g(x)?; return v; }')
+    check("asm: propagação barrada", False)
+except Exception:
+    check("asm: propagação barrada (correto)", True)
 
 # ── resultado ───────────────────────────────────────────────
 print(f"\n{_passed} passaram, {_failed} falharam")
