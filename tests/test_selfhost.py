@@ -266,5 +266,11 @@ check_selfhost("int i = 0; int sum = 0; while (i < 5) { sum = sum + i; i = i + 1
                "if (x == 5) { print(100); } else if (x > 6) { print(2); } else { print(3); }",
                "fluxo")
 
+# funções de usuário: recursão (fib), múltiplos params, chamadas em expressão
+check_selfhost("fn fib(int n) -> int ={ if (n < 2) { return n; } return fib(n - 1) + fib(n - 2); } "
+               "fn soma(int a, int b) -> int ={ return a + b; } "
+               "print(fib(10)); print(soma(20, 22)); int s = fib(7) + soma(5, 5); print(s);",
+               "funções")
+
 print(f"\n{_passed} passaram, {_failed} falharam")
 sys.exit(1 if _failed else 0)
