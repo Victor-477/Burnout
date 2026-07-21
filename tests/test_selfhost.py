@@ -220,43 +220,51 @@ def _int_lines(text):
             out.append(s)
     return out
 
-PROG = ("int a = 2; int b = 3; print(a + b * 2); print((a + b) * 2); "
-        "print(10 - 4 / 2); print(-b + 5);")
+def oracle_run(prog):
+    """Compila+roda `prog` pelo compilador de referência (backend pyro)."""
+    with tempfile.NamedTemporaryFile(suffix=".cryo", delete=False, mode="w", encoding="utf-8") as tp:
+        tp.write(prog); path = tp.name
+    try:
+        r = subprocess.run([sys.executable, CRYOC, path, "--backend", "pyro", "--run", "--no-banner"],
+                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+    finally:
+        try: os.remove(path)
+        except OSError: pass
+    return _int_lines(r.stdout)
 
-# oráculo: compila+roda PROG pelo compilador de referência (backend pyro)
-with tempfile.NamedTemporaryFile(suffix=".cryo", delete=False, mode="w", encoding="utf-8") as tp:
-    tp.write(PROG); prog_cryo = tp.name
-oracle = subprocess.run([sys.executable, CRYOC, prog_cryo, "--backend", "pyro", "--run", "--no-banner"],
-                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
-oracle_out = _int_lines(oracle.stdout)
+def selfhost_run(prog, label):
+    """O compilador-em-Cryo (na VM) gera out.pyro; executa e devolve a saída."""
+    out_pyro = os.path.join(tempfile.gettempdir(), "selfhost_out.pyro").replace("\\", "/")
+    try: os.remove(out_pyro)
+    except OSError: pass
+    escp = prog.replace("\\", "\\\\").replace('"', '\\"')
+    gen = _run_vm('import "codegen.cryo"\ncompile("' + escp + '", "' + out_pyro + '");\n')
+    check(f"[{label}] codegen Cryo rodou e gravou o .pyro",
+          gen.returncode == 0 and os.path.isfile(out_pyro))
+    if os.path.isfile(out_pyro) and os.path.isfile(VM_BIN):
+        r = subprocess.run([VM_BIN, out_pyro], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=30)
+        return _int_lines(r.stdout)
+    return []
 
-# auto-hospedado: o compilador-em-Cryo (na VM) gera out.pyro a partir de PROG
-out_pyro = os.path.join(tempfile.gettempdir(), "selfhost_out.pyro").replace("\\", "/")
-_escp = PROG.replace("\\", "\\\\").replace('"', '\\"')
-try:
-    os.remove(out_pyro)
-except OSError:
-    pass
-gen = _run_vm('import "codegen.cryo"\ncompile("' + _escp + '", "' + out_pyro + '");\n')
-check("o codegen Cryo compilou e rodou na VM", gen.returncode == 0)
-check("o compilador auto-hospedado gravou o .pyro", os.path.isfile(out_pyro))
+def check_selfhost(prog, label):
+    exp = oracle_run(prog)
+    got = selfhost_run(prog, label)
+    if got != exp:
+        print(f"    [{label}] oráculo:        {exp}")
+        print(f"    [{label}] auto-hospedado: {got}")
+    check(f"[{label}] .pyro auto-hospedado roda igual ao compilador de referência",
+          got == exp and len(got) > 0)
 
-selfhost_out = []
-if os.path.isfile(out_pyro) and os.path.isfile(VM_BIN):
-    r = subprocess.run([VM_BIN, out_pyro], capture_output=True, text=True,
-                       encoding="utf-8", errors="replace", timeout=30)
-    selfhost_out = _int_lines(r.stdout)
+# aritmética (int, precedência, unário, parênteses)
+check_selfhost("int a = 2; int b = 3; print(a + b * 2); print((a + b) * 2); "
+               "print(10 - 4 / 2); print(-b + 5);", "aritmética")
 
-check("oráculo produziu saída", len(oracle_out) > 0)
-if selfhost_out != oracle_out:
-    print(f"    oráculo:      {oracle_out}")
-    print(f"    auto-hospedado: {selfhost_out}")
-check(".pyro auto-hospedado roda com saída idêntica ao compilador de referência",
-      selfhost_out == oracle_out and len(selfhost_out) > 0)
-try:
-    os.remove(prog_cryo)
-except OSError:
-    pass
+# controle de fluxo: while + if/else-if/else com comparações e saltos
+check_selfhost("int i = 0; int sum = 0; while (i < 5) { sum = sum + i; i = i + 1; } "
+               "print(sum); int x = 7; if (x > 5) { print(1); } else { print(0); } "
+               "if (x == 5) { print(100); } else if (x > 6) { print(2); } else { print(3); }",
+               "fluxo")
 
 print(f"\n{_passed} passaram, {_failed} falharam")
 sys.exit(1 if _failed else 0)

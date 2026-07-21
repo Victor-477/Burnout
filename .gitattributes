@@ -1,2 +1,9 @@
-# Auto detect text files and perform LF normalization
-* text=auto
+# Reconhecimento de linguagem no GitHub (Linguist).
+#
+# O Burnout é escrito em Python (reconhecido nativamente). As extensões da
+# linguagem-alvo são mapeadas abaixo para realce/contagem no GitHub.
+*.cryo linguist-language=Rust
+*.cryo linguist-detectable=true
+
+# .pyro é o bytecode binário do Pyro — não é texto/código.
+*.pyro binary
