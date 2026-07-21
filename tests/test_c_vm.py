@@ -177,6 +177,46 @@ def test_parity():
             if go_e != c_e: print(f"  stderr Go={go_e!r}\n         C={c_e!r}")
             failed += 1
 
+    # ── paridade do primitivo write_bytes (I/O binária) ─────────
+    print("\n-- paridade write_bytes (bytes gravados idênticos) --")
+    wb_out = os.path.join(tempfile.gettempdir(), "pyro_wb_parity.bin").replace("\\", "/")
+    wb_vals = [80, 89, 82, 79, 1, 2, 3, 255, 0, 10]
+    wb_expected = bytes(wb_vals)
+    wb_src = ('int[] b = [' + ",".join(str(v) for v in wb_vals) + ']; '
+              'bool ok = write_bytes("' + wb_out + '", b); print(ok);')
+    with tempfile.NamedTemporaryFile(suffix=".cryo", delete=False, mode="w", encoding="utf-8") as tc:
+        tc.write(wb_src); wb_cryo = tc.name
+    with tempfile.NamedTemporaryFile(suffix=".pyro", delete=False) as tp:
+        wb_pyro = tp.name
+    rc, _o, _e = run_command([sys.executable, CRYOC, wb_cryo, "--backend", "pyro",
+                              "-o", wb_pyro, "--no-banner"])
+    def _run_and_read(vm):
+        try: os.remove(wb_out)
+        except OSError: pass
+        code, out, _ = run_command([vm, wb_pyro])
+        data = None
+        try:
+            with open(wb_out, "rb") as fh: data = fh.read()
+        except OSError: pass
+        return code, out.replace("\r\n", "\n").strip(), data
+    if rc != 0:
+        print("[FAIL] write_bytes: não compilou p/ pyro"); failed += 1
+    else:
+        gcode, gout, gdata = _run_and_read(GO_VM)
+        ccode, cout, cdata = _run_and_read(C_VM)
+        ok = (gout == cout == "true" and gdata == cdata == wb_expected)
+        if ok:
+            print(f"[OK] write_bytes grava {len(wb_expected)} bytes idênticos (Go == C == esperado)")
+            passed += 1
+        else:
+            print("[FAIL] write_bytes divergiu")
+            print(f"  stdout Go={gout!r} C={cout!r}")
+            print(f"  bytes  Go={gdata!r} C={cdata!r} esperado={wb_expected!r}")
+            failed += 1
+    for p in (wb_cryo, wb_pyro):
+        try: os.remove(p)
+        except OSError: pass
+
     print(f"\nResumo: {passed} passaram, {failed} falharam, {skipped} pulados.")
     if failed > 0:
         sys.exit(1)

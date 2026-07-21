@@ -106,6 +106,8 @@ NATIVES = {
     'json_encode': (22, 1), 'json_decode': (23, 1),
     # ── rede / tempo (Fase 5) ──
     'http_get':  (24, 1), 'http_post': (25, 2), 'sleep': (26, 1),
+    # ── E/S binária (Fase 9.3): grava int[] como bytes num arquivo ──
+    'write_bytes': (27, 2),
 }
 
 def _isize(op: int) -> int:

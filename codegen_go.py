@@ -498,6 +498,14 @@ class CodeGenGo:
                   "\tdefer resp.Body.Close()",
                   "\tb, _ := io.ReadAll(resp.Body)",
                   "\treturn string(b)", "}", ""]
+        if 'writebytes' in self._helpers:
+            self._imports.add('os')
+            H += ["// cryoWriteBytes: grava um int[] como bytes num arquivo.",
+                  "func cryoWriteBytes(path string, data []int64) bool {",
+                  '\tcryoSandboxGuard("write_bytes")',
+                  "\tbuf := make([]byte, len(data))",
+                  "\tfor i, v := range data { buf[i] = byte(v & 0xFF) }",
+                  "\treturn os.WriteFile(path, buf, 0644) == nil", "}", ""]
         if 'llm' in self._helpers:
             self._imports.update(('os', 'net/http', 'io', 'encoding/json', 'bytes', 'fmt'))
             H += ["// cryoLLMPost: POST do payload p/ CRYO_LLM_URL com 3 retries.",
@@ -1530,6 +1538,9 @@ class CodeGenGo:
         if c == 'http_post' and len(a) == 2:
             self._helpers.update(('httppost', 'sandbox'))
             return f"cryoHTTPPost({self._expr(a[0])}, {self._expr(a[1])})"
+        if c == 'write_bytes' and len(a) == 2:
+            self._helpers.update(('writebytes', 'sandbox'))
+            return f"cryoWriteBytes({self._expr(a[0])}, {self._expr(a[1])})"
         # ── Fase 3: LLM nativo ──
         if c == 'schema_of' and len(a) == 1 and isinstance(a[0], Identifier):
             return self._json_schema(a[0].name)

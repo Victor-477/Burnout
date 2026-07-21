@@ -1211,6 +1211,21 @@ try:
 except Exception:
     check("asm: propagação barrada (correto)", True)
 
+# ── [9.3] primitivo de escrita binária (write_bytes) ────────
+print("[9.3] write_bytes (I/O binária)")
+_wb = 'int[] b = [80, 89]; bool ok = write_bytes("out.bin", b); print(ok);'
+_dwb = disasm_pyro.disassemble(gen_pyro(_wb, encode=False))
+check("pyro: write_bytes vira NATIVE 27 (argc 2)", "NATIVE 27 2" in _dwb)
+check("go: write_bytes usa cryoWriteBytes", "cryoWriteBytes(" in gen_go(_wb))
+check("go: write_bytes guardado por sandbox",
+      'cryoSandboxGuard("write_bytes")' in gen_go(_wb))
+try:
+    from semantic import check as _sem_check
+    _sem_check(ast_of(_wb))   # não deve acusar 'função desconhecida'
+    check("semântica: write_bytes é builtin conhecido", True)
+except Exception:
+    check("semântica: write_bytes é builtin conhecido", False)
+
 # ── resultado ───────────────────────────────────────────────
 print(f"\n{_passed} passaram, {_failed} falharam")
 sys.exit(1 if _failed else 0)
