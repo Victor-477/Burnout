@@ -1083,6 +1083,82 @@ check("semântica: função como valor não acusa 'não declarada'",
                   'fn ap(fn(int)->int f)->int ={return f(1);} '
                   'int r = ap(d); print(r);')) == [])
 
+# ── enums com dados & match (etapa 8.2) ──────────────────────
+print("[8.2] enums com dados e pattern matching")
+from ast_nodes import EnumDecl, MatchStatement
+from semantic import check as semantic_check, SemanticError
+
+src_adt = """
+enum Result {
+    Ok(int),
+    Err(string),
+    Empty
+}
+Result r = Ok(42);
+match r {
+    Ok(v) => { print(v); }
+    Err(e) => { print(e); }
+    Empty => { print("vazio"); }
+}
+"""
+
+ast_adt = Parser(Lexer(src_adt).tokenize()).parse()
+check("parser: EnumDecl com EnumMember", isinstance(ast_adt.statements[0], EnumDecl) and len(ast_adt.statements[0].members) == 3)
+check("parser: EnumMember Ok tem 1 campo", ast_adt.statements[0].members[0].fields == ["int"])
+check("parser: EnumMember Empty tem 0 campos", ast_adt.statements[0].members[2].fields == [])
+check("parser: MatchStatement no AST", any(isinstance(s, MatchStatement) for s in ast_adt.statements))
+
+try:
+    semantic_check(ast_adt)
+    check("semântica: Result + match válido passa sem erros", True)
+except Exception as ex:
+    check(f"semântica: Result + match válido falhou: {ex}", False)
+
+src_bad_match = """
+enum Result {
+    Ok(int),
+    Err(string)
+}
+Result r = Ok(42);
+match r {
+    Ok(v) => { print(v); }
+}
+"""
+try:
+    semantic_check(Parser(Lexer(src_bad_match).tokenize()).parse())
+    check("semântica: match não exaustivo deveria falhar", False)
+except SemanticError:
+    check("semântica: match não exaustivo falha (correto)", True)
+except Exception as ex:
+    check(f"semântica: match não exaustivo falhou com exceção inesperada: {ex}", False)
+
+# Code generators output checks
+go_code = gen_go(src_adt)
+check("go: Result interface", "type Result interface" in go_code)
+check("go: Result_Ok struct", "type Result_Ok struct" in go_code)
+check("go: Ok constructor", "func Ok(" in go_code)
+check("go: type switch in match", "switch v := interface{}(" in go_code)
+
+node_code = gen_node(src_adt)
+check("node: Ok constructor factory", "const Ok = (val0)" in node_code)
+check("node: tag switch in match", "switch (__match_subj_" in node_code)
+
+pyro_dis = disasm_pyro.disassemble(gen_pyro(src_adt, encode=False))
+check("pyro: variant functions compiled", "tag" in pyro_dis and "val0" in pyro_dis)
+check("pyro: match compiled with EQ and jumps", "EQ" in pyro_dis and "JMPF" in pyro_dis)
+
+try:
+    gen_c(src_adt)
+    check("c: enums com dados barrado", False)
+except Exception:
+    check("c: enums com dados barrado (correto)", True)
+
+try:
+    gen_asm(src_adt)
+    check("asm: enums com dados barrado", False)
+except Exception:
+    check("asm: enums com dados barrado (correto)", True)
+
 # ── resultado ───────────────────────────────────────────────
 print(f"\n{_passed} passaram, {_failed} falharam")
 sys.exit(1 if _failed else 0)

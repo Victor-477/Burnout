@@ -248,9 +248,9 @@ class CodeGenC:
         elif isinstance(node, Import):              self._import(node)
         elif isinstance(node, Library):             self._library(node)
         elif isinstance(node, ForeignBlock):        self._foreign(node)
-        elif isinstance(node, (IndexAssignment, MapLiteral, CastExpr, UnwrapExpr)):
+        elif isinstance(node, (IndexAssignment, MapLiteral, CastExpr, UnwrapExpr, MatchStatement)):
             raise CodeGenError(
-                f"'{type(node).__name__}' (map/JSON/opcional) ainda não é "
+                f"'{type(node).__name__}' (map/JSON/opcional/match) ainda não é "
                 f"suportado no backend C; use --backend go.")
         elif isinstance(node, SkillDecl):
             raise CodeGenError(
@@ -269,7 +269,12 @@ class CodeGenC:
         self._emit()
 
     def _enum(self, n: EnumDecl):
-        members = ', '.join(f"{n.name}_{m}" for m in n.members)
+        has_data = any(len(m.fields) > 0 for m in n.members)
+        if has_data:
+            raise CodeGenError(
+                "Enums com dados (Algebraic Data Types) não são suportados "
+                "no backend C; use --backend go ou node.")
+        members = ', '.join(f"{n.name}_{m.name}" for m in n.members)
         self._emit(f"typedef enum {{ {members} }} {n.name};")
         self._emit()
 

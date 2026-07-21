@@ -235,7 +235,7 @@ def _decls(text):
                            f"struct {n.name} {{ {len(n.fields)} campos }}")
         elif isinstance(n, EnumDecl):
             out[n.name] = ('enum', getattr(n, 'line', 0),
-                           f"enum {n.name} {{ {', '.join(n.members)} }}")
+                            f"enum {n.name} {{ {', '.join(m.name for m in n.members)} }}")
         elif isinstance(n, ConstDecl):
             out[n.name] = ('const', getattr(n, 'line', 0),
                            f"const {n.var_type} {n.name}")

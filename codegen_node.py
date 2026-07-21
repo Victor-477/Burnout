@@ -213,8 +213,17 @@ class CodeGenNode:
             self._requires.append(line)
 
     def _enum(self, n: EnumDecl):
-        for i, m in enumerate(n.members):
-            self._emit(f"const {n.name}_{m} = {i};")
+        has_data = any(len(m.fields) > 0 for m in n.members)
+        if not has_data:
+            for i, m in enumerate(n.members):
+                self._emit(f"const {n.name}_{m.name} = {i};")
+        else:
+            for m in n.members:
+                params = ', '.join(f"val{idx}" for idx in range(len(m.fields)))
+                args_object = ', '.join(f"val{idx}" for idx in range(len(m.fields)))
+                comma = ", " if args_object else ""
+                self._emit(f"const {jsid(m.name)} = ({params}) => ({{ tag: \"{m.name}\"{comma}{args_object} }});")
+                self._emit(f"const {n.name}_{jsid(m.name)} = ({params}) => ({{ tag: \"{m.name}\"{comma}{args_object} }});")
 
     def _assemble(self) -> str:
         out: List[str] = ['"use strict";', '']
@@ -349,6 +358,8 @@ class CodeGenNode:
             self._emit("}")
         elif isinstance(n, Switch):
             self._switch(n)
+        elif isinstance(n, MatchStatement):
+            self._match(n)
         elif isinstance(n, Break):
             self._emit("break;")
         elif isinstance(n, Continue):
@@ -406,6 +417,32 @@ class CodeGenNode:
             self._indent += 1
             self._block(n.default_body)
             self._indent -= 1
+        self._indent -= 1
+        self._emit("}")
+
+    def _match(self, n: MatchStatement):
+        subj_var = f"__match_subj_{n.line}"
+        self._emit(f"const {subj_var} = {self._expr(n.subject)};")
+        self._emit(f"switch ({subj_var} && {subj_var}.tag) {{")
+        self._indent += 1
+        for case in n.cases:
+            if case.pattern_name == '_':
+                self._emit("default: {")
+                self._indent += 1
+                self._block(case.body)
+                self._indent -= 1
+                self._emit("}")
+                continue
+            short_name = case.pattern_name.split('_')[-1]
+            self._emit(f"case \"{short_name}\": {{")
+            self._indent += 1
+            for idx, var_name in enumerate(case.pattern_vars):
+                self._emit(f"const {jsid(var_name)} = {subj_var}.val{idx};")
+                self._t.set(var_name, "any")
+            self._block(case.body)
+            self._emit("break;")
+            self._indent -= 1
+            self._emit("}")
         self._indent -= 1
         self._emit("}")
 

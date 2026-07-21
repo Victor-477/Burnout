@@ -163,6 +163,8 @@ class CodeGenPyro:
         self._loop_stack: List = []        # (break_label, continue_label)
         self._structs: Dict[str, List[str]] = {}
         self._enum_consts: Dict[str, int] = {}   # 'Nivel_ALTO' -> 2
+        self._enum_maps: Dict[str, str] = {}
+        self._member_to_enum: Dict[str, str] = {}
         self._global_consts: Dict[str, Literal] = {}  # const global -> literal inlined
         self._ntmp = 0
         self._cur_line = 0            # última linha marcada (evita marcadores repetidos)
@@ -214,9 +216,27 @@ class CodeGenPyro:
                 # struct = map de chaves string; registramos os campos
                 self._structs[n.name] = [f.name for f in n.fields]
             elif isinstance(n, EnumDecl):
-                # enum = constantes inteiras em tempo de compilação
-                for i, m in enumerate(n.members):
-                    self._enum_consts[f"{n.name}_{m}"] = i
+                has_data = any(len(m.fields) > 0 for m in n.members)
+                if not has_data:
+                    for i, m in enumerate(n.members):
+                        self._enum_consts[f"{n.name}_{m.name}"] = i
+                        self._enum_consts[m.name] = i
+                else:
+                    for m in n.members:
+                        self._member_to_enum[m.name] = n.name
+                        self._member_to_enum[f"{n.name}_{m.name}"] = n.name
+                        if len(m.fields) == 0:
+                            self._enum_maps[f"{n.name}_{m.name}"] = m.name
+                            self._enum_maps[m.name] = m.name
+                        params = [("any", f"val{idx}") for idx in range(len(m.fields))]
+                        pairs = [(Literal("string", "tag"), Literal("string", m.name))]
+                        for idx in range(len(m.fields)):
+                            pairs.append((Literal("string", f"val{idx}"), Identifier(f"val{idx}")))
+                        body = [Return(MapLiteral(pairs))]
+                        fn_short = FunctionDecl(m.name, params, "any", body)
+                        fn_prefixed = FunctionDecl(f"{n.name}_{m.name}", params, "any", body)
+                        user_fns.append(fn_short)
+                        user_fns.append(fn_prefixed)
             elif isinstance(n, ConstDecl) and isinstance(n.value, Literal):
                 # const global com valor literal: inlined em todo uso
                 # (visível dentro de funções, sem precisar de globais na VM)
@@ -284,6 +304,7 @@ class CodeGenPyro:
         elif isinstance(n, For):                self._for(n)
         elif isinstance(n, ForEach):            self._foreach(n)
         elif isinstance(n, Switch):             self._switch(n)
+        elif isinstance(n, MatchStatement):     self._match(n)
         elif isinstance(n, Break):              self._break()
         elif isinstance(n, Continue):           self._continue()
         elif isinstance(n, Assert):             self._assert(n)
@@ -444,6 +465,38 @@ class CodeGenPyro:
         self._place(l_end)
         self._loop_stack.pop()
 
+    def _match(self, n: MatchStatement):
+        l_end = self._label()
+        subj_slot = self._slot(f"__match{self._nlabels}")
+        self._expr(n.subject)
+        self._emit(OP_STORE, subj_slot)
+        next_case_label = self._label()
+        for idx, case in enumerate(n.cases):
+            if idx > 0:
+                self._place(next_case_label)
+                next_case_label = self._label()
+            if case.pattern_name == '_':
+                for s in case.body: self._stmt(s)
+                self._emit(OP_JMP, l_end)
+                continue
+            self._emit(OP_LOAD, subj_slot)
+            self._emit(OP_CONST, self._const(TAG_STR, "tag"))
+            self._emit(OP_INDEX)
+            short_name = case.pattern_name.split('_')[-1]
+            self._emit(OP_CONST, self._const(TAG_STR, short_name))
+            self._emit(OP_EQ)
+            self._emit(OP_JMPF, next_case_label)
+            for vidx, var_name in enumerate(case.pattern_vars):
+                self._emit(OP_LOAD, subj_slot)
+                self._emit(OP_CONST, self._const(TAG_STR, f"val{vidx}"))
+                self._emit(OP_INDEX)
+                vslot = self._slot(var_name)
+                self._emit(OP_STORE, vslot)
+            for s in case.body: self._stmt(s)
+            self._emit(OP_JMP, l_end)
+        self._place(next_case_label)
+        self._place(l_end)
+
     def _break(self):
         if not self._loop_stack:
             raise CodeGenPyroError("'break' fora de laço/switch")
@@ -501,6 +554,11 @@ class CodeGenPyro:
                     f"suportada no backend pyro; use --backend go ou node.")
             if n.name in self._enum_consts:      # membro de enum -> const int
                 self._emit(OP_CONST, self._const(TAG_INT, self._enum_consts[n.name]))
+                return
+            if n.name in self._enum_maps:
+                self._emit(OP_CONST, self._const(TAG_STR, "tag"))
+                self._emit(OP_CONST, self._const(TAG_STR, self._enum_maps[n.name]))
+                self._emit(OP_NEWMAP, 1)
                 return
             # const global inlined (visível em qualquer função), exceto se
             # houver uma variável local com o mesmo nome (sombra)

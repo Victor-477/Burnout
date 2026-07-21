@@ -266,6 +266,7 @@ class CodeGenGo:
         # ── Fase 3: LLM nativo — funções 'tool' expostas a modelos ──
         self._tools: List[FunctionDecl] = []
         self._use_tools = False
+        self._member_to_enum: Dict[str, str] = {}
 
     @property
     def _safe_mode(self) -> bool:
@@ -318,6 +319,9 @@ class CodeGenGo:
                 self.te.reg_struct(n.name, {f.name: f.field_type for f in n.fields})
             elif isinstance(n, EnumDecl):
                 self.te.reg_enum(n.name)
+                for m in n.members:
+                    self._member_to_enum[m.name] = n.name
+                    self._member_to_enum[f"{n.name}_{m.name}"] = n.name
             elif isinstance(n, FunctionDecl):
                 self.te.reg_fn(n.name, n.return_type or 'void')
             elif isinstance(n, ConstDecl):
@@ -736,12 +740,35 @@ class CodeGenGo:
     # ── declaracoes ─────────────────────────────────────────
 
     def _enum(self, n: EnumDecl):
-        self._enum_defs.append(f"type {gid(n.name)} int64")
-        self._enum_defs.append("const (")
-        for i, m in enumerate(n.members):
-            suffix = f" {gid(n.name)} = iota" if i == 0 else ""
-            self._enum_defs.append(f"\t{n.name}_{m}{suffix}")
-        self._enum_defs.append(")")
+        has_data = any(len(m.fields) > 0 for m in n.members)
+        if not has_data:
+            self._enum_defs.append(f"type {gid(n.name)} int64")
+            self._enum_defs.append("const (")
+            for i, m in enumerate(n.members):
+                suffix = f" {gid(n.name)} = iota" if i == 0 else ""
+                self._enum_defs.append(f"\t{n.name}_{m.name}{suffix}")
+            self._enum_defs.append(")")
+        else:
+            self._enum_defs.append(f"type {gid(n.name)} interface {{")
+            self._enum_defs.append(f"\tis{gid(n.name)}()")
+            self._enum_defs.append("}")
+            for m in n.members:
+                struct_name = f"{gid(n.name)}_{gid(m.name)}"
+                self._enum_defs.append(f"type {struct_name} struct {{")
+                for idx, t in enumerate(m.fields):
+                    self._enum_defs.append(f"\tVal{idx} {go_type(t)}")
+                self._enum_defs.append("}")
+                self._enum_defs.append(f"func ({struct_name}) is{gid(n.name)}() {{}}")
+                
+                params = ', '.join(f"v{idx} {go_type(t)}" for idx, t in enumerate(m.fields))
+                args_struct = ', '.join(f"Val{idx}: v{idx}" for idx in range(len(m.fields)))
+                
+                self._enum_defs.append(f"func {gid(m.name)}({params}) {gid(n.name)} {{")
+                self._enum_defs.append(f"\treturn {struct_name}{{{args_struct}}}")
+                self._enum_defs.append("}")
+                self._enum_defs.append(f"func {gid(n.name)}_{gid(m.name)}({params}) {gid(n.name)} {{")
+                self._enum_defs.append(f"\treturn {struct_name}{{{args_struct}}}")
+                self._enum_defs.append("}")
 
     def _struct(self, n: StructDecl):
         # Campos exportados (maiúsculos) + tag json com o nome original,
@@ -795,6 +822,7 @@ class CodeGenGo:
         elif isinstance(node, For):                self._for(node)
         elif isinstance(node, ForEach):            self._foreach(node)
         elif isinstance(node, Switch):             self._switch(node)
+        elif isinstance(node, MatchStatement):     self._match(node)
         elif isinstance(node, Break):              self._emit("break")
         elif isinstance(node, Continue):           self._emit("continue")
         elif isinstance(node, Assert):             self._assert(node)
@@ -1008,6 +1036,34 @@ class CodeGenGo:
             self._indent += 1
             self.te.push()
             for s in n.default_body: self._gen(s)
+            self.te.pop()
+            self._indent -= 1
+        self._emit("}")
+
+    def _match(self, n: MatchStatement):
+        expr_str = self._expr(n.subject)
+        self._emit(f"switch v := interface{{}}({expr_str}).(type) {{")
+        for case in n.cases:
+            if case.pattern_name == '_':
+                self._emit("default:")
+                self._indent += 1
+                self.te.push()
+                for s in case.body:
+                    self._gen(s)
+                self.te.pop()
+                self._indent -= 1
+                continue
+            enum_name = self._member_to_enum.get(case.pattern_name, "Result")
+            short_name = case.pattern_name.split('_')[-1]
+            struct_name = f"{gid(enum_name)}_{gid(short_name)}"
+            self._emit(f"case {struct_name}:")
+            self._indent += 1
+            self.te.push()
+            for idx, var_name in enumerate(case.pattern_vars):
+                self._emit(f"{gid(var_name)} := v.Val{idx}")
+                self.te.set(var_name, "any")
+            for s in case.body:
+                self._gen(s)
             self.te.pop()
             self._indent -= 1
         self._emit("}")
