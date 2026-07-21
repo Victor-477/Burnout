@@ -1,37 +1,37 @@
-# Burnout — o compilador do sistema
+# Burnout — the system's compiler
 
-O **Burnout** é o **programa compilador** (base Go/Python): recebe `.cryo` (do
-**CRYO**) e gera a linguagem-alvo `.pyro` (bytecode do **PYRO**) — ou, como alvos
-alternativos, código Go/C/asm. Contém o front-end de orquestração e **todos os
-geradores de código** (backends).
+**Burnout** is the **compiler program** (Go/Python base): it takes `.cryo` (from
+**CRYO**) and generates the `.pyro` target language (**PYRO** bytecode) — or, as
+alternative targets, Go/C/asm code. It contains the orchestration front-end and
+**all the code generators** (backends).
 
 ```
-  .cryo ──►  Burnout: [front-end CRYO] → AST → [backend] ──►  .pyro (padrão do Pyro) | .go | .c | .s
+  .cryo ──►  Burnout: [CRYO front-end] → AST → [backend] ──►  .pyro (the Pyro target) | .go | .c | .s
 ```
 
-## Conteúdo
+## Contents
 
-| Arquivo | Papel |
+| File | Role |
 |---|---|
-| `cryoc.py` | Ponto de entrada da CLI |
-| `__init__.py` | **API de biblioteca** (`import burnout`) + `pyproject.toml` (pip) |
-| `compiler.py` | Orquestração: fonte → AST (CRYO) → código (backend) → executa/monta |
-| `codegen_pyro.py` | **Backend bytecode Pyro** (`.pyro`) — a linguagem-alvo própria |
-| `codegen_go.py` | Backend Go (alvo alternativo; linguagem completa + skills/máquina) |
-| `codegen_c.py` | Backend C nativo |
-| `codegen_asm.py` | Backend x86-64 (ABIs System V e Win64) |
-| `codegen_legacy.py` | Backend Python legado |
-| `runtime/cryo_runtime.c/.h` | Runtime C (backends C/asm) |
-| `scripts/build_win64.*` | Build MinGW no Windows (backend asm) |
-| `tests/test_smoke.py` | Testes de fumaça dos geradores |
+| `cryoc.py` | CLI entry point |
+| `__init__.py` | **Library API** (`import burnout`) + `pyproject.toml` (pip) |
+| `compiler.py` | Orchestration: source → AST (CRYO) → code (backend) → run/build |
+| `codegen_pyro.py` | **Pyro bytecode backend** (`.pyro`) — the custom target language |
+| `codegen_go.py` | Go backend (alternative target; full language + skills/machine) |
+| `codegen_c.py` | Native C backend |
+| `codegen_asm.py` | x86-64 backend (System V and Win64 ABIs) |
+| `codegen_legacy.py` | Legacy Python backend |
+| `runtime/cryo_runtime.c/.h` | C runtime (C/asm backends) |
+| `scripts/build_win64.*` | MinGW build on Windows (asm backend) |
+| `tests/test_smoke.py` | Smoke tests for the generators |
 
-## Uso (a partir da raiz do projeto)
+## Usage (from the project root)
 
 ```bash
-# Alvo Pyro (bytecode próprio) — gera .pyro e executa na VM Pyro
+# Pyro target (custom bytecode) — generates .pyro and runs it on the Pyro VM
 python burnout/cryoc.py cryo/examples/example_bytecode.cryo --backend pyro --run
 
-# Alvos alternativos
+# Alternative targets
 python burnout/cryoc.py cryo/examples/app.cryo --backend go --run    # Go
 python burnout/cryoc.py cryo/examples/app.cryo --backend c            # C
 python burnout/cryoc.py cryo/examples/app.cryo --backend asm          # x86-64
@@ -39,58 +39,58 @@ python burnout/cryoc.py cryo/examples/app.cryo --backend asm          # x86-64
 python burnout/tests/test_smoke.py
 ```
 
-## Usar como biblioteca (importar/chamar em projetos)
+## Use as a library (import/call from projects)
 
-O Burnout também é um **pacote Python importável**. Instale em modo editável a
-partir desta pasta (dentro do monorepo Cryo, com `../cryo` e `../pyro` ao lado):
+Burnout is also an **importable Python package**. Install in editable mode from
+this folder (inside the Cryo monorepo, with `../cryo` and `../pyro` alongside):
 
 ```bash
 cd burnout
 pip install -e .
 ```
 
-Depois, em qualquer projeto:
+Then, in any project:
 
 ```python
 import burnout
 
-# Compila uma string .cryo -> código-alvo
+# Compile a .cryo string -> target code
 #   go/c/asm -> str   |   pyro -> bytes (bytecode)
 go_src = burnout.compile_source('print("ola");', backend="go")
 bc     = burnout.compile_source('print(1 + 2);', backend="pyro")
 
-# Compila um arquivo e (opcionalmente) executa
+# Compile a file and (optionally) run it
 burnout.compile_file("app.cryo", backend="pyro", run=True)
-burnout.run("app.cryo", backend="go")          # atalho de compile_file(run=True)
+burnout.run("app.cryo", backend="go")          # shortcut for compile_file(run=True)
 
-# Front-end: tokens e AST
+# Front-end: tokens and AST
 toks = burnout.tokenize(open("app.cryo").read())
 ast  = burnout.parse_ast(open("app.cryo").read())
 
-# Desmonta um .pyro já gerado
+# Disassemble an already-generated .pyro
 print(burnout.disassemble(open("build/app.pyro", "rb").read()))
 ```
 
-Também funciona como módulo executável (mesma CLI do `cryoc.py`):
+It also works as an executable module (same CLI as `cryoc.py`):
 
 ```bash
 python -m burnout app.cryo --backend go --run
-cryoc app.cryo --run           # console-script instalado pelo pip
+cryoc app.cryo --run           # console-script installed by pip
 ```
 
-> **API pública:** `compile_source`, `compile_file`, `run`, `parse_ast`,
-> `tokenize`, `disassemble`, `default_abi`, `BACKENDS`, `__version__`, e as
-> exceções `LexerError` / `ParseError` / `CodeGen*Error`.
+> **Public API:** `compile_source`, `compile_file`, `run`, `parse_ast`,
+> `tokenize`, `disassemble`, `default_abi`, `BACKENDS`, `__version__`, and the
+> exceptions `LexerError` / `ParseError` / `CodeGen*Error`.
 >
-> **Nota (Windows):** se o `pip install -e .` falhar ao escrever
-> `Scripts\cryoc.exe` (arquivo em uso), o pacote ainda fica importável — use
-> `python -m burnout` como CLI, ou repita a instalação com o terminal fechado.
+> **Note (Windows):** if `pip install -e .` fails writing `Scripts\cryoc.exe`
+> (file in use), the package is still importable — use `python -m burnout` as the
+> CLI, or repeat the install with the terminal closed.
 
-Artefatos gerados vão para `build/` na raiz (git-ignored). O `--backend pyro --run`
-compila a VM Pyro (`pyro/vm`) uma vez e executa o `.pyro`.
+Generated artifacts go to `build/` at the root (git-ignored). `--backend pyro --run`
+builds the Pyro VM (`pyro/vm`) once and runs the `.pyro`.
 
-## Dependências
+## Dependencies
 
-Burnout depende de **CRYO** (front-end: lexer/parser/AST/análise) e, para o alvo
-Pyro, aciona a **VM Pyro** de `pyro/vm`. Será distribuído como repositório próprio,
-consumindo CRYO como dependência.
+Burnout depends on **CRYO** (front-end: lexer/parser/AST/analysis) and, for the
+Pyro target, invokes the **Pyro VM** in `pyro/vm`. It will be distributed as its
+own repository, consuming CRYO as a dependency.
