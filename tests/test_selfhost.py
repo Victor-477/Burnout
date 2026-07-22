@@ -298,5 +298,11 @@ check_selfhost('string s = "Cryo"; print(s); print("hello " + s); '
                'print(1 < 2); print(3 == 4); print(a && b); print(a || b);',
                "str-bool", lines_fn=_out_lines)
 
+# float literals in the constant pool (IEEE-754 bytes must match the reference)
+check_selfhost('number a = 3.14; number b = 2.5; print(a); print(b); '
+               'print(a + b); print(a * 2.0); print(0.5); '
+               'number c = 100.0; print(c / 8.0); number d = 0.1; print(d);',
+               "floats", lines_fn=_out_lines)
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
