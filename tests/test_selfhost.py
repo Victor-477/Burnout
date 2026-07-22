@@ -367,5 +367,22 @@ check_selfhost('int x = 2; switch (x) { case 1: print(10); case 2: print(20); '
                'case "go": print(2); default: print(3); }',
                "switch", lines_fn=_out_lines)
 
+# match on enums-with-data: variant constructors + tag check + destructuring + '_'
+check_selfhost('enum Result { Ok(int), Err(string) } '
+               'fn describe(int code) -> string ={ '
+               '  Result r = code == 0 ? Ok(100) : Err("fail"); '
+               '  match r { Ok(v) => { return "ok:" + to_string(v); } '
+               '            Err(e) => { return "err:" + e; } } '
+               '  return "none"; } '
+               'print(describe(0)); print(describe(9)); '                     # ok:100 / err:fail
+               'enum Shape { Circle(int), Rect(int, int) } '
+               'fn area(Shape s) -> int ={ '
+               '  match s { Circle(rr) => { return 3 * rr * rr; } '
+               '            Rect(w, h) => { return w * h; } } return 0; } '
+               'print(area(Circle(10))); print(area(Rect(4, 5))); '           # 300 / 20
+               'Result r2 = Ok(7); '
+               'match r2 { Err(e) => { print("E"); } _ => { print("other"); } }',  # other
+               "match", lines_fn=_out_lines)
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
