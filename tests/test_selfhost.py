@@ -304,5 +304,13 @@ check_selfhost('number a = 3.14; number b = 2.5; print(a); print(b); '
                'number c = 100.0; print(c / 8.0); number d = 0.1; print(d);',
                "floats", lines_fn=_out_lines)
 
+# native builtins: OP_NATIVE (math/conversions/strings) + OP_LEN dispatch
+check_selfhost('print(to_string(42)); print(len("hello")); print(upper("abc")); '
+               'print(lower("XYZ")); print(sqrt(16.0)); print(abs(-7)); '
+               'print(max(3, 9)); print(min(3, 9)); print(floor(3.9)); '
+               'print(to_int("100") + 23); print(substr("hello world", 0, 5)); '
+               'print(contains("hello", "ell")); print(find("hello", "l"));',
+               "natives", lines_fn=_out_lines)
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
