@@ -251,6 +251,11 @@ def selfhost_run(prog, label, lines_fn=_int_lines):
     try: os.remove(out_pyro)
     except OSError: pass
     escp = prog.replace("\\", "\\\\").replace('"', '\\"')
+    # The program is embedded as a string literal in the driver. If it contains
+    # `${`, the reference compiler (compiling the driver) would interpolate it
+    # there. Split `${` across a concat so the driver has no literal `${`; the
+    # runtime value handed to compile() is unchanged.
+    escp = escp.replace("${", '$" + "{')
     gen = _run_vm('import "codegen.cryo"\ncompile("' + escp + '", "' + out_pyro + '");\n')
     check(f"[{label}] Cryo codegen ran and wrote the .pyro",
           gen.returncode == 0 and os.path.isfile(out_pyro))
@@ -383,6 +388,29 @@ check_selfhost('enum Result { Ok(int), Err(string) } '
                'Result r2 = Ok(7); '
                'match r2 { Err(e) => { print("E"); } _ => { print("other"); } }',  # other
                "match", lines_fn=_out_lines)
+
+# try / catch / finally + throw
+check_selfhost('fn risky(int n) -> int ={ if (n < 0) { throw("negative"); } return n * 2; } '
+               'int a = 0; try { a = risky(5); } catch (string e) { a = -1; } print(a); '     # 10
+               'try { a = risky(-3); } catch (string e) { print("caught:" + e); a = -99; } '  # caught:negative
+               'print(a); '                                                                    # -99
+               'try { throw("boom"); } catch (string e) { print(e); } finally { print("fin"); }',  # boom / fin
+               "trycatch", lines_fn=_out_lines)
+
+# optionals: ?? (null-coalescing) and ! (unwrap)
+check_selfhost('int? x = null; int y = x ?? 7; print(y); '            # 7
+               'int? z = 42; print(z ?? 0); '                         # 42
+               'int? w = 5; print(w!); '                              # 5
+               'string? s = null; print(s ?? "default");',            # default
+               "optionals", lines_fn=_out_lines)
+
+# string interpolation: "a ${expr} b" -> concatenation + to_string
+check_selfhost('int n = 42; string name = "World"; '
+               'print("n = ${n}"); '                                  # n = 42
+               'print("Hello, ${name}!"); '                           # Hello, World!
+               'print("${n} + ${n} = ${n + n}"); '                    # 42 + 42 = 84
+               'int[] arr = [1, 2, 3]; print("len=${len(arr)} first=${arr[0]}");',  # len=3 first=1
+               "interp", lines_fn=_out_lines)
 
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
