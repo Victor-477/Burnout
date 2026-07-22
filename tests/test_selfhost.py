@@ -357,5 +357,15 @@ check_selfhost('int x = 7; print(x > 5 ? 1 : 0); print(x < 5 ? 1 : 0); '
                'int m = 3 > 2 ? (10 + 5) : 0; print(m);',
                "ternary", lines_fn=_out_lines)
 
+# switch: single case, stacked cases (shared body), default, no fall-through
+check_selfhost('int x = 2; switch (x) { case 1: print(10); case 2: print(20); '
+               'case 3: print(30); default: print(99); } '
+               'switch (x) { case 5: print(1); default: print(0); } '                # default -> 0
+               'int d = 3; switch (d) { case 1: case 2: case 3: print(123); '        # stacked -> 123
+               'default: print(-1); } '
+               'string cmd = "go"; switch (cmd) { case "stop": print(1); '           # string subject
+               'case "go": print(2); default: print(3); }',
+               "switch", lines_fn=_out_lines)
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
