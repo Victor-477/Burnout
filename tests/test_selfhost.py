@@ -350,5 +350,12 @@ check_selfhost('int x = 10; x += 5; print(x); x -= 3; print(x); x *= 2; print(x)
                'int acc = 0; for (int i = 0; i < 5; i++) { acc += i; } print(acc);',  # 0+1+2+3+4 = 10
                "compound", lines_fn=_out_lines)
 
+# ternary  cond ? a : b  (incl. nested / right-associative and in expressions)
+check_selfhost('int x = 7; print(x > 5 ? 1 : 0); print(x < 5 ? 1 : 0); '
+               'string s = x % 2 == 0 ? "even" : "odd"; print(s); '
+               'int g = 85; string grade = g >= 90 ? "A" : g >= 80 ? "B" : "C"; print(grade); '
+               'int m = 3 > 2 ? (10 + 5) : 0; print(m);',
+               "ternary", lines_fn=_out_lines)
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
