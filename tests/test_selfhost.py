@@ -312,5 +312,26 @@ check_selfhost('print(to_string(42)); print(len("hello")); print(upper("abc")); 
                'print(contains("hello", "ell")); print(find("hello", "l"));',
                "natives", lines_fn=_out_lines)
 
+# arrays: literal (NEWARR), index read/write (INDEX/SETIDX), .push (APPEND), len
+check_selfhost('int[] a = [10, 20, 30]; print(a[0]); print(a[2]); print(len(a)); '
+               'a[1] = 99; print(a[1]); a.push(40); print(len(a)); print(a[3]); '
+               'int sum = 0; int i = 0; while (i < len(a)) { sum = sum + a[i]; i = i + 1; } '
+               'print(sum);',
+               "arrays", lines_fn=_out_lines)
+
+# maps: literal (NEWMAP), index read/write, has, len
+check_selfhost('map<string,int> m = {"x": 1, "y": 2}; print(m["x"]); print(m["y"]); '
+               'm["z"] = 3; print(m["z"]); print(has(m, "y")); print(has(m, "w")); '
+               'print(len(m));',
+               "maps", lines_fn=_out_lines)
+
+# structs: new S{...} -> map; field reads (Cryo has no field-assignment syntax)
+check_selfhost('struct Point { int x; int y; } '
+               'Point p = new Point{ x: 3, y: 4 }; print(p.x); print(p.y); '
+               'print(p.x + p.y); '
+               'struct Box { int w; int h; } fn area(Box b) -> int ={ return b.w * b.h; } '
+               'Box bx = new Box{ w: 5, h: 6 }; print(area(bx));',
+               "structs", lines_fn=_out_lines)
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
