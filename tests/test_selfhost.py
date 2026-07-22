@@ -220,19 +220,32 @@ def _int_lines(text):
             out.append(s)
     return out
 
-def oracle_run(prog):
-    """Compiles+runs `prog` with the reference compiler (pyro backend)."""
+def _out_lines(text):
+    """All non-empty stdout lines (for string/bool output, not just integers)."""
+    return [ln.strip() for ln in (text or "").replace("\r\n", "\n").split("\n") if ln.strip()]
+
+def oracle_run(prog, lines_fn=_int_lines):
+    """Reference compiler emits the .pyro; runs it on the SAME C VM as the
+    self-hosted path — so we compare pure program output (codegen vs codegen),
+    free of the compiler's own status chatter on stdout."""
     with tempfile.NamedTemporaryFile(suffix=".cryo", delete=False, mode="w", encoding="utf-8") as tp:
         tp.write(prog); path = tp.name
+    out_pyro = os.path.join(tempfile.gettempdir(), "oracle_out.pyro").replace("\\", "/")
+    try: os.remove(out_pyro)
+    except OSError: pass
     try:
-        r = subprocess.run([sys.executable, CRYOC, path, "--backend", "pyro", "--run", "--no-banner"],
-                           capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
+        subprocess.run([sys.executable, CRYOC, path, "--backend", "pyro", "-o", out_pyro, "--no-banner"],
+                       capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=120)
     finally:
         try: os.remove(path)
         except OSError: pass
-    return _int_lines(r.stdout)
+    if os.path.isfile(out_pyro) and os.path.isfile(VM_BIN):
+        r = subprocess.run([VM_BIN, out_pyro], capture_output=True, text=True,
+                           encoding="utf-8", errors="replace", timeout=30)
+        return lines_fn(r.stdout)
+    return []
 
-def selfhost_run(prog, label):
+def selfhost_run(prog, label, lines_fn=_int_lines):
     """The Cryo-in-Cryo compiler (on the VM) generates out.pyro; executes it and returns the output."""
     out_pyro = os.path.join(tempfile.gettempdir(), "selfhost_out.pyro").replace("\\", "/")
     try: os.remove(out_pyro)
@@ -244,12 +257,12 @@ def selfhost_run(prog, label):
     if os.path.isfile(out_pyro) and os.path.isfile(VM_BIN):
         r = subprocess.run([VM_BIN, out_pyro], capture_output=True, text=True,
                            encoding="utf-8", errors="replace", timeout=30)
-        return _int_lines(r.stdout)
+        return lines_fn(r.stdout)
     return []
 
-def check_selfhost(prog, label):
-    exp = oracle_run(prog)
-    got = selfhost_run(prog, label)
+def check_selfhost(prog, label, lines_fn=_int_lines):
+    exp = oracle_run(prog, lines_fn)
+    got = selfhost_run(prog, label, lines_fn)
     if got != exp:
         print(f"    [{label}] oracle:      {exp}")
         print(f"    [{label}] self-hosted: {got}")
@@ -271,6 +284,19 @@ check_selfhost("fn fib(int n) -> int ={ if (n < 2) { return n; } return fib(n - 
                "fn sum(int a, int b) -> int ={ return a + b; } "
                "print(fib(10)); print(sum(20, 22)); int s = fib(7) + sum(5, 5); print(s);",
                "functions")
+
+# logical operators: && / || with short-circuit, gating integer output
+check_selfhost("int x = 7; if (x > 0 && x < 10) { print(1); } else { print(0); } "
+               "if (x < 0 || x > 5) { print(2); } else { print(3); } "
+               "if (x > 100 && x < 200) { print(4); } else { print(5); } "
+               "if (x == 7 || x == 8) { print(6); } else { print(7); }",
+               "logic")
+
+# strings + bools (full stdout comparison, not just integers)
+check_selfhost('string s = "Cryo"; print(s); print("hello " + s); '
+               'bool a = true; bool b = false; print(a); print(b); '
+               'print(1 < 2); print(3 == 4); print(a && b); print(a || b);',
+               "str-bool", lines_fn=_out_lines)
 
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

@@ -53,7 +53,7 @@ BANNER = r"""
 | |___| |  | |_| | (_) || |__|  __/ | | | | | |_) | | |  __/ |
  \____|_|   \__, |\___/  \_____\___|_| |_| |_| .__/|_|_|\___|_|
             |___/                            |_|   v0.4.0
-   .cryo  ->  C nativo  |  x86-64 assembly   (modo seguro)
+   .cryo  ->  native C  |  x86-64 assembly   (safe mode)
 """
 
 
@@ -121,16 +121,16 @@ def _run_pyro(pyro_path: str, compiler_dir: str, run: bool, verbose: bool):
     try:
         if need:
             if verbose:
-                print(f"→ Compilando VM Pyro: go build -o {pyrovm}  (em {vm_dir})")
+                print(f"→ Compiling Pyro VM: go build -o {pyrovm}  (in {vm_dir})")
             r = subprocess.run(['go', 'build', '-o', pyrovm, '.'],
                                cwd=vm_dir, capture_output=True, text=True)
             if r.returncode != 0:
                 print(f"[go] Error compiling Pyro VM:\n{r.stderr}", file=sys.stderr)
                 return
         if verbose:
-            print(f"✓ VM Pyro: {pyrovm}")
+            print(f"✓ Pyro VM: {pyrovm}")
         if run:
-            print(f"\n── Executando (VM Pyro): {pyro_path} ───────────────────")
+            print(f"\n── Running (Pyro VM): {pyro_path} ───────────────────")
             subprocess.run([pyrovm, pyro_path])
     except FileNotFoundError:
         if verbose:
@@ -264,11 +264,11 @@ def compile_file(input_path: str,
         with open(output_path, 'w', encoding='utf-8') as f:
             f.write(code)
 
-    modo = 'SEGURO' if safe else 'UNSAFE'
+    modo = 'SAFE' if safe else 'UNSAFE'
     if verbose:
-        alvo = {'asm': f'x86-64 asm/{abi}', 'go': 'Go nativo',
-                'pyro': 'bytecode Pyro', 'node': 'JavaScript (Node)',
-                'c': 'C nativo'}.get(backend, 'C nativo')
+        alvo = {'asm': f'x86-64 asm/{abi}', 'go': 'native Go',
+                'pyro': 'Pyro bytecode', 'node': 'JavaScript (Node)',
+                'c': 'native C'}.get(backend, 'native C')
         tam = f"  ({len(code)} bytes)" if isinstance(code, (bytes, bytearray)) else ""
         print(f"✓ [{alvo} / {modo}] generated: {input_path} → {output_path}{tam}")
 
@@ -280,7 +280,7 @@ def compile_file(input_path: str,
     if backend == 'pyro':
         if dis:
             import disasm_pyro
-            print("\n── Desassembly (.pyro) ──────────────────────")
+            print("\n── Disassembly (.pyro) ──────────────────────")
             print(disasm_pyro.disassemble(code))
         if run or not dis:
             _run_pyro(output_path,
@@ -292,7 +292,7 @@ def compile_file(input_path: str,
     if backend == 'node':
         if run:
             try:
-                print(f"\n── Executando (Node): {output_path} ───────────────────")
+                print(f"\n── Running (Node): {output_path} ───────────────────")
                 subprocess.run(['node', output_path])
             except FileNotFoundError:
                 print("⚠ node not found — .js generated but not executed",
@@ -315,19 +315,19 @@ def compile_file(input_path: str,
         cmd, tool = _gcc_c_flags(runtime_dir, output_path, runtime, bin_path, safe), 'gcc'
 
     if verbose:
-        print(f"→ Compilando: {' '.join(cmd)}")
+        print(f"→ Compiling: {' '.join(cmd)}")
     try:
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode == 0:
             if verbose:
-                print(f"✓ Binário: {bin_path}")
+                print(f"✓ Binary: {bin_path}")
                 if result.stderr.strip():
-                    print(f"[{tool} avisos]\n{result.stderr}", file=sys.stderr)
+                    print(f"[{tool} warnings]\n{result.stderr}", file=sys.stderr)
             if run:
-                print(f"\n── Executando: {bin_path} ───────────────────")
+                print(f"\n── Running: {bin_path} ───────────────────")
                 subprocess.run([bin_path])
         else:
-            print(f"[{tool}] Erro:\n{result.stderr}", file=sys.stderr)
+            print(f"[{tool}] Error:\n{result.stderr}", file=sys.stderr)
     except FileNotFoundError:
         if verbose:
             print(f"⚠ {tool} not found — just {ext} generated (not compiled)")
@@ -364,10 +364,10 @@ def main() -> None:
                     help='Turn off bytecode optimizer (pyro backend)')
     ap.add_argument('--dis', action='store_true',
                     help='Disassembles the generated Pyro bytecode (pyro backend)')
-    ap.add_argument('--tokens', action='store_true', help='Imprime tokens')
-    ap.add_argument('--ast',    action='store_true', help='Imprime AST')
-    ap.add_argument('-v', '--verbose', action='store_true', help='Saída detalhada')
-    ap.add_argument('--run',    action='store_true', help='Executa após compilar')
+    ap.add_argument('--tokens', action='store_true', help='Print tokens')
+    ap.add_argument('--ast',    action='store_true', help='Print AST')
+    ap.add_argument('-v', '--verbose', action='store_true', help='Verbose output')
+    ap.add_argument('--run',    action='store_true', help='Run after compiling')
     ap.add_argument('--no-banner', action='store_true', help='Hide the banner')
     args = ap.parse_args()
 
@@ -396,7 +396,7 @@ def main() -> None:
     except LexerError     as e:
         print(f"\n[Lexical Error]    {e}", file=sys.stderr); sys.exit(1)
     except ParseError     as e:
-        print(f"\n[Erro Sintático] {e}", file=sys.stderr); sys.exit(1)
+        print(f"\n[Syntax Error] {e}", file=sys.stderr); sys.exit(1)
     except ForeignError   as e:
         print(f"\n[Foreign Error] {e}", file=sys.stderr); sys.exit(1)
     except ModuleError    as e:
