@@ -343,5 +343,12 @@ check_selfhost('int total = 0; for (int i = 0; i < 5; i = i + 1) { total = total
                'print(prod);',                                            # 24
                "for", lines_fn=_out_lines)
 
+# compound assignment (+=, -=, *=) and increment/decrement (++/--)
+check_selfhost('int x = 10; x += 5; print(x); x -= 3; print(x); x *= 2; print(x); '
+               'int c = 0; c++; c++; c++; print(c); c--; print(c); '
+               'string s = "a"; s += "b"; s += "c"; print(s); '
+               'int acc = 0; for (int i = 0; i < 5; i++) { acc += i; } print(acc);',  # 0+1+2+3+4 = 10
+               "compound", lines_fn=_out_lines)
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
