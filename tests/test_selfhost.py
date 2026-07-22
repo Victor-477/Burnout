@@ -333,5 +333,15 @@ check_selfhost('struct Point { int x; int y; } '
                'Box bx = new Box{ w: 5, h: 6 }; print(area(bx));',
                "structs", lines_fn=_out_lines)
 
+# for loops: C-style (init; cond; upd) and for-each (T x in coll)
+check_selfhost('int total = 0; for (int i = 0; i < 5; i = i + 1) { total = total + i; } '
+               'print(total); '                                           # 0+1+2+3+4 = 10
+               'int[] xs = [2, 4, 6, 8]; int s = 0; for (int v in xs) { s = s + v; } '
+               'print(s); '                                               # 20
+               'string r = ""; for (string c in "abc") { r = r + c; } print(r); '   # abc
+               'int prod = 1; for (int k = 1; k <= 4; k = k + 1) { prod = prod * k; } '
+               'print(prod);',                                            # 24
+               "for", lines_fn=_out_lines)
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
