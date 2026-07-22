@@ -412,5 +412,19 @@ check_selfhost('int n = 42; string name = "World"; '
                'int[] arr = [1, 2, 3]; print("len=${len(arr)} first=${arr[0]}");',  # len=3 first=1
                "interp", lines_fn=_out_lines)
 
+# bitwise & shifts (needed for the compiler's own byte-emit helpers)
+check_selfhost('int a = 240; int b = 15; print(a & b); print(a | b); print(a ^ b); '  # 0 / 255 / 255
+               'print(240 >> 4); print(1 << 8); print((255 >> 4) & 3); '               # 15 / 256 / 3
+               'int v = 5000; print(v & 255); print((v >> 8) & 255);',                 # 136 / 19
+               "bitwise", lines_fn=_out_lines)
+
+# break / continue in while and for loops
+check_selfhost('int s = 0; int i = 0; while (i < 10) { i = i + 1; if (i == 3) { continue; } '
+               'if (i == 7) { break; } s = s + i; } print(s); '                     # 1+2+4+5+6 = 18
+               'int t = 0; for (int k = 0; k < 100; k++) { if (k >= 5) { break; } t += k; } print(t); '  # 0+1+2+3+4 = 10
+               'int u = 0; int[] xs = [1,2,3,4,5,6]; for (int v in xs) { if (v % 2 == 0) { continue; } u += v; } '
+               'print(u);',                                                          # 1+3+5 = 9
+               "breakcont", lines_fn=_out_lines)
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
