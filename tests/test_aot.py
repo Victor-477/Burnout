@@ -31,6 +31,8 @@ VMDIR = os.path.join(_root, "Pyro", "vm")
 RUNTIME = os.path.join(VMDIR, "pyro_runtime.c")
 VM_BIN = os.path.join(_root, "build", "pyrovm.exe" if sys.platform == "win32" else "pyrovm")
 TMP = tempfile.gettempdir()
+# pyro_runtime.c uses sockets for http_serve(), so Windows links winsock too.
+SYSLIBS = ["-lm"] + (["-lws2_32"] if sys.platform == "win32" else [])
 
 _passed = 0
 _failed = 0
@@ -51,15 +53,16 @@ def find_c_compiler():
     for cc in ("gcc", "clang", "cc"):
         if shutil.which(cc):
             def build(cfile, exe, _cc=cc):
-                return _run([_cc, "-O2", "-o", exe, cfile, RUNTIME, "-I", VMDIR, "-lm"])
+                return _run([_cc, "-O2", "-o", exe, cfile, RUNTIME, "-I", VMDIR] + SYSLIBS)
             return cc, build
     if shutil.which("zig"):
         def build(cfile, exe):
-            return _run(["zig", "cc", "-O2", "-o", exe, cfile, RUNTIME, "-I", VMDIR, "-lm"])
+            return _run(["zig", "cc", "-O2", "-o", exe, cfile, RUNTIME, "-I", VMDIR] + SYSLIBS)
         return "zig cc", build
     if shutil.which("cl"):   # only if already in a developer environment
         def build(cfile, exe):
-            return _run(["cl", "/O2", "/utf-8", "/I", VMDIR, "/Fe:" + exe, cfile, RUNTIME])
+            return _run(["cl", "/O2", "/utf-8", "/I", VMDIR, "/Fe:" + exe, cfile, RUNTIME,
+                         "ws2_32.lib"])
         return "cl", build
     return None, None
 
@@ -109,7 +112,7 @@ for tag, src in PROGRAMS:
     cfile = os.path.join(TMP, "aot_" + tag + ".c")
     gen = _run([sys.executable, AOT, pyro, "-o", cfile])
     ok_gen = (gen.returncode == 0 and os.path.exists(cfile)
-              and "int main(void)" in open(cfile, encoding="utf-8").read())
+              and "int main(int argc, char** argv)" in open(cfile, encoding="utf-8").read())
     check(f"[{tag}] AOT generates C", ok_gen)
 
     if ok_gen and build is not None:

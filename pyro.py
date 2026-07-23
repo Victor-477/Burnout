@@ -35,6 +35,9 @@ import aot_pyro          # AOT (.pyro -> C)
 VMDIR = os.path.join(_root, "Pyro", "vm")
 RUNTIME = os.path.join(VMDIR, "pyro_runtime.c")
 EXE = ".exe" if sys.platform == "win32" else ""
+# pyro_runtime.c uses sockets for http_serve(), so Windows links winsock too.
+SYSLIBS = ["-lm"] + (["-lws2_32"] if sys.platform == "win32" else [])
+MSVCLIBS = ["ws2_32.lib"] if sys.platform == "win32" else []
 
 
 def _err(msg):
@@ -49,11 +52,14 @@ def find_cc():
                               encoding="utf-8", errors="replace").returncode
     for cc in ("gcc", "clang", "cc"):
         if shutil.which(cc):
-            return cc, (lambda c, e, _cc=cc: runner([_cc, "-O2", "-o", e, c, RUNTIME, "-I", VMDIR, "-lm"]))
+            return cc, (lambda c, e, _cc=cc: runner([_cc, "-O2", "-o", e, c, RUNTIME,
+                                                     "-I", VMDIR] + SYSLIBS))
     if shutil.which("zig"):
-        return "zig cc", (lambda c, e: runner(["zig", "cc", "-O2", "-o", e, c, RUNTIME, "-I", VMDIR, "-lm"]))
+        return "zig cc", (lambda c, e: runner(["zig", "cc", "-O2", "-o", e, c, RUNTIME,
+                                               "-I", VMDIR] + SYSLIBS))
     if shutil.which("cl"):
-        return "cl", (lambda c, e: runner(["cl", "/O2", "/utf-8", "/I", VMDIR, "/Fe:" + e, c, RUNTIME]))
+        return "cl", (lambda c, e: runner(["cl", "/O2", "/utf-8", "/I", VMDIR, "/Fe:" + e,
+                                           c, RUNTIME] + MSVCLIBS))
     return None, None
 
 

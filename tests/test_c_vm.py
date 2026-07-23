@@ -19,6 +19,30 @@ CRYO_EXAMPLES = os.path.join(_root, "Cryo", "examples")
 CRYOC = os.path.join(_root, "Burnout", "cryoc.py")
 GO_VM = os.path.join(_root, "Pyro", "vm", "pyrovm_go.exe")
 
+C_VM_BIN = os.path.join(_root, "Pyro", "vm", "pyrovm.exe")
+_SRC = [os.path.join(_root, "Pyro", "vm", "main.c"),
+        os.path.join(_root, "Pyro", "vm", "pyro_runtime.c")]
+# pyro_runtime.c uses sockets for http_serve(), so Windows links winsock too.
+_SYSLIBS = ["-lm"] + (["-lws2_32"] if sys.platform == "win32" else [])
+
+def _c_vm_build_cmd():
+    """Pick a C toolchain: gcc/clang if on PATH, else MSVC via vcvars.
+
+    Both compilers are told to read the sources as UTF-8, so the accented
+    error messages stay byte-identical to the Go VM's — essential for the
+    stderr parity checks below. Returns (cmd, use_shell) or None.
+    """
+    import shutil
+    for cc in ("gcc", "clang", "cc"):
+        if shutil.which(cc):
+            return ([cc, "-O2", "-std=c11", "-finput-charset=UTF-8",
+                     "-fexec-charset=UTF-8", "-o", C_VM_BIN] + _SRC + _SYSLIBS, False)
+    for vc in (r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat",
+               r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat"):
+        if os.path.exists(vc):
+            return (f'call "{vc}" && cl /O2 /utf-8 /Fe:{C_VM_BIN} ' + " ".join(_SRC) + ' ws2_32.lib', True)
+    return None
+
 def compile_c_vm():
     print("Compiling Go VM...")
     go_build = ["go", "build", "-o", GO_VM, os.path.join(_root, "Pyro", "vm", "main.go")]
@@ -27,12 +51,14 @@ def compile_c_vm():
         print("Go VM compilation error:")
         print(res_go.stderr)
         sys.exit(1)
-        
-    print("Compiling C VM...")
-    # /utf-8: keeps the source's UTF-8 literals (accented error messages)
-    # identical to the Go VM's — essential for stderr parity.
-    cmd = 'call "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat" && cl /O2 /utf-8 /Fe:Pyro\\vm\\pyrovm.exe Pyro\\vm\\main.c Pyro\\vm\\pyro_runtime.c'
-    res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+
+    built = _c_vm_build_cmd()
+    if built is None:
+        print("No C toolchain (gcc/clang/cl) found — C VM parity test skipped.")
+        sys.exit(0)
+    cmd, use_shell = built
+    print(f"Compiling C VM ({cmd if use_shell else cmd[0]})...")
+    res = subprocess.run(cmd, shell=use_shell, capture_output=True, text=True)
     if res.returncode != 0:
         print("C VM compilation error:")
         print(res.stdout)
