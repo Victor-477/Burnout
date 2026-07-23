@@ -1,96 +1,110 @@
-# Burnout — the system's compiler
+# ⚡ Burnout — The Multi-Backend Cryo Compiler Engine
 
-**Burnout** is the **compiler program** (Go/Python base): it takes `.cryo` (from
-**CRYO**) and generates the `.pyro` target language (**PYRO** bytecode) — or, as
-alternative targets, Go/C/asm code. It contains the orchestration front-end and
-**all the code generators** (backends).
+[![Version](https://img.shields.io/badge/Version-1.0.0-blue.svg)](__init__.py)
+[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Python](https://img.shields.io/badge/Python-3.8%2B-brightgreen.svg)](pyproject.toml)
 
+**Burnout** is the core compiler engine and command-line orchestration tool for the Cryo language system. It accepts Cryo source files (`.cryo`), performs parsing via the Cryo frontend, executes semantic checks, safety instrumentation, and optimization passes, and emits code for five distinct targets: **Pyro Bytecode (`.pyro`)**, **Native Go**, **Node.js / JavaScript**, **Native C**, and **x86-64 Assembly**.
+
+---
+
+## 📐 Compilation Pipeline
+
+```text
+  [ .cryo Source ]
+          │
+          ▼
+   ┌──────────────┐
+   │ CRYO Frontend│  ──► Lexer → Parser → AST → Semantic Analysis → Security Taint Check
+   └──────────────┘
+          │
+          ▼
+   ┌──────────────┐
+   │ Burnout Engine│ ──► Optimizations (Constant folding, Peephole, Dead-code elimination)
+   └──────────────┘
+          │
+  ┌───────┼───────────┬───────────┬───────────┐
+  ▼       ▼           ▼           ▼           ▼
+[Pyro]  [Go]       [Node.js]     [C]       [ASM]
+(Bytecode) (Native) (CommonJS) (Native)  (x86-64)
 ```
-  .cryo ──►  Burnout: [CRYO front-end] → AST → [backend] ──►  .pyro (the Pyro target) | .go | .c | .s
-```
 
-## Contents
+---
 
-| File | Role |
-|---|---|
-| `cryoc.py` | CLI entry point |
-| `__init__.py` | **Library API** (`import burnout`) + `pyproject.toml` (pip) |
-| `compiler.py` | Orchestration: source → AST (CRYO) → code (backend) → run/build |
-| `codegen_pyro.py` | **Pyro bytecode backend** (`.pyro`) — the custom target language |
-| `codegen_go.py` | Go backend (alternative target; full language + skills/machine) |
-| `codegen_c.py` | Native C backend |
-| `codegen_asm.py` | x86-64 backend (System V and Win64 ABIs) |
-| `codegen_legacy.py` | Legacy Python backend |
-| `runtime/cryo_runtime.c/.h` | C runtime (C/asm backends) |
-| `scripts/build_win64.*` | MinGW build on Windows (asm backend) |
-| `tests/test_smoke.py` | Smoke tests for the generators |
+## 📁 Repository & Component Structure
 
-## Usage (from the project root)
+| Component | Responsibility |
+| :--- | :--- |
+| 📄 [`cryoc.py`](cryoc.py) | **CLI Entry Point:** Command-line driver for compilation, LSP server launch (`--lsp`), and formatting (`fmt`). |
+| 📄 [`compiler.py`](compiler.py) | **Orchestration Driver:** Manages source reading, AST loading, backend dispatching, and binary execution. |
+| 📄 [`codegen_pyro.py`](codegen_pyro.py) | **Pyro Bytecode Generator:** Emits v2 binary bytecode (`.pyro`) for execution on the Go VM or C VM. |
+| 📄 [`codegen_go.py`](codegen_go.py) | **Go Generator:** Emits native Go source code, providing full SaaS, HTTP, and LLM features. |
+| 📄 [`codegen_node.py`](codegen_node.py) | **Node.js Generator:** Emits CommonJS JavaScript for Node.js environments. |
+| 📄 [`codegen_c.py`](codegen_c.py) | **Native C Generator:** Emits safe, high-performance C source files. |
+| 📄 [`codegen_asm.py`](codegen_asm.py) | **x86-64 Assembly Generator:** Emits native assembly for System V AMD64 and Windows x64 ABIs. |
+| 📄 [`lsp.py`](lsp.py) | **Language Server:** Provides JSON-RPC Language Server Protocol (LSP) diagnostics, hover, and definitions. |
+| 📄 [`disasm_pyro.py`](disasm_pyro.py) | **Disassembler:** Decodes `.pyro` binary files into human-readable assembly listings. |
+| 📁 [`runtime/`](runtime/) | **C Runtime:** Native runtime headers (`cryo_runtime.h`) and implementation (`cryo_runtime.c`). |
+| 📁 [`tests/`](tests/) | **Test Suites:** Integration and parity test scripts (`test_smoke.py`, `test_c_vm.py`, `test_selfhost.py`). |
+
+---
+
+## 🛠️ CLI Usage Guide
+
+Execute Burnout directly using Python:
 
 ```bash
-# Pyro target (custom bytecode) — generates .pyro and runs it on the Pyro VM
-python burnout/cryoc.py cryo/examples/example_bytecode.cryo --backend pyro --run
+# 1. Compile and run via the Pyro VM (custom binary bytecode)
+python Burnout/cryoc.py Cryo/examples/example_bytecode.cryo --backend pyro --run --no-banner
 
-# Alternative targets
-python burnout/cryoc.py cryo/examples/app.cryo --backend go --run    # Go
-python burnout/cryoc.py cryo/examples/app.cryo --backend c            # C
-python burnout/cryoc.py cryo/examples/app.cryo --backend asm          # x86-64
+# 2. Compile and run via the Go backend (supports LLM & concurrency features)
+python Burnout/cryoc.py Cryo/examples/example_go.cryo --backend go --run --no-banner
 
-python burnout/tests/test_smoke.py
+# 3. Perform static security audit and vulnerability analysis
+python Burnout/cryoc.py Cryo/examples/example_saas.cryo --audit
+
+# 4. Format a Cryo source file in place
+python Burnout/cryoc.py fmt Cryo/examples/example_calc.cryo --write
+
+# 5. Launch the Language Server Protocol (LSP) daemon
+python Burnout/cryoc.py --lsp
 ```
 
-## Use as a library (import/call from projects)
+---
 
-Burnout is also an **importable Python package**. Install in editable mode from
-this folder (inside the Cryo monorepo, with `../cryo` and `../pyro` alongside):
+## 🐍 Using Burnout as a Python Library
 
-```bash
-cd burnout
-pip install -e .
-```
-
-Then, in any project:
+Burnout can be installed as an importable Python library (`pip install -e .`):
 
 ```python
 import burnout
 
-# Compile a .cryo string -> target code
-#   go/c/asm -> str   |   pyro -> bytes (bytecode)
-go_src = burnout.compile_source('print("ola");', backend="go")
-bc     = burnout.compile_source('print(1 + 2);', backend="pyro")
+# Compile a Cryo string directly to Go or Pyro Bytecode
+go_code = burnout.compile_source('print("Hello from Cryo 1.0!");', backend="go")
+pyro_bytes = burnout.compile_source('print(42);', backend="pyro")
 
-# Compile a file and (optionally) run it
-burnout.compile_file("app.cryo", backend="pyro", run=True)
-burnout.run("app.cryo", backend="go")          # shortcut for compile_file(run=True)
+# Tokenize and parse source code programmatically
+tokens = burnout.tokenize('int x = 10;')
+ast = burnout.parse_ast('int x = 10;')
 
-# Front-end: tokens and AST
-toks = burnout.tokenize(open("app.cryo").read())
-ast  = burnout.parse_ast(open("app.cryo").read())
-
-# Disassemble an already-generated .pyro
-print(burnout.disassemble(open("build/app.pyro", "rb").read()))
+# Disassemble compiled Pyro bytecode bytes
+disassembly_listing = burnout.disassemble(pyro_bytes)
+print(disassembly_listing)
 ```
 
-It also works as an executable module (same CLI as `cryoc.py`):
+---
+
+## 🧪 Testing and Quality Assurance
+
+Run the test suite from the repository root:
 
 ```bash
-python -m burnout app.cryo --backend go --run
-cryoc app.cryo --run           # console-script installed by pip
+# Run 410+ frontend, backend, and security assertions
+python Burnout/tests/test_smoke.py
+
+# Verify byte-level execution parity between the C VM and Go VM
+python Burnout/tests/test_c_vm.py
+
+# Verify compiler self-hosting stages
+python Burnout/tests/test_selfhost.py
 ```
-
-> **Public API:** `compile_source`, `compile_file`, `run`, `parse_ast`,
-> `tokenize`, `disassemble`, `default_abi`, `BACKENDS`, `__version__`, and the
-> exceptions `LexerError` / `ParseError` / `CodeGen*Error`.
->
-> **Note (Windows):** if `pip install -e .` fails writing `Scripts\cryoc.exe`
-> (file in use), the package is still importable — use `python -m burnout` as the
-> CLI, or repeat the install with the terminal closed.
-
-Generated artifacts go to `build/` at the root (git-ignored). `--backend pyro --run`
-builds the Pyro VM (`pyro/vm`) once and runs the `.pyro`.
-
-## Dependencies
-
-Burnout depends on **CRYO** (front-end: lexer/parser/AST/analysis) and, for the
-Pyro target, invokes the **Pyro VM** in `pyro/vm`. It will be distributed as its
-own repository, consuming CRYO as a dependency.
