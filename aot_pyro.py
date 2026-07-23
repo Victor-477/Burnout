@@ -4,18 +4,22 @@
 #  Translates a .pyro program into a standalone C file that runs WITHOUT the
 #  VM and without the .pyro at runtime (the "zero-dependency" native route).
 #
-#  Each Pyro function becomes a C function; the stack machine is lowered to
-#  straight-line C over a small per-call value stack, with jump targets as
-#  `goto` labels. The value model and the 28 native builtins are reused from
-#  the Pyro C runtime (pyro/vm/pyro_runtime.{c,h}) — identical semantics.
+#  Model mirrors the VM (pyro/vm/main.c): a single global value stack and a
+#  single global locals stack with a frame stack, so exceptions unwind — and
+#  release — across C frames exactly as the VM unwinds its call stack. Each
+#  Pyro function becomes a `void fn_i(void)` that sets up its frame, pops its
+#  args off the value stack, runs the opcodes as straight-line C (jump targets
+#  are `goto` labels), and on RET releases its locals and leaves the result on
+#  the value stack. The value model and 28 native builtins come from the Pyro
+#  C runtime (pyro/vm/pyro_runtime.{c,h}) — identical semantics.
 #
 #  Build:  gcc -O2 out.c pyro/vm/pyro_runtime.c -lm -o out
 #  Usage:  python burnout/aot_pyro.py program.pyro > out.c
 #
-#  try/catch/throw are lowered with setjmp/longjmp over a global handler
-#  stack (TRYPUSH = setjmp; THROW / failed assert = longjmp to the nearest
-#  handler, else fatal), so exceptions unwind across C function frames
-#  exactly as the VM unwinds its call stack.
+#  try/catch/throw: TRYPUSH = setjmp (records value-sp / frame-fp / locals-sp /
+#  catch slot); THROW and failed asserts longjmp to the nearest handler, which
+#  releases every value above the saved sp and the locals of every frame above
+#  the saved fp before entering the catch body (leak-free), or fatal if none.
 # ============================================================
 import os
 import struct
@@ -31,41 +35,8 @@ for _p in (_here, os.path.join(_root, "Cryo")):
 import codegen_pyro as bc      # OP_* constants, NATIVES, operand sizes
 import disasm_pyro             # reuse the .pyro loader
 
-# opcode -> mnemonic (for readable errors / comments)
 _OPNAME = {v: k[3:] for k, v in vars(bc).items()
            if k.startswith('OP_') and isinstance(v, int)}
-
-# static stack-depth delta per opcode (the generator emits stack-balanced code,
-# so a linear walk yields a safe per-function upper bound)
-def _delta(op, operand):
-    if op in (bc.OP_CONST, bc.OP_TRUE, bc.OP_FALSE, bc.OP_NULL, bc.OP_LOAD):
-        return +1
-    if op in (bc.OP_POP, bc.OP_STORE, bc.OP_JMPF, bc.OP_JMPT, bc.OP_PRINT,
-              bc.OP_HAS, bc.OP_INDEX, bc.OP_COALESCE, bc.OP_THROW):
-        return -1
-    if op in (bc.OP_ADD, bc.OP_SUB, bc.OP_MUL, bc.OP_DIV, bc.OP_MOD,
-              bc.OP_BAND, bc.OP_BOR, bc.OP_BXOR, bc.OP_SHL, bc.OP_SHR,
-              bc.OP_EQ, bc.OP_NE, bc.OP_LT, bc.OP_GT, bc.OP_LE, bc.OP_GE):
-        return -1
-    if op in (bc.OP_NEG, bc.OP_BNOT, bc.OP_NOT, bc.OP_LEN, bc.OP_KEYS,
-              bc.OP_APPEND, bc.OP_UNWRAP, bc.OP_JMP, bc.OP_HALT,
-              bc.OP_TRYPOP, bc.OP_PRINTLN):
-        return 0
-    if op == bc.OP_ASSERT:
-        return -2
-    if op == bc.OP_SETIDX:
-        return -3
-    if op == bc.OP_RET:
-        return -1
-    if op == bc.OP_NEWARR:
-        return 1 - struct.unpack('<H', operand)[0]
-    if op == bc.OP_NEWMAP:
-        return 1 - 2 * struct.unpack('<H', operand)[0]
-    if op == bc.OP_CALL:
-        return 1 - operand[2]
-    if op == bc.OP_NATIVE:
-        return 1 - operand[1]
-    return 0
 
 
 def _c_bytes(b: bytes) -> str:
@@ -74,7 +45,6 @@ def _c_bytes(b: bytes) -> str:
 
 
 def _func_range(funcs, i, codelen):
-    """[entry, end) byte range of function i in the code section."""
     entry = funcs[i]['entry']
     ends = [f['entry'] for f in funcs if f['entry'] > entry]
     return entry, (min(ends) if ends else codelen)
@@ -87,10 +57,7 @@ def _jump_targets(code, entry, end):
     while i < end:
         op = code[i]
         size = 1 + bc._OPERAND.get(op, 0)
-        if op in (bc.OP_JMP, bc.OP_JMPF, bc.OP_JMPT):
-            rel = struct.unpack('<i', code[i+1:i+5])[0]
-            targets.add(i + size + rel)
-        elif op == bc.OP_TRYPUSH:            # i32 catch-rel + u16 slot
+        if op in (bc.OP_JMP, bc.OP_JMPF, bc.OP_JMPT, bc.OP_TRYPUSH):
             rel = struct.unpack('<i', code[i+1:i+5])[0]
             targets.add(i + size + rel)
         i += size
@@ -101,21 +68,15 @@ def _emit_func(out, code, consts, funcs, fi, codelen):
     f = funcs[fi]
     entry, end = _func_range(funcs, fi, codelen)
     targets = _jump_targets(code, entry, end)
-
-    # per-function max stack depth
-    depth = 0; maxd = 0; i = entry
-    while i < end:
-        op = code[i]; size = 1 + bc._OPERAND.get(op, 0)
-        depth += _delta(op, code[i+1:i+size])
-        if depth > maxd: maxd = depth
-        i += size
-    stacksz = maxd + 4
-
     nloc = f['nlocals']
-    out.append(f"static Value fn_{fi}(Value* args, int argc) {{  // {f['name']}")
-    out.append(f"    Value L[{max(nloc,1)}]; Value S[{max(stacksz,1)}]; int sp = 0;")
-    out.append(f"    for (int i = 0; i < {nloc}; i++) L[i] = (i < argc) ? args[i] : val_null();")
-    out.append("    (void)argc; (void)S; (void)sp;")
+    nparams = f['nparams']
+
+    out.append(f"static void fn_{fi}(void) {{  // {f['name']}  (params={nparams}, locals={nloc})")
+    out.append("    int base = g_locsp; g_locsp += %d;" % nloc)
+    out.append("    g_fbase[g_fp] = base; g_fnn[g_fp] = %d; g_fp++;" % nloc)
+    out.append("    for (int i = 0; i < %d; i++) g_locals[base + i] = val_null();" % nloc)
+    out.append("    for (int i = %d - 1; i >= 0; i--) g_locals[base + i] = g_stack[--g_sp];" % nparams)
+    out.append("    (void)base;")
 
     i = entry
     while i < end:
@@ -124,121 +85,127 @@ def _emit_func(out, code, consts, funcs, fi, codelen):
         operand = code[i+1:i+size]
         if i in targets:
             out.append(f"  L{i}: ;")
-        c = _emit_op(op, operand, i, size, consts, funcs)
+        c = _emit_op(op, operand, i, size, consts, funcs, nloc)
         if c is None:
-            raise ValueError(f"AOT: opcode {_OPNAME.get(op,hex(op))} not supported "
-                             f"(try/catch is not yet lowered by the AOT backend)")
+            raise ValueError(f"AOT: opcode {_OPNAME.get(op, hex(op))} not supported")
         out.append("    " + c)
         i += size
-    out.append("    return val_null();")
+    # every function ends with an explicit RET in the bytecode; this is a guard
+    out.append("    { for (int i = 0; i < %d; i++) release_value(g_locals[base + i]); "
+               "g_locsp = base; g_fp--; g_stack[g_sp++] = val_null(); return; }" % nloc)
     out.append("}")
     out.append("")
 
 
-def _emit_op(op, operand, off, size, consts, funcs):
+def _emit_op(op, operand, off, size, consts, funcs, nloc):
     tgt = None
     if op in (bc.OP_JMP, bc.OP_JMPF, bc.OP_JMPT):
         rel = struct.unpack('<i', operand[:4])[0]
         tgt = off + size + rel
     if op == bc.OP_CONST:
         idx = struct.unpack('<H', operand)[0]
-        return f"{{ retain_value(K[{idx}]); S[sp++] = K[{idx}]; }}"
-    if op == bc.OP_TRUE:   return "S[sp++] = val_bool(true);"
-    if op == bc.OP_FALSE:  return "S[sp++] = val_bool(false);"
-    if op == bc.OP_NULL:   return "S[sp++] = val_null();"
-    if op == bc.OP_POP:    return "release_value(S[--sp]);"
+        return f"{{ retain_value(K[{idx}]); g_stack[g_sp++] = K[{idx}]; }}"
+    if op == bc.OP_TRUE:   return "g_stack[g_sp++] = val_bool(true);"
+    if op == bc.OP_FALSE:  return "g_stack[g_sp++] = val_bool(false);"
+    if op == bc.OP_NULL:   return "g_stack[g_sp++] = val_null();"
+    if op == bc.OP_POP:    return "release_value(g_stack[--g_sp]);"
     if op == bc.OP_LOAD:
         s = struct.unpack('<H', operand)[0]
-        return f"{{ retain_value(L[{s}]); S[sp++] = L[{s}]; }}"
+        return f"{{ retain_value(g_locals[base+{s}]); g_stack[g_sp++] = g_locals[base+{s}]; }}"
     if op == bc.OP_STORE:
         s = struct.unpack('<H', operand)[0]
-        return f"{{ release_value(L[{s}]); L[{s}] = S[--sp]; }}"
+        return f"{{ release_value(g_locals[base+{s}]); g_locals[base+{s}] = g_stack[--g_sp]; }}"
     if op in (bc.OP_ADD, bc.OP_SUB, bc.OP_MUL, bc.OP_DIV, bc.OP_MOD,
               bc.OP_BAND, bc.OP_BOR, bc.OP_BXOR, bc.OP_SHL, bc.OP_SHR,
               bc.OP_EQ, bc.OP_NE, bc.OP_LT, bc.OP_GT, bc.OP_LE, bc.OP_GE):
-        return (f"{{ Value b = S[--sp]; Value a = S[--sp]; "
-                f"S[sp++] = bin_op({op}, a, b); release_value(a); release_value(b); }}")
+        return (f"{{ Value b = g_stack[--g_sp]; Value a = g_stack[--g_sp]; "
+                f"g_stack[g_sp++] = bin_op({op}, a, b); release_value(a); release_value(b); }}")
     if op == bc.OP_NEG:
-        return ("{ Value a = S[sp-1]; S[sp-1] = (a.kind == VAL_FLOAT) ? "
+        return ("{ Value a = g_stack[g_sp-1]; g_stack[g_sp-1] = (a.kind == VAL_FLOAT) ? "
                 "val_float(-a.as.f) : val_int(-a.as.i); }")
     if op == bc.OP_BNOT:
-        return "{ Value a = S[sp-1]; S[sp-1] = val_int(~a.as.i); }"
+        return "{ Value a = g_stack[g_sp-1]; g_stack[g_sp-1] = val_int(~a.as.i); }"
     if op == bc.OP_NOT:
-        return ("{ Value a = S[sp-1]; bool t = value_truthy(a); "
-                "release_value(a); S[sp-1] = val_bool(!t); }")
+        return ("{ Value a = g_stack[g_sp-1]; bool t = value_truthy(a); "
+                "release_value(a); g_stack[g_sp-1] = val_bool(!t); }")
     if op == bc.OP_JMP:    return f"goto L{tgt};"
     if op == bc.OP_JMPF:
-        return f"{{ Value a = S[--sp]; bool t = value_truthy(a); release_value(a); if (!t) goto L{tgt}; }}"
+        return f"{{ Value a = g_stack[--g_sp]; bool t = value_truthy(a); release_value(a); if (!t) goto L{tgt}; }}"
     if op == bc.OP_JMPT:
-        return f"{{ Value a = S[--sp]; bool t = value_truthy(a); release_value(a); if (t) goto L{tgt}; }}"
+        return f"{{ Value a = g_stack[--g_sp]; bool t = value_truthy(a); release_value(a); if (t) goto L{tgt}; }}"
     if op == bc.OP_CALL:
-        fi = struct.unpack('<H', operand[:2])[0]; argc = operand[2]
-        return f"{{ Value r = fn_{fi}(&S[sp-{argc}], {argc}); sp -= {argc}; S[sp++] = r; }}"
+        fi = struct.unpack('<H', operand[:2])[0]
+        return f"fn_{fi}();"                       # callee pops its args, leaves result on g_stack
     if op == bc.OP_RET:
-        return "{ Value r = S[--sp]; for (int i = 0; i < (int)(sizeof(L)/sizeof(L[0])); i++) release_value(L[i]); return r; }"
+        return ("{ Value r = g_stack[--g_sp]; "
+                "for (int i = 0; i < %d; i++) release_value(g_locals[base + i]); "
+                "g_locsp = base; g_fp--; g_stack[g_sp++] = r; return; }" % nloc)
     if op == bc.OP_PRINT:
-        return "{ Value v = S[--sp]; char* s = value_to_string(v); printf(\"%s\\n\", s); free(s); release_value(v); }"
+        return "{ Value v = g_stack[--g_sp]; char* s = value_to_string(v); printf(\"%s\\n\", s); free(s); release_value(v); }"
     if op == bc.OP_PRINTLN: return "printf(\"\\n\");"
     if op == bc.OP_ASSERT:
-        return ("{ Value cond = S[--sp]; Value msg = S[--sp]; if (!value_truthy(cond)) "
+        return ("{ Value cond = g_stack[--g_sp]; Value msg = g_stack[--g_sp]; if (!value_truthy(cond)) "
                 "{ char* m = value_to_string(msg); char e[1100]; snprintf(e, sizeof(e), "
                 "\"[Cryo Assert] %s\", m); free(m); Value ev = val_str(e, (int64_t)strlen(e)); "
                 "release_value(cond); release_value(msg); aot_raise(ev); } "
                 "release_value(cond); release_value(msg); }")
     if op == bc.OP_NEWARR:
         n = struct.unpack('<H', operand)[0]
-        return (f"{{ RcArray* a = rc_array_new(); int base = sp - {n}; "
-                f"for (int i = 0; i < {n}; i++) {{ rc_array_push(a, S[base+i]); release_value(S[base+i]); }} "
-                f"sp = base; S[sp++] = val_array(a); }}")
+        return (f"{{ RcArray* a = rc_array_new(); int b0 = g_sp - {n}; "
+                f"for (int i = 0; i < {n}; i++) {{ rc_array_push(a, g_stack[b0+i]); release_value(g_stack[b0+i]); }} "
+                f"g_sp = b0; g_stack[g_sp++] = val_array(a); }}")
     if op == bc.OP_NEWMAP:
         n = struct.unpack('<H', operand)[0]
-        return (f"{{ RcMap* m = rc_map_new(); int base = sp - {2*n}; "
-                f"for (int i = 0; i < {n}; i++) {{ Value k = S[base+2*i]; Value v = S[base+2*i+1]; "
+        return (f"{{ RcMap* m = rc_map_new(); int b0 = g_sp - {2*n}; "
+                f"for (int i = 0; i < {n}; i++) {{ Value k = g_stack[b0+2*i]; Value v = g_stack[b0+2*i+1]; "
                 f"rc_map_set(m, k, v); release_value(k); release_value(v); }} "
-                f"sp = base; S[sp++] = val_map(m); }}")
+                f"g_sp = b0; g_stack[g_sp++] = val_map(m); }}")
     if op == bc.OP_INDEX:
-        return ("{ Value key = S[--sp]; Value cont = S[--sp]; S[sp++] = index_get(cont, key); "
-                "release_value(key); release_value(cont); }")
+        return ("{ Value key = g_stack[--g_sp]; Value cont = g_stack[--g_sp]; "
+                "g_stack[g_sp++] = index_get(cont, key); release_value(key); release_value(cont); }")
     if op == bc.OP_SETIDX:
-        return ("{ Value val = S[--sp]; Value key = S[--sp]; Value cont = S[--sp]; "
+        return ("{ Value val = g_stack[--g_sp]; Value key = g_stack[--g_sp]; Value cont = g_stack[--g_sp]; "
                 "index_set(cont, key, val); release_value(val); release_value(key); release_value(cont); }")
     if op == bc.OP_LEN:
-        return "{ Value v = S[sp-1]; int64_t n = value_length(v); release_value(v); S[sp-1] = val_int(n); }"
+        return "{ Value v = g_stack[g_sp-1]; int64_t n = value_length(v); release_value(v); g_stack[g_sp-1] = val_int(n); }"
     if op == bc.OP_APPEND:
-        return ("{ Value val = S[--sp]; Value arr = S[sp-1]; if (arr.kind != VAL_ARRAY) fatal(\"push on a non-array value\"); "
-                "rc_array_push(arr.as.arr, val); release_value(val); S[sp++] = val_int(arr.as.arr->length); }")
+        return ("{ Value val = g_stack[--g_sp]; Value arr = g_stack[g_sp-1]; if (arr.kind != VAL_ARRAY) fatal(\"push on a non-array value\"); "
+                "rc_array_push(arr.as.arr, val); release_value(val); g_stack[g_sp++] = val_int(arr.as.arr->length); }")
     if op == bc.OP_HAS:
-        return ("{ Value key = S[--sp]; Value mp = S[sp-1]; bool h = (mp.kind == VAL_MAP) && rc_map_has(mp.as.map, key); "
-                "release_value(key); release_value(mp); S[sp-1] = val_bool(h); }")
+        return ("{ Value key = g_stack[--g_sp]; Value mp = g_stack[g_sp-1]; bool h = (mp.kind == VAL_MAP) && rc_map_has(mp.as.map, key); "
+                "release_value(key); release_value(mp); g_stack[g_sp-1] = val_bool(h); }")
     if op == bc.OP_KEYS:
-        return ("{ Value mp = S[sp-1]; if (mp.kind != VAL_MAP) fatal(\"keys() applied to a non-map value\"); "
-                "RcArray* k = rc_map_keys_sorted(mp.as.map); release_value(mp); S[sp-1] = val_array(k); }")
+        return ("{ Value mp = g_stack[g_sp-1]; if (mp.kind != VAL_MAP) fatal(\"keys() applied to a non-map value\"); "
+                "RcArray* k = rc_map_keys_sorted(mp.as.map); release_value(mp); g_stack[g_sp-1] = val_array(k); }")
     if op == bc.OP_NATIVE:
         nid, argc = operand[0], operand[1]
-        return (f"{{ Value r = native({nid}, &S[sp-{argc}], {argc}); "
-                f"for (int i = 0; i < {argc}; i++) release_value(S[sp-{argc}+i]); sp -= {argc}; S[sp++] = r; }}")
+        return (f"{{ Value r = native({nid}, &g_stack[g_sp-{argc}], {argc}); "
+                f"for (int i = 0; i < {argc}; i++) release_value(g_stack[g_sp-{argc}+i]); g_sp -= {argc}; g_stack[g_sp++] = r; }}")
     if op == bc.OP_COALESCE:
-        return ("{ Value b = S[--sp]; Value a = S[--sp]; if (a.kind == VAL_NULL) { S[sp++] = b; release_value(a); } "
-                "else { S[sp++] = a; release_value(b); } }")
+        return ("{ Value b = g_stack[--g_sp]; Value a = g_stack[--g_sp]; if (a.kind == VAL_NULL) { g_stack[g_sp++] = b; release_value(a); } "
+                "else { g_stack[g_sp++] = a; release_value(b); } }")
     if op == bc.OP_UNWRAP:
-        return ("{ Value a = S[sp-1]; if (a.kind == VAL_NULL) fatal(\"[Cryo Security] unwrap of null value\"); }")
+        return "{ Value a = g_stack[g_sp-1]; if (a.kind == VAL_NULL) fatal(\"[Cryo Security] unwrap of null value\"); }"
     if op == bc.OP_TRYPUSH:
         rel = struct.unpack('<i', operand[:4])[0]
         slot = struct.unpack('<H', operand[4:6])[0]
         catch = off + size + rel
-        return (f"{{ int _h = aot_hp++; aot_handlers[_h].saved_sp = sp; aot_handlers[_h].locals = L; "
-                f"aot_handlers[_h].slot = {slot}; "
-                f"if (setjmp(aot_handlers[_h].env)) {{ AotHandler* h = &aot_handlers[aot_hp - 1]; "
-                f"sp = h->saved_sp; "
-                f"if (h->slot != 0xFFFF) {{ release_value(L[h->slot]); L[h->slot] = aot_thrown; }} "
-                f"else release_value(aot_thrown); aot_hp--; goto L{catch}; }} }}")
+        return (f"{{ int _h = g_hp++; g_handlers[_h].saved_sp = g_sp; g_handlers[_h].saved_fp = g_fp; "
+                f"g_handlers[_h].saved_locsp = g_locsp; g_handlers[_h].slot = {slot}; "
+                f"if (setjmp(g_handlers[_h].env)) {{ AotHandler* h = &g_handlers[g_hp - 1]; "
+                f"while (g_sp > h->saved_sp) release_value(g_stack[--g_sp]); "
+                f"while (g_fp > h->saved_fp) {{ int b = g_fbase[g_fp-1]; int n = g_fnn[g_fp-1]; "
+                f"for (int i = 0; i < n; i++) release_value(g_locals[b+i]); g_fp--; }} "
+                f"g_locsp = h->saved_locsp; base = g_fbase[g_fp-1]; "
+                f"if (h->slot != 0xFFFF) {{ release_value(g_locals[base + h->slot]); g_locals[base + h->slot] = aot_thrown; }} "
+                f"else release_value(aot_thrown); g_hp--; goto L{catch}; }} }}")
     if op == bc.OP_TRYPOP:
-        return "if (aot_hp > 0) aot_hp--;"          # try completed normally
+        return "if (g_hp > 0) g_hp--;"
     if op == bc.OP_THROW:
-        return "{ Value v = S[--sp]; aot_raise(v); }"
+        return "{ Value v = g_stack[--g_sp]; aot_raise(v); }"
     if op == bc.OP_HALT:
         return ";"
-    return None  # genuinely unsupported opcode
+    return None
 
 
 def compile_to_c(data: bytes) -> str:
@@ -258,14 +225,15 @@ def compile_to_c(data: bytes) -> str:
     out.append("bool pyro_sandboxed = false;")
     out.append("void fatal(const char* msg) { fprintf(stderr, \"[Pyro AOT] %s\\n\", msg); exit(70); }")
     out.append("")
-    # try/catch: a global handler stack; THROW longjmps to the nearest handler
-    # (works across C function frames, mirroring the VM's exception unwinding).
-    out.append("typedef struct { jmp_buf env; int saved_sp; Value* locals; int slot; } AotHandler;")
-    out.append("static AotHandler aot_handlers[256];")
-    out.append("static int aot_hp = 0;")
+    # global machine state (single value stack, single locals stack, frame stack)
+    out.append("static Value g_stack[65536]; static int g_sp = 0;")
+    out.append("static Value g_locals[65536]; static int g_locsp = 0;")
+    out.append("static int g_fbase[8192]; static int g_fnn[8192]; static int g_fp = 0;")
+    out.append("typedef struct { jmp_buf env; int saved_sp; int saved_fp; int saved_locsp; int slot; } AotHandler;")
+    out.append("static AotHandler g_handlers[1024]; static int g_hp = 0;")
     out.append("static Value aot_thrown;")
     out.append("static void aot_raise(Value v) {")
-    out.append("    if (aot_hp > 0) { aot_thrown = v; longjmp(aot_handlers[aot_hp - 1].env, 1); }")
+    out.append("    if (g_hp > 0) { aot_thrown = v; longjmp(g_handlers[g_hp - 1].env, 1); }")
     out.append("    char* s = value_to_string(v); char e[1100];")
     out.append("    snprintf(e, sizeof(e), \"uncaught exception: %s\", s); free(s); fatal(e);")
     out.append("}")
@@ -286,7 +254,7 @@ def compile_to_c(data: bytes) -> str:
     out.append("")
 
     for i in range(len(funcs)):
-        out.append(f"static Value fn_{i}(Value*, int);")
+        out.append(f"static void fn_{i}(void);")
     out.append("")
 
     for i in range(len(funcs)):
@@ -294,8 +262,8 @@ def compile_to_c(data: bytes) -> str:
 
     out.append("int main(void) {")
     out.append("    setup_consts();")
-    out.append(f"    Value r = fn_{p['entryfn']}(0, 0);")
-    out.append("    release_value(r);")
+    out.append(f"    fn_{p['entryfn']}();")
+    out.append("    if (g_sp > 0) release_value(g_stack[--g_sp]);   // discard entry return")
     out.append("    return 0;")
     out.append("}")
     return "\n".join(out) + "\n"
