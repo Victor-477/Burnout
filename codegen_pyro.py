@@ -108,6 +108,8 @@ NATIVES = {
     'http_get':  (24, 1), 'http_post': (25, 2), 'sleep': (26, 1),
     # ── Binary I/O (Phase 9.3): writes int[] as bytes to a file ──
     'write_bytes': (27, 2),
+    # ── File I/O + argv (Phase 9.6): self-hosted front-end needs these ──
+    'read_file': (28, 1), 'args': (29, 0),
 }
 
 def _isize(op: int) -> int:
