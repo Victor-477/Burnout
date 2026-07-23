@@ -12,8 +12,10 @@
 #  Build:  gcc -O2 out.c pyro/vm/pyro_runtime.c -lm -o out
 #  Usage:  python burnout/aot_pyro.py program.pyro > out.c
 #
-#  Not yet lowered: try/catch/throw (TRYPUSH/TRYPOP/THROW) — needs exception
-#  unwinding across frames; emit a clear error if encountered.
+#  try/catch/throw are lowered with setjmp/longjmp over a global handler
+#  stack (TRYPUSH = setjmp; THROW / failed assert = longjmp to the nearest
+#  handler, else fatal), so exceptions unwind across C function frames
+#  exactly as the VM unwinds its call stack.
 # ============================================================
 import os
 import struct
@@ -39,7 +41,7 @@ def _delta(op, operand):
     if op in (bc.OP_CONST, bc.OP_TRUE, bc.OP_FALSE, bc.OP_NULL, bc.OP_LOAD):
         return +1
     if op in (bc.OP_POP, bc.OP_STORE, bc.OP_JMPF, bc.OP_JMPT, bc.OP_PRINT,
-              bc.OP_HAS, bc.OP_INDEX, bc.OP_COALESCE):
+              bc.OP_HAS, bc.OP_INDEX, bc.OP_COALESCE, bc.OP_THROW):
         return -1
     if op in (bc.OP_ADD, bc.OP_SUB, bc.OP_MUL, bc.OP_DIV, bc.OP_MOD,
               bc.OP_BAND, bc.OP_BOR, bc.OP_BXOR, bc.OP_SHL, bc.OP_SHR,
@@ -86,6 +88,9 @@ def _jump_targets(code, entry, end):
         op = code[i]
         size = 1 + bc._OPERAND.get(op, 0)
         if op in (bc.OP_JMP, bc.OP_JMPF, bc.OP_JMPT):
+            rel = struct.unpack('<i', code[i+1:i+5])[0]
+            targets.add(i + size + rel)
+        elif op == bc.OP_TRYPUSH:            # i32 catch-rel + u16 slot
             rel = struct.unpack('<i', code[i+1:i+5])[0]
             targets.add(i + size + rel)
         i += size
@@ -177,7 +182,8 @@ def _emit_op(op, operand, off, size, consts, funcs):
     if op == bc.OP_ASSERT:
         return ("{ Value cond = S[--sp]; Value msg = S[--sp]; if (!value_truthy(cond)) "
                 "{ char* m = value_to_string(msg); char e[1100]; snprintf(e, sizeof(e), "
-                "\"[Cryo Assert] %s\", m); free(m); fatal(e); } "
+                "\"[Cryo Assert] %s\", m); free(m); Value ev = val_str(e, (int64_t)strlen(e)); "
+                "release_value(cond); release_value(msg); aot_raise(ev); } "
                 "release_value(cond); release_value(msg); }")
     if op == bc.OP_NEWARR:
         n = struct.unpack('<H', operand)[0]
@@ -216,9 +222,23 @@ def _emit_op(op, operand, off, size, consts, funcs):
                 "else { S[sp++] = a; release_value(b); } }")
     if op == bc.OP_UNWRAP:
         return ("{ Value a = S[sp-1]; if (a.kind == VAL_NULL) fatal(\"[Cryo Security] unwrap of null value\"); }")
+    if op == bc.OP_TRYPUSH:
+        rel = struct.unpack('<i', operand[:4])[0]
+        slot = struct.unpack('<H', operand[4:6])[0]
+        catch = off + size + rel
+        return (f"{{ int _h = aot_hp++; aot_handlers[_h].saved_sp = sp; aot_handlers[_h].locals = L; "
+                f"aot_handlers[_h].slot = {slot}; "
+                f"if (setjmp(aot_handlers[_h].env)) {{ AotHandler* h = &aot_handlers[aot_hp - 1]; "
+                f"sp = h->saved_sp; "
+                f"if (h->slot != 0xFFFF) {{ release_value(L[h->slot]); L[h->slot] = aot_thrown; }} "
+                f"else release_value(aot_thrown); aot_hp--; goto L{catch}; }} }}")
+    if op == bc.OP_TRYPOP:
+        return "if (aot_hp > 0) aot_hp--;"          # try completed normally
+    if op == bc.OP_THROW:
+        return "{ Value v = S[--sp]; aot_raise(v); }"
     if op == bc.OP_HALT:
         return ";"
-    return None  # unsupported (e.g. TRYPUSH/TRYPOP/THROW)
+    return None  # genuinely unsupported opcode
 
 
 def compile_to_c(data: bytes) -> str:
@@ -232,10 +252,23 @@ def compile_to_c(data: bytes) -> str:
     out.append("#include <stdio.h>")
     out.append("#include <stdlib.h>")
     out.append("#include <string.h>")
+    out.append("#include <setjmp.h>")
     out.append('#include "pyro_runtime.h"')
     out.append("")
     out.append("bool pyro_sandboxed = false;")
     out.append("void fatal(const char* msg) { fprintf(stderr, \"[Pyro AOT] %s\\n\", msg); exit(70); }")
+    out.append("")
+    # try/catch: a global handler stack; THROW longjmps to the nearest handler
+    # (works across C function frames, mirroring the VM's exception unwinding).
+    out.append("typedef struct { jmp_buf env; int saved_sp; Value* locals; int slot; } AotHandler;")
+    out.append("static AotHandler aot_handlers[256];")
+    out.append("static int aot_hp = 0;")
+    out.append("static Value aot_thrown;")
+    out.append("static void aot_raise(Value v) {")
+    out.append("    if (aot_hp > 0) { aot_thrown = v; longjmp(aot_handlers[aot_hp - 1].env, 1); }")
+    out.append("    char* s = value_to_string(v); char e[1100];")
+    out.append("    snprintf(e, sizeof(e), \"uncaught exception: %s\", s); free(s); fatal(e);")
+    out.append("}")
     out.append("")
     out.append(f"static Value K[{max(len(consts),1)}];")
     out.append("static void setup_consts(void) {")

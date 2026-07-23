@@ -81,6 +81,11 @@ PROGRAMS = [
                 'print(f(7)); print(f(-1));'),
     ("bitfloat",'print(240 & 15); print(1 << 8); print(255 >> 4); number x = 3.5; print(x * 2.0); '
                 'print(sqrt(16.0));'),
+    ("trycatch", 'fn risky(int n) -> int ={ if (n < 0) { throw("neg"); } return n * 2; } '
+                 'int a = 0; try { a = risky(5); } catch (string e) { a = -1; } print(a); '
+                 'try { a = risky(-3); } catch (string e) { print("caught:" + e); a = -99; } print(a); '
+                 'try { throw("boom"); } catch (string e) { print(e); } finally { print("fin"); } '
+                 'try { assert(false, "nope"); } catch (string e) { print(e); }'),
 ]
 
 def compile_pyro(src, tag):
