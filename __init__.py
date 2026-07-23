@@ -68,15 +68,16 @@ from codegen_go import CodeGenGoError        # noqa: E402
 from codegen_asm import CodeGenAsmError      # noqa: E402
 from codegen_pyro import CodeGenPyroError    # noqa: E402
 from codegen_node import CodeGenNodeError    # noqa: E402
+from codegen_wasm import CodeGenWasmError    # noqa: E402
 
 try:                                          # Pyro bytecode disassembler
     from disasm_pyro import disassemble       # noqa: E402
 except Exception:                             # pragma: no cover
     disassemble = None
 
-__version__ = "0.9.0"
+__version__ = "1.0.0"
 
-BACKENDS = ("go", "pyro", "c", "asm", "node")
+BACKENDS = ("go", "pyro", "c", "asm", "node", "wasm")
 
 
 def tokenize(source):
@@ -123,5 +124,5 @@ __all__ = [
     "Lexer", "Parser",
     "LexerError", "ParseError", "ForeignError",
     "CodeGenError", "CodeGenGoError", "CodeGenAsmError", "CodeGenPyroError",
-    "CodeGenNodeError",
+    "CodeGenNodeError", "CodeGenWasmError",
 ]

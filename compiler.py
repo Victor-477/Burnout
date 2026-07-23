@@ -44,6 +44,7 @@ from codegen_go   import CodeGenGo,   CodeGenGoError     # Go backend
 from codegen_asm  import CodeGenAsm,  CodeGenAsmError    # x86-64 backend
 from codegen_pyro import CodeGenPyro, CodeGenPyroError   # Pyro bytecode backend
 from codegen_node import CodeGenNode, CodeGenNodeError   # Node.js/JS backend
+from codegen_wasm import CodeGenWasm, CodeGenWasmError   # WebAssembly backend
 
 
 BANNER = r"""
@@ -75,6 +76,8 @@ def compile_source(source: str, backend: str, safe: bool,
         return CodeGenGo(safe=safe, sandbox=sandbox).generate(ast)
     if backend == 'node':
         return CodeGenNode(safe=safe).generate(ast)
+    if backend == 'wasm':
+        return CodeGenWasm(safe=safe).generate(ast)   # bytes (.wasm)
     if backend == 'pyro':
         return CodeGenPyro(safe=safe, optimize=optimize,
                            sandbox=sandbox).generate(ast)   # bytes
@@ -247,7 +250,7 @@ def compile_file(input_path: str,
             raise
 
     ext = {'asm': '.s', 'go': '.go', 'pyro': '.pyro',
-           'node': '.js', 'c': '.c'}.get(backend, '.c')
+           'node': '.js', 'c': '.c', 'wasm': '.wasm'}.get(backend, '.c')
     if output_path is None:
         # separates sources (.cryo) from generated artifacts: output goes to build/
         os.makedirs('build', exist_ok=True)
@@ -268,12 +271,12 @@ def compile_file(input_path: str,
     if verbose:
         alvo = {'asm': f'x86-64 asm/{abi}', 'go': 'native Go',
                 'pyro': 'Pyro bytecode', 'node': 'JavaScript (Node)',
-                'c': 'native C'}.get(backend, 'native C')
+                'wasm': 'WebAssembly', 'c': 'native C'}.get(backend, 'native C')
         tam = f"  ({len(code)} bytes)" if isinstance(code, (bytes, bytearray)) else ""
         print(f"✓ [{alvo} / {modo}] generated: {input_path} → {output_path}{tam}")
 
     # ── emit-only: generates source and stops (the build script takes care of the toolchain) ──
-    if emit_only:
+    if emit_only or backend == 'wasm':   # .wasm is a final artifact (loaded by a host/browser)
         return output_path
 
     # ── pyro backend: disassembles and/or runs in the Pyro VM ──
@@ -342,7 +345,7 @@ def main() -> None:
     )
     ap.add_argument('input',           help='Input file (.cryo)')
     ap.add_argument('-o', '--output',  help='Output file (.go/.pyro/.s)')
-    ap.add_argument('--backend', choices=('auto', 'go', 'c', 'asm', 'pyro', 'node'),
+    ap.add_argument('--backend', choices=('auto', 'go', 'c', 'asm', 'pyro', 'node', 'wasm'),
                     default='go',
                     help='Backend: go (default), c, asm, pyro, node, or auto'
                          '(choose the best according to the program)')
@@ -411,6 +414,8 @@ def main() -> None:
         print(f"\n[CodeGen Pyro Error] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenNodeError as e:
         print(f"\n[CodeGen Node Error] {e}", file=sys.stderr); sys.exit(1)
+    except CodeGenWasmError as e:
+        print(f"\n[CodeGen Wasm Error] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenError   as e:
         print(f"\n[CodeGen Error]   {e}", file=sys.stderr); sys.exit(1)
     except Exception      as e:
