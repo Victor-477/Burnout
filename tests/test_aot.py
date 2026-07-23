@@ -82,8 +82,25 @@ PROGRAMS = [
                 'fn f(int x) -> string ={ Res r = x > 0 ? Ok(x) : Err("neg"); '
                 '  match r { Ok(v) => { return "ok:" + to_string(v); } Err(e) => { return e; } } return "?"; } '
                 'print(f(7)); print(f(-1));'),
+    # float ops must use *variables*: the front-end constant-folds literal-only
+    # expressions, so `1.0 - 1.0` never reaches the runtime's float path.
     ("bitfloat",'print(240 & 15); print(1 << 8); print(255 >> 4); number x = 3.5; print(x * 2.0); '
-                'print(sqrt(16.0));'),
+                'print(sqrt(16.0)); number y = 2.5; number o = 1.0; '
+                'print(y - o); print(y + o); print(y / o); print(y % o); print(0.0 - y); '
+                'print(y > o); print(y - o >= 1.5); '
+                # exercises the exact loop the self-hosted codegen uses to pull
+                # the 52 mantissa bits out of a double
+                'number f = 1.0 - o; int mant = 0; int bit = 0; '
+                'while (bit < 8) { f = f * 2.0; mant = mant << 1; '
+                '  if (f >= 1.0) { mant = mant + 1; f = f - 1.0; } bit = bit + 1; } print(mant);'),
+    # OP_APPEND must pop BOTH operands: a push inside one branch of an if would
+    # otherwise leave the two paths at different stack depths.
+    ("stackdisc",'int[] a = []; int i = 0; '
+                 'while (i < 6) { if (i % 2 == 0) { a.push(i); } else { a.push(i * 10); } i = i + 1; } '
+                 'print(len(a)); print(a[0]); print(a[1]); print(a[5]); '
+                 'string[] s = []; s.push("k"); string first = s[0]; '
+                 'string junk = "xxxxxxxx" + to_string(len(s)); print(first); print(s[0]); '
+                 'int n = 0; for (int v in a) { n += v; } print(n);'),
     ("trycatch", 'fn risky(int n) -> int ={ if (n < 0) { throw("neg"); } return n * 2; } '
                  'int a = 0; try { a = risky(5); } catch (string e) { a = -1; } print(a); '
                  'try { a = risky(-3); } catch (string e) { print("caught:" + e); a = -99; } print(a); '

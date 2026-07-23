@@ -169,8 +169,11 @@ def _emit_op(op, operand, off, size, consts, funcs, nloc):
     if op == bc.OP_LEN:
         return "{ Value v = g_stack[g_sp-1]; int64_t n = value_length(v); release_value(v); g_stack[g_sp-1] = val_int(n); }"
     if op == bc.OP_APPEND:
-        return ("{ Value val = g_stack[--g_sp]; Value arr = g_stack[g_sp-1]; if (arr.kind != VAL_ARRAY) fatal(\"push on a non-array value\"); "
-                "rc_array_push(arr.as.arr, val); release_value(val); g_stack[g_sp++] = val_int(arr.as.arr->length); }")
+        # contract: pop val, pop arr -> push new size (net -1). Peeking arr
+        # would strand a slot and desync paths that merge after a conditional push.
+        return ("{ Value val = g_stack[--g_sp]; Value arr = g_stack[--g_sp]; if (arr.kind != VAL_ARRAY) fatal(\"push on a non-array value\"); "
+                "rc_array_push(arr.as.arr, val); release_value(val); int64_t n = arr.as.arr->length; "
+                "release_value(arr); g_stack[g_sp++] = val_int(n); }")
     if op == bc.OP_HAS:
         return ("{ Value key = g_stack[--g_sp]; Value mp = g_stack[g_sp-1]; bool h = (mp.kind == VAL_MAP) && rc_map_has(mp.as.map, key); "
                 "release_value(key); release_value(mp); g_stack[g_sp-1] = val_bool(h); }")

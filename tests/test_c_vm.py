@@ -243,6 +243,54 @@ def test_parity():
         try: os.remove(p)
         except OSError: pass
 
+    # ── runtime semantics parity (regressions) ────────────
+    # These cover bugs the example programs above did not reach:
+    #   * float SUB/DIV/MOD on *variables* (literal-only expressions are
+    #     constant-folded by the front-end and never hit the runtime path)
+    #   * OP_APPEND popping both operands, so a push inside one branch of an
+    #     if leaves both paths at the same stack depth
+    #   * indexing an array must retain, or the element is freed in place
+    print("\n-- runtime semantics parity --")
+    sem = [
+        ("float-arith", 'number y = 2.5; number o = 1.0; print(y - o); print(y + o); '
+                        'print(y * o); print(y / o); print(y % o); print(0.0 - y); '
+                        'print(y - o >= 1.5); print(y - o == 1.5);'),
+        ("float-mantissa", 'number o = 1.0; number f = 1.0 - o; int mant = 0; int bit = 0; '
+                           'while (bit < 12) { f = f * 2.0; mant = mant << 1; '
+                           'if (f >= 1.0) { mant = mant + 1; f = f - 1.0; } bit = bit + 1; } print(mant); '
+                           'number g = to_number("1.5") - o; print(g);'),
+        ("cond-push",   'int[] a = []; int i = 0; '
+                        'while (i < 6) { if (i % 2 == 0) { a.push(i); } else { a.push(i * 10); } i = i + 1; } '
+                        'print(len(a)); print(a[0]); print(a[1]); print(a[5]); '
+                        'int n = 0; for (int v in a) { n += v; } print(n);'),
+        ("index-alias", 'string[] s = []; s.push("keepme"); string first = s[0]; '
+                        'string junk = "filler" + to_string(len(s)); '
+                        'print(first); print(s[0]); print(len(s));'),
+    ]
+    for name, src in sem:
+        with tempfile.NamedTemporaryFile(suffix=".cryo", delete=False, mode="w", encoding="utf-8") as tc:
+            tc.write(src); sc = tc.name
+        with tempfile.NamedTemporaryFile(suffix=".pyro", delete=False) as tp:
+            sp_ = tp.name
+        rc, _o, _e = run_command([sys.executable, CRYOC, sc, "--backend", "pyro",
+                                  "-o", sp_, "--no-banner"])
+        if rc != 0:
+            print(f"[FAIL] {name}: did not compile to pyro"); failed += 1
+        else:
+            g_, go_o, _ = run_command([GO_VM, sp_])
+            c_, c_o, _ = run_command([C_VM, sp_])
+            go_o, c_o = go_o.replace("\r\n", "\n").strip(), c_o.replace("\r\n", "\n").strip()
+            if g_ == c_ and go_o == c_o:
+                print(f"[OK] {name}: Go == C")
+                passed += 1
+            else:
+                print(f"[FAIL] {name} diverged")
+                print(f"  Go={go_o!r}\n  C ={c_o!r}")
+                failed += 1
+        for p in (sc, sp_):
+            try: os.remove(p)
+            except OSError: pass
+
     # ── args() / read_file() parity ───────────────────────
     print("\n-- args/read_file parity --")
     rf_target = os.path.join(_root, "Cryo", "examples", "fullstack", "client.cryo").replace("\\", "/")
