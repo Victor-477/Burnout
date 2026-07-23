@@ -110,6 +110,8 @@ NATIVES = {
     'write_bytes': (27, 2),
     # ── File I/O + argv (Phase 9.6): self-hosted front-end needs these ──
     'read_file': (28, 1), 'args': (29, 0),
+    # ── static HTTP server (Phase 9.6 full-stack backend) ──
+    'http_serve': (30, 2),
 }
 
 def _isize(op: int) -> int:
