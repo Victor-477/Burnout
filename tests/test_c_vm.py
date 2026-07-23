@@ -243,6 +243,100 @@ def test_parity():
         try: os.remove(p)
         except OSError: pass
 
+    # ── args() / read_file() parity ───────────────────────
+    print("\n-- args/read_file parity --")
+    rf_target = os.path.join(_root, "Cryo", "examples", "fullstack", "client.cryo").replace("\\", "/")
+    nat_src = ('string[] a = args(); print("argc=" + to_string(len(a))); '
+               'for (int i = 0; i < len(a); i++) { print(a[i]); } '
+               'print("len=" + to_string(len(read_file("' + rf_target + '")))); '
+               'print("missing=[" + read_file("no/such/file.txt") + "]");')
+    with tempfile.NamedTemporaryFile(suffix=".cryo", delete=False, mode="w", encoding="utf-8") as tc:
+        tc.write(nat_src); nat_cryo = tc.name
+    with tempfile.NamedTemporaryFile(suffix=".pyro", delete=False) as tp:
+        nat_pyro = tp.name
+    rc, _o, _e = run_command([sys.executable, CRYOC, nat_cryo, "--backend", "pyro",
+                              "-o", nat_pyro, "--no-banner"])
+    if rc != 0:
+        print("[FAIL] args/read_file: did not compile to pyro"); failed += 1
+    else:
+        gc_, go_o, _ = run_command([GO_VM, nat_pyro, "alpha", "beta"])
+        cc_, c_o, _ = run_command([C_VM, nat_pyro, "alpha", "beta"])
+        go_o, c_o = go_o.replace("\r\n", "\n").strip(), c_o.replace("\r\n", "\n").strip()
+        # must agree with each other AND actually see the args / read the file
+        want = "argc=2\nalpha\nbeta"
+        if gc_ == cc_ and go_o == c_o and go_o.startswith(want) and "missing=[]" in go_o:
+            print(f"[OK] args/read_file identical (Go == C)")
+            passed += 1
+        else:
+            print("[FAIL] args/read_file diverged")
+            print(f"  exit Go={gc_} C={cc_}")
+            print(f"  stdout Go={go_o!r}\n         C={c_o!r}")
+            failed += 1
+    for p in (nat_cryo, nat_pyro):
+        try: os.remove(p)
+        except OSError: pass
+
+    # ── http_serve() parity ───────────────────────────────
+    # Both VMs serve the same directory on their own port; every response
+    # (status, content-type, body) must be identical.
+    print("\n-- http_serve parity --")
+    import socket, time, urllib.request, urllib.error
+    serve_dir = os.path.join(_root, "Cryo", "examples", "fullstack", "public")
+    srv_src = ('string[] a = args(); http_serve(to_int(a[1]), a[0]);')
+    with tempfile.NamedTemporaryFile(suffix=".cryo", delete=False, mode="w", encoding="utf-8") as tc:
+        tc.write(srv_src); srv_cryo = tc.name
+    with tempfile.NamedTemporaryFile(suffix=".pyro", delete=False) as tp:
+        srv_pyro = tp.name
+    rc, _o, _e = run_command([sys.executable, CRYOC, srv_cryo, "--backend", "pyro",
+                              "-o", srv_pyro, "--no-banner"])
+    if rc != 0 or not os.path.isdir(serve_dir):
+        print("[SKIP] http_serve: no compiled server or demo dir absent")
+    else:
+        def _free_port():
+            s = socket.socket(); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close(); return p
+        def _probe(vm):
+            port = _free_port()
+            proc = subprocess.Popen([vm, srv_pyro, serve_dir, str(port)],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            base = f"http://127.0.0.1:{port}"
+            res = {}
+            try:
+                for _ in range(60):
+                    try:
+                        urllib.request.urlopen(base + "/", timeout=1).read(); break
+                    except urllib.error.HTTPError:
+                        break
+                    except Exception:
+                        time.sleep(0.1)
+                for name, path in (("index", "/"), ("wasm", "/app.wasm"),
+                                   ("missing", "/nope.txt")):
+                    try:
+                        r = urllib.request.urlopen(base + path, timeout=2)
+                        res[name] = (r.status, r.headers.get("Content-Type", ""), r.read())
+                    except urllib.error.HTTPError as e:
+                        res[name] = (e.code, "", b"")
+                    except Exception as e:
+                        res[name] = ("ERR", str(e), b"")
+            finally:
+                proc.terminate()
+                try: proc.wait(timeout=5)
+                except subprocess.TimeoutExpired: proc.kill()
+            return res
+        gres, cres = _probe(GO_VM), _probe(C_VM)
+        for name in ("index", "wasm", "missing"):
+            g, c = gres.get(name), cres.get(name)
+            if g == c and g is not None and g[0] in (200, 404):
+                print(f"[OK] http_serve {name}: Go == C (status={g[0]}, type={g[1] or 'n/a'})")
+                passed += 1
+            else:
+                print(f"[FAIL] http_serve {name} diverged")
+                print(f"  Go={None if g is None else (g[0], g[1], len(g[2]))}")
+                print(f"  C ={None if c is None else (c[0], c[1], len(c[2]))}")
+                failed += 1
+    for p in (srv_cryo, srv_pyro):
+        try: os.remove(p)
+        except OSError: pass
+
     print(f"\nSummary: {passed} passed, {failed} failed, {skipped} skipped.")
     if failed > 0:
         sys.exit(1)
