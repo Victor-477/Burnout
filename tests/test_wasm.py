@@ -59,6 +59,12 @@ PROGRAMS = [
     ("nested", 'fn ack(int m, int n) -> int ={ if (m == 0) { return n + 1; } '
                'if (n == 0) { return ack(m - 1, 1); } return ack(m - 1, ack(m, n - 1)); } '
                'print(ack(2, 3));'),
+    # range-based for: exclusive `..`, inclusive `..=`, variable bound, empty
+    ("ranges", 'int s = 0; for (int i in 0..5) { s += i; } print(s); '
+               'int p = 1; for (int i in 1..=5) { p = p * i; } print(p); '
+               'fn tri(int n) -> int ={ int t = 0; for (int i in 0..=n) { t += i; } return t; } '
+               'print(tri(10)); '
+               'int e = 0; for (int i in 3..3) { e += 1; } print(e);'),
 ]
 
 def vm_output(src, tag):

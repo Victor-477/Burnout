@@ -1228,6 +1228,37 @@ try:
 except Exception:
     check("semantics: write_bytes is builtin known", False)
 
+# ── range-based for loops (Phase 10.1) ──────────────────────
+print("[phase10] range for-loops")
+_rng = 'int s = 0; for (int i in 0..5) { s += i; } print(s);'
+_rngi = 'int s = 0; for (int i in 1..=5) { s += i; } print(s);'
+# lexer: '..' / '..=' tokens, and numbers next to a range still lex as int
+_rtoks = [t.type.name for t in Lexer("0..5").tokenize()]
+check("lexer: 0..5 -> INT RANGE INT (no float)",
+      _rtoks[:3] == ["INT_LIT", "RANGE", "INT_LIT"])
+check("lexer: 1..=5 has RANGE_INCL",
+      "RANGE_INCL" in [t.type.name for t in Lexer("1..=5").tokenize()])
+check("lexer: 3.14 still a float after range change",
+      [t.type.name for t in Lexer("3.14").tokenize()][0] == "FLOAT_LIT")
+# parser: desugars to a plain counted For (no ForEach, no new codegen needed)
+from ast_nodes import For as _For, ForEach as _ForEach
+_ast = ast_of(_rng)
+check("parser: range desugars to For", isinstance(_ast.statements[1], _For))
+check("parser: exclusive range uses '<'", _ast.statements[1].condition.op == "<")
+check("parser: inclusive range uses '<='", ast_of(_rngi).statements[1].condition.op == "<=")
+# desugared form compiles cleanly on every executable backend
+check("go: range compiles", "for" in gen_go(_rng))
+check("node: range compiles", "for" in gen_node(_rng))
+check("c: range compiles", "for" in gen_c(_rng))
+check("pyro: range compiles to a loop with jumps",
+      "JMP" in disasm_pyro.disassemble(gen_pyro(_rng, encode=False)))
+# non-int range variable is rejected at parse time
+try:
+    ast_of('for (number x in 0..5) { print(x); }')
+    check("parser: non-int range var rejected", False)
+except Exception:
+    check("parser: non-int range var rejected", True)
+
 # ── result ───────────────────────────────────────────────
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
