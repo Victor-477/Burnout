@@ -1323,6 +1323,45 @@ try:
 except Exception:
     check("semantics: 10.2 collection ops are known", False)
 
+# ── stdlib slice 2: padding + reducers (Phase 10.4) ─────────
+print("[phase10] padding + reducers (pad_start/pad_end/concat/count/sum)")
+_s2 = ('print(pad_start("7", 3, "0")); print(pad_end("x", 4, ".")); '
+       'int[] a = [1, 2]; int[] b = [3]; print(len(concat(a, b))); '
+       'int[] d = [2, 2, 3]; print(count(d, 2)); print(sum(d));')
+_ds2 = disasm_pyro.disassemble(gen_pyro(_s2, encode=False))
+for _nm, _id, _argc in [("pad_start",42,3),("pad_end",43,3),("concat",44,2),
+                        ("count",45,2),("sum",46,1)]:
+    check(f"pyro: {_nm} -> NATIVE {_id} {_argc}", f"NATIVE {_id} {_argc}" in _ds2)
+_g2 = gen_go(_s2)
+check("go: pad helper emitted", "func cryoPad" in _g2)
+check("go: concat helper emitted", "func cryoConcat" in _g2)
+check("go: sum helper emitted", "func cryoSum" in _g2)
+_n2 = gen_node(_s2)
+check("node: pad_start uses padStart", ".padStart(" in _n2)
+check("node: concat spreads", "..." in _n2)
+check("node: sum uses reduce", ".reduce(" in _n2)
+expect_c_reject('print(pad_start("7", 3, "0"));', "c: pad_start rejected")
+expect_c_reject('int[] a=[1]; print(sum(a));', "c: sum rejected")
+try:
+    from semantic import check as _sem_check4
+    _sem_check4(ast_of(_s2))
+    check("semantics: 10.4 slice-2 builtins are known", True)
+except Exception:
+    check("semantics: 10.4 slice-2 builtins are known", False)
+
+# a user-defined function must SHADOW a stdlib builtin of the same name
+print("[phase10] user functions shadow builtins")
+_shadow = ('fn sum(int a, int b) -> int ={ return a + b; } print(sum(20, 22));')
+# pyro: emits OP_CALL to the user fn, not NATIVE 46
+_dsh = disasm_pyro.disassemble(gen_pyro(_shadow, encode=False))
+check("pyro: user sum() shadows native (CALL, not NATIVE 46)",
+      "NATIVE 46" not in _dsh and "CALL" in _dsh)
+# go/node: emit a plain call, no builtin lowering (min/max/reduce/etc.)
+_gsh = gen_go(_shadow)
+check("go: user sum() compiled as a call (no cryoSum)", "cryoSum" not in _gsh)
+_nsh = gen_node(_shadow)
+check("node: user sum() compiled as a call (no reduce)", ".reduce(" not in _nsh)
+
 # ── result ───────────────────────────────────────────────
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

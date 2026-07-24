@@ -217,9 +217,11 @@ class TypeEnv:
                        'http_post': 'string', 'schema_of': 'string',
                        'llm': 'string', 'tools': 'string[]',
                        'tools_json': 'string', 'tool_get': 'Tool',
-                       'agent': 'string', 'index_of': 'int'}.get(node.callee)
-            # clamp/min/max and sort/reverse/slice preserve the arg's type
-            if node.callee in ('clamp', 'min', 'max', 'sort', 'reverse', 'slice') and node.args:
+                       'agent': 'string', 'index_of': 'int', 'count': 'int',
+                       'pad_start': 'string', 'pad_end': 'string'}.get(node.callee)
+            # these preserve the type of their first argument
+            if node.callee in ('clamp', 'min', 'max', 'sort', 'reverse',
+                               'slice', 'concat') and node.args:
                 return self.infer(node.args[0])
             return builtin or self.fn_ret(node.callee)
         if isinstance(node, StructInit):
@@ -468,6 +470,33 @@ class CodeGenGo:
                   "\tb := make([]T, end-start)",
                   "\tcopy(b, a[start:end])",
                   "\treturn b", "}", ""]
+        if 'pad' in self._helpers:
+            self._imports.add('strings')
+            H += ["// cryoPad: pad_start/pad_end (JS padStart/padEnd semantics).",
+                  "func cryoPad(s string, width int, pad string, atStart bool) string {",
+                  "\tif len(s) >= width || pad == \"\" { return s }",
+                  "\tneed := width - len(s)",
+                  "\tvar b strings.Builder",
+                  "\tfor b.Len() < need { b.WriteString(pad) }",
+                  "\tfiller := b.String()[:need]",
+                  "\tif atStart { return filler + s }",
+                  "\treturn s + filler", "}", ""]
+        if 'concat' in self._helpers:
+            H += ["func cryoConcat[T any](a, b []T) []T {",
+                  "\tc := make([]T, 0, len(a)+len(b))",
+                  "\tc = append(c, a...)",
+                  "\tc = append(c, b...)",
+                  "\treturn c", "}", ""]
+        if 'count' in self._helpers:
+            H += ["func cryoCount[T comparable](a []T, x T) int64 {",
+                  "\tvar n int64",
+                  "\tfor _, v := range a { if v == x { n++ } }",
+                  "\treturn n", "}", ""]
+        if 'sum' in self._helpers:
+            H += ["func cryoSum[T int64 | float64](a []T) T {",
+                  "\tvar s T",
+                  "\tfor _, v := range a { s += v }",
+                  "\treturn s", "}", ""]
         if 'jsonenc' in self._helpers:
             H += ["func cryoJSONEncode(v any) string {",
                   "\tb, err := json.Marshal(v)",
@@ -1430,6 +1459,10 @@ class CodeGenGo:
     def _call(self, node: CallExpr) -> str:
         c = node.callee
         a = node.args
+        # user-defined functions shadow stdlib builtins (print/len/has/keys stay reserved)
+        if c in self.te._fns and c not in ('print', 'len', 'has', 'keys'):
+            args = ', '.join(self._expr(x) for x in a)
+            return f"{gid(c)}({args})"
         if c == 'print':
             self._imports.add('fmt')
             if not a: return "fmt.Println()"
@@ -1517,6 +1550,15 @@ class CodeGenGo:
         if c == 'index_of' and len(a) == 2:
             self._imports.add('slices')
             return f"int64(slices.Index({self._expr(a[0])}, {self._expr(a[1])}))"
+        if c == 'concat' and len(a) == 2:
+            self._helpers.add('concat')
+            return f"cryoConcat({self._expr(a[0])}, {self._expr(a[1])})"
+        if c == 'count' and len(a) == 2:
+            self._helpers.add('count')
+            return f"cryoCount({self._expr(a[0])}, {self._expr(a[1])})"
+        if c == 'sum' and len(a) == 1:
+            self._helpers.add('sum')
+            return f"cryoSum({self._expr(a[0])})"
         # ── strings ──
         if c == 'upper' and len(a) == 1:
             self._imports.add('strings')
@@ -1556,6 +1598,11 @@ class CodeGenGo:
         if c == 'repeat' and len(a) == 2:
             self._helpers.add('repeat')
             return f"cryoRepeat({self._expr(a[0])}, int64({self._expr(a[1])}))"
+        if c in ('pad_start', 'pad_end') and len(a) == 3:
+            self._helpers.add('pad')
+            at_start = 'true' if c == 'pad_start' else 'false'
+            return (f"cryoPad({self._expr(a[0])}, int({self._expr(a[1])}), "
+                    f"{self._expr(a[2])}, {at_start})")
         # ── Pyro: introspection of native skills (no .md files) ──
         if c == 'skills':
             self._use_skills = True

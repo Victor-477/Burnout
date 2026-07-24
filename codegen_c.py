@@ -706,6 +706,11 @@ class CodeGenC:
             raise CodeGenError(
                 f"'{callee}()' is not yet implemented in the C backend; "
                 f"use --backend go, node or pyro.")
+        # stdlib slice 2 (Phase 10.4): padding + collection reducers
+        if callee in ('pad_start', 'pad_end', 'concat', 'count', 'sum'):
+            raise CodeGenError(
+                f"'{callee}()' is not yet implemented in the C backend; "
+                f"use --backend go, node or pyro.")
 
         # ── built-ins ──
         if callee == 'print':

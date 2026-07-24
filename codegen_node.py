@@ -116,7 +116,8 @@ class _Types:
                  'contains': 'bool', 'find': 'int', 'replace': 'string',
                  'substr': 'string', 'split': 'string[]', 'join': 'string',
                  'starts_with': 'bool', 'ends_with': 'bool', 'repeat': 'string',
-                 'index_of': 'int',
+                 'index_of': 'int', 'count': 'int', 'sum': 'number',
+                 'pad_start': 'string', 'pad_end': 'string',
                  'keys': 'string[]'}.get(node.callee)
             return b or self.fns.get(node.callee, 'unknown')
         if isinstance(node, StructInit):
@@ -631,6 +632,10 @@ class CodeGenNode:
 
         args = ', '.join(self._expr(x) for x in a)
 
+        # user-defined functions shadow stdlib builtins (print/len/has/keys reserved)
+        if c in self._t.fns and c not in ('print', 'len', 'has', 'keys'):
+            return f"{jsid(c)}({args})"
+
         if c == 'print':
             return f"console.log({args})"
         if c == 'len':
@@ -699,6 +704,16 @@ class CodeGenNode:
                     f"if(s>e)s=e;return a.slice(s,e);}})({A(0)}, {A(1)}, {A(2)})")
         if c == 'index_of':
             return f"({A(0)}).indexOf({A(1)})"
+        if c == 'pad_start':
+            return f"String({A(0)}).padStart({A(1)}, {A(2)})"
+        if c == 'pad_end':
+            return f"String({A(0)}).padEnd({A(1)}, {A(2)})"
+        if c == 'concat':
+            return f"[...{A(0)}, ...{A(1)}]"
+        if c == 'count':
+            return f"({A(0)}).filter(e=>e==={A(1)}).length"
+        if c == 'sum':
+            return f"({A(0)}).reduce((s,v)=>s+v, 0)"
         if c == 'remove':
             return f"(delete {A(0)}[{A(1)}])"
         if c == 'json_encode':

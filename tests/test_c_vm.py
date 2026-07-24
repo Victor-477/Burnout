@@ -278,6 +278,13 @@ def test_parity():
                           'print(repeat("ab", 3)); print(repeat("x", 0)); '
                           'print(repeat("-", 5));'),
         # Phase 10.2 stateless collection ops — sort/reverse/slice/index_of
+        ("stdlib2", 'print(pad_start("7", 3, "0")); print(pad_start("x", 5, "ab")); '
+                    'print(pad_end("x", 5, "ab")); print(pad_start("toolong", 3, " ")); '
+                    'int[] a = [1, 2, 3]; int[] b = [4, 5]; int[] c = concat(a, b); '
+                    'print(len(c) + index_of(c, 5)); '
+                    'int[] d = [2, 2, 3, 2]; print(count(d, 2)); print(count(d, 9)); '
+                    'print(sum(d)); number[] f = [1.5, 2.5, 1.0]; print(sum(f)); '
+                    'int[] e = []; print(sum(e));'),
         ("collections", 'int[] a = [3, 1, 4, 1, 5, 9, 2, 6]; '
                         'int[] s = sort(a); string o = ""; '
                         'for (int i in 0..len(s)) { o = o + to_string(s[i]) + " "; } print(o); '

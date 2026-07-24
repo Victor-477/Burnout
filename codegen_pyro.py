@@ -119,6 +119,9 @@ NATIVES = {
     # ── stateless collection ops (Phase 10.2) ──
     'sort':        (38, 1), 'reverse':   (39, 1),
     'slice':       (40, 3), 'index_of':  (41, 2),
+    # ── stdlib slice 2 (Phase 10.4): padding + collection reducers ──
+    'pad_start':   (42, 3), 'pad_end':   (43, 3),
+    'concat':      (44, 2), 'count':     (45, 2), 'sum': (46, 1),
 }
 
 def _isize(op: int) -> int:
@@ -735,7 +738,15 @@ class CodeGenPyro:
             self._expr(n.args[0]); self._expr(n.args[1]); self._emit(OP_HAS); return
         if n.callee == 'keys' and len(n.args) == 1:
             self._expr(n.args[0]); self._emit(OP_KEYS); return
-        # VM native builtins (math, conversions, strings, remove)
+        # user-defined functions shadow the native builtins (so a program may
+        # define its own `fn sum(...)` etc. without colliding with the stdlib)
+        fi = self._fnindex.get(n.callee)
+        if fi is not None:
+            for a in n.args:
+                self._expr(a)
+            self._emit(OP_CALL, (fi, len(n.args)))
+            return
+        # VM native builtins (math, conversions, strings, collections, …)
         nat = NATIVES.get(n.callee)
         if nat is not None:
             nid, argc = nat
@@ -746,15 +757,9 @@ class CodeGenPyro:
                 self._expr(a)
             self._emit(OP_NATIVE, (nid, argc))
             return
-        # user function
-        fi = self._fnindex.get(n.callee)
-        if fi is None:
-            raise CodeGenPyroError(
-                f"function '{n.callee}' unknown in pyro backend "
-                f"(builtins: print, len, has, keys, {', '.join(sorted(NATIVES))}).")
-        for a in n.args:
-            self._expr(a)
-        self._emit(OP_CALL, (fi, len(n.args)))
+        raise CodeGenPyroError(
+            f"function '{n.callee}' unknown in pyro backend "
+            f"(builtins: print, len, has, keys, {', '.join(sorted(NATIVES))}).")
 
     # ── bytecode optimizer ──────────────────────────────
     #  Peephole over the (op, arg) list of each function. Since the
