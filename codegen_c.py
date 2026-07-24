@@ -701,6 +701,11 @@ class CodeGenC:
             raise CodeGenError(
                 f"'{callee}()' is not yet implemented in the C backend; "
                 f"use --backend go, node or pyro.")
+        # stateless collection ops (Phase 10.2): available on go/node/pyro
+        if callee in ('sort', 'reverse', 'slice', 'index_of'):
+            raise CodeGenError(
+                f"'{callee}()' is not yet implemented in the C backend; "
+                f"use --backend go, node or pyro.")
 
         # ── built-ins ──
         if callee == 'print':

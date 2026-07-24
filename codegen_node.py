@@ -116,6 +116,7 @@ class _Types:
                  'contains': 'bool', 'find': 'int', 'replace': 'string',
                  'substr': 'string', 'split': 'string[]', 'join': 'string',
                  'starts_with': 'bool', 'ends_with': 'bool', 'repeat': 'string',
+                 'index_of': 'int',
                  'keys': 'string[]'}.get(node.callee)
             return b or self.fns.get(node.callee, 'unknown')
         if isinstance(node, StructInit):
@@ -684,6 +685,20 @@ class CodeGenNode:
             return f"Object.prototype.hasOwnProperty.call({A(0)}, {A(1)})"
         if c == 'keys':
             return f"Object.keys({A(0)})"
+        # ── stateless collection ops (Phase 10.2) ──
+        if c == 'sort':
+            # numbers sort numerically, everything else by string form (matches the VM)
+            return (f"[...{A(0)}].sort((x,y)=>{{const nx=typeof x===\"number\",ny=typeof y===\"number\";"
+                    f"if(nx&&ny)return x-y;const sx=String(x),sy=String(y);"
+                    f"return sx<sy?-1:sx>sy?1:0;}})")
+        if c == 'reverse':
+            return f"[...{A(0)}].reverse()"
+        if c == 'slice':
+            # clamp bounds to [0, len] like the VM (JS slice treats negatives as from-end)
+            return (f"((a,s,e)=>{{const n=a.length;if(s<0)s=0;if(e>n)e=n;"
+                    f"if(s>e)s=e;return a.slice(s,e);}})({A(0)}, {A(1)}, {A(2)})")
+        if c == 'index_of':
+            return f"({A(0)}).indexOf({A(1)})"
         if c == 'remove':
             return f"(delete {A(0)}[{A(1)}])"
         if c == 'json_encode':

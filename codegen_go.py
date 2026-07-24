@@ -217,9 +217,9 @@ class TypeEnv:
                        'http_post': 'string', 'schema_of': 'string',
                        'llm': 'string', 'tools': 'string[]',
                        'tools_json': 'string', 'tool_get': 'Tool',
-                       'agent': 'string'}.get(node.callee)
-            # clamp/min/max preserve the type of their first argument
-            if node.callee in ('clamp', 'min', 'max') and node.args:
+                       'agent': 'string', 'index_of': 'int'}.get(node.callee)
+            # clamp/min/max and sort/reverse/slice preserve the arg's type
+            if node.callee in ('clamp', 'min', 'max', 'sort', 'reverse', 'slice') and node.args:
                 return self.infer(node.args[0])
             return builtin or self.fn_ret(node.callee)
         if isinstance(node, StructInit):
@@ -446,6 +446,28 @@ class CodeGenGo:
             H += ["func cryoRepeat(s string, n int64) string {",
                   "\tif n < 0 { n = 0 }",
                   "\treturn strings.Repeat(s, int(n))", "}", ""]
+        if 'sort' in self._helpers:
+            self._imports.update(('slices', 'cmp'))
+            H += ["// cryoSort returns a new ascending-sorted copy (original unchanged).",
+                  "func cryoSort[T cmp.Ordered](a []T) []T {",
+                  "\tb := append([]T(nil), a...)",
+                  "\tslices.Sort(b)",
+                  "\treturn b", "}", ""]
+        if 'reverse' in self._helpers:
+            H += ["func cryoReverse[T any](a []T) []T {",
+                  "\tb := make([]T, len(a))",
+                  "\tfor i, v := range a { b[len(a)-1-i] = v }",
+                  "\treturn b", "}", ""]
+        if 'slice' in self._helpers:
+            H += ["// cryoSlice: subarray [start, end) with safe bounds, as a new slice.",
+                  "func cryoSlice[T any](a []T, start, end int64) []T {",
+                  "\tn := int64(len(a))",
+                  "\tif start < 0 { start = 0 }",
+                  "\tif end > n { end = n }",
+                  "\tif start > end { start = end }",
+                  "\tb := make([]T, end-start)",
+                  "\tcopy(b, a[start:end])",
+                  "\treturn b", "}", ""]
         if 'jsonenc' in self._helpers:
             H += ["func cryoJSONEncode(v any) string {",
                   "\tb, err := json.Marshal(v)",
@@ -1481,6 +1503,20 @@ class CodeGenGo:
         if c == 'keys' and len(a) == 1:
             self._helpers.add('keys')
             return f"cryoKeys({self._expr(a[0])})"
+        # ── stateless collection ops (Phase 10.2) ──
+        if c == 'sort' and len(a) == 1:
+            self._helpers.add('sort')
+            return f"cryoSort({self._expr(a[0])})"
+        if c == 'reverse' and len(a) == 1:
+            self._helpers.add('reverse')
+            return f"cryoReverse({self._expr(a[0])})"
+        if c == 'slice' and len(a) == 3:
+            self._helpers.add('slice')
+            return (f"cryoSlice({self._expr(a[0])}, "
+                    f"int64({self._expr(a[1])}), int64({self._expr(a[2])}))")
+        if c == 'index_of' and len(a) == 2:
+            self._imports.add('slices')
+            return f"int64(slices.Index({self._expr(a[0])}, {self._expr(a[1])}))"
         # ── strings ──
         if c == 'upper' and len(a) == 1:
             self._imports.add('strings')

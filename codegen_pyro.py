@@ -116,6 +116,9 @@ NATIVES = {
     'clamp':       (31, 3), 'sign':      (32, 1),
     'gcd':         (33, 2), 'hypot':     (34, 2),
     'starts_with': (35, 2), 'ends_with': (36, 2), 'repeat': (37, 2),
+    # ── stateless collection ops (Phase 10.2) ──
+    'sort':        (38, 1), 'reverse':   (39, 1),
+    'slice':       (40, 3), 'index_of':  (41, 2),
 }
 
 def _isize(op: int) -> int:

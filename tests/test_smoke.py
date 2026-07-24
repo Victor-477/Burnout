@@ -1298,6 +1298,31 @@ try:
 except Exception:
     check("semantics: 10.4 builtins are known", False)
 
+# ── stateless collection ops (Phase 10.2) ──────────────────
+print("[phase10] collection ops (sort/reverse/slice/index_of)")
+_co = ('int[] a = [3, 1, 2]; print(index_of(sort(a), 3)); '
+       'print(index_of(reverse(a), 3)); print(len(slice(a, 0, 2)));')
+_dco = disasm_pyro.disassemble(gen_pyro(_co, encode=False))
+for _nm, _id, _argc in [("sort",38,1),("reverse",39,1),("slice",40,3),("index_of",41,2)]:
+    check(f"pyro: {_nm} -> NATIVE {_id} {_argc}", f"NATIVE {_id} {_argc}" in _dco)
+_cgo = gen_go(_co)
+check("go: sort helper emitted", "func cryoSort" in _cgo)
+check("go: reverse helper emitted", "func cryoReverse" in _cgo)
+check("go: slice helper emitted", "func cryoSlice" in _cgo)
+check("go: index_of uses slices.Index", "slices.Index(" in _cgo)
+_cnd = gen_node(_co)
+check("node: sort spreads then .sort", ".sort((" in _cnd)
+check("node: reverse spreads then .reverse", ".reverse()" in _cnd)
+check("node: index_of uses .indexOf", ".indexOf(" in _cnd)
+expect_c_reject('int[] a = [1]; print(index_of(a, 1));', "c: index_of rejected with clear error")
+expect_c_reject('int[] a = [3,1]; print(len(sort(a)));', "c: sort rejected with clear error")
+try:
+    from semantic import check as _sem_check3
+    _sem_check3(ast_of(_co))
+    check("semantics: 10.2 collection ops are known", True)
+except Exception:
+    check("semantics: 10.2 collection ops are known", False)
+
 # ── result ───────────────────────────────────────────────
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

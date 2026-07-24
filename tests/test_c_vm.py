@@ -277,6 +277,19 @@ def test_parity():
                           'print(starts_with("abc", "xyz")); print(ends_with("abc", "")); '
                           'print(repeat("ab", 3)); print(repeat("x", 0)); '
                           'print(repeat("-", 5));'),
+        # Phase 10.2 stateless collection ops — sort/reverse/slice/index_of
+        ("collections", 'int[] a = [3, 1, 4, 1, 5, 9, 2, 6]; '
+                        'int[] s = sort(a); string o = ""; '
+                        'for (int i in 0..len(s)) { o = o + to_string(s[i]) + " "; } print(o); '
+                        'int[] r = reverse(a); o = ""; '
+                        'for (int i in 0..len(r)) { o = o + to_string(r[i]) + " "; } print(o); '
+                        'int[] sl = slice(a, 2, 5); o = ""; '
+                        'for (int i in 0..len(sl)) { o = o + to_string(sl[i]) + " "; } print(o); '
+                        'print(index_of(a, 5)); print(index_of(a, 7)); '
+                        'string[] w = ["pear", "apple", "fig"]; string[] sw = sort(w); '
+                        'print(join(sw, ",")); '
+                        'number[] f = [2.5, 1.5, 3.0]; number[] sf = sort(f); '
+                        'print(to_string(sf[0]) + " " + to_string(sf[2]));'),
     ]
     for name, src in sem:
         with tempfile.NamedTemporaryFile(suffix=".cryo", delete=False, mode="w", encoding="utf-8") as tc:
