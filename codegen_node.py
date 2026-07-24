@@ -110,10 +110,12 @@ class _Types:
                  'to_number': 'number', 'sqrt': 'number', 'pow': 'number',
                  'abs': 'number', 'floor': 'number', 'ceil': 'number',
                  'round': 'number', 'min': 'number', 'max': 'number',
+                 'clamp': 'number', 'sign': 'int', 'gcd': 'int', 'hypot': 'number',
                  'json_encode': 'string', 'has': 'bool',
                  'upper': 'string', 'lower': 'string', 'trim': 'string',
                  'contains': 'bool', 'find': 'int', 'replace': 'string',
                  'substr': 'string', 'split': 'string[]', 'join': 'string',
+                 'starts_with': 'bool', 'ends_with': 'bool', 'repeat': 'string',
                  'keys': 'string[]'}.get(node.callee)
             return b or self.fns.get(node.callee, 'unknown')
         if isinstance(node, StructInit):
@@ -644,6 +646,15 @@ class CodeGenNode:
                       'max': 'max', 'floor': 'floor', 'ceil': 'ceil',
                       'round': 'round'}[c]
             return f"Math.{jsname}({args})"
+        if c == 'clamp':
+            return f"Math.max({A(1)}, Math.min({A(0)}, {A(2)}))"
+        if c == 'sign':
+            return f"Math.sign({A(0)})"
+        if c == 'gcd':
+            return (f"((a,b)=>{{a=Math.abs(a);b=Math.abs(b);"
+                    f"while(b){{const t=a%b;a=b;b=t;}}return a;}})({A(0)}, {A(1)})")
+        if c == 'hypot':
+            return f"Math.hypot({A(0)}, {A(1)})"
         if c == 'upper':
             return f"String({A(0)}).toUpperCase()"
         if c == 'lower':
@@ -663,6 +674,12 @@ class CodeGenNode:
             return f"String({A(0)}).split({A(1)})"
         if c == 'join':
             return f"({A(0)}).join({A(1)})"
+        if c == 'starts_with':
+            return f"String({A(0)}).startsWith({A(1)})"
+        if c == 'ends_with':
+            return f"String({A(0)}).endsWith({A(1)})"
+        if c == 'repeat':
+            return f"String({A(0)}).repeat(Math.max(0, {A(1)}))"
         if c == 'has':
             return f"Object.prototype.hasOwnProperty.call({A(0)}, {A(1)})"
         if c == 'keys':

@@ -112,6 +112,10 @@ NATIVES = {
     'read_file': (28, 1), 'args': (29, 0),
     # ── static HTTP server (Phase 9.6 full-stack backend) ──
     'http_serve': (30, 2),
+    # ── extended standard library (Phase 10.4) ──
+    'clamp':       (31, 3), 'sign':      (32, 1),
+    'gcd':         (33, 2), 'hypot':     (34, 2),
+    'starts_with': (35, 2), 'ends_with': (36, 2), 'repeat': (37, 2),
 }
 
 def _isize(op: int) -> int:

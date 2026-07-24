@@ -266,6 +266,17 @@ def test_parity():
         ("index-alias", 'string[] s = []; s.push("keepme"); string first = s[0]; '
                         'string junk = "filler" + to_string(len(s)); '
                         'print(first); print(s[0]); print(len(s));'),
+        # Phase 10.4 extended stdlib — clamp/sign/gcd/hypot + starts_with/ends_with/repeat
+        ("stdlib-math", 'print(clamp(15, 0, 10)); print(clamp(-3, 0, 10)); print(clamp(5, 0, 10)); '
+                        'number cf = clamp(2.5, 0.0, 1.0); print(cf); '
+                        'print(sign(0 - 7)); print(sign(0)); print(sign(42)); '
+                        'print(gcd(48, 36)); print(gcd(0, 5)); print(gcd(17, 5)); '
+                        'print(hypot(3.0, 4.0)); print(hypot(5.0, 12.0));'),
+        ("stdlib-string", 'print(starts_with("hello world", "hello")); '
+                          'print(ends_with("hello world", "world")); '
+                          'print(starts_with("abc", "xyz")); print(ends_with("abc", "")); '
+                          'print(repeat("ab", 3)); print(repeat("x", 0)); '
+                          'print(repeat("-", 5));'),
     ]
     for name, src in sem:
         with tempfile.NamedTemporaryFile(suffix=".cryo", delete=False, mode="w", encoding="utf-8") as tc:

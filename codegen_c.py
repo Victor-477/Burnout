@@ -691,9 +691,15 @@ class CodeGenC:
                 f"use --backend go.")
         # string builtins: covered by go/node/pyro, not C
         if callee in ('upper', 'lower', 'trim', 'contains', 'find',
-                      'replace', 'substr', 'split', 'join', 'remove'):
+                      'replace', 'substr', 'split', 'join', 'remove',
+                      'starts_with', 'ends_with', 'repeat'):
             raise CodeGenError(
                 f"'{callee}()' is not supported in the C backend; "
+                f"use --backend go, node or pyro.")
+        # extended stdlib math (Phase 10.4): available on go/node/pyro
+        if callee in ('clamp', 'sign', 'gcd', 'hypot'):
+            raise CodeGenError(
+                f"'{callee}()' is not yet implemented in the C backend; "
                 f"use --backend go, node or pyro.")
 
         # ── built-ins ──

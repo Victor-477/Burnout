@@ -1259,6 +1259,45 @@ try:
 except Exception:
     check("parser: non-int range var rejected", True)
 
+# ── extended standard library (Phase 10.4) ──────────────────
+print("[phase10] extended stdlib (clamp/sign/gcd/hypot/starts_with/ends_with/repeat)")
+_sl = ('print(clamp(15, 0, 10)); print(sign(0 - 3)); print(gcd(48, 36)); '
+       'print(hypot(3.0, 4.0)); print(starts_with("abc", "a")); '
+       'print(ends_with("abc", "c")); print(repeat("x", 3));')
+# pyro: each maps to its NATIVE id with the right argc
+_dsl = disasm_pyro.disassemble(gen_pyro(_sl, encode=False))
+for _nm, _id, _argc in [("clamp",31,3),("sign",32,1),("gcd",33,2),("hypot",34,2),
+                        ("starts_with",35,2),("ends_with",36,2),("repeat",37,2)]:
+    check(f"pyro: {_nm} -> NATIVE {_id} {_argc}", f"NATIVE {_id} {_argc}" in _dsl)
+# go backend
+_go = gen_go(_sl)
+check("go: clamp uses min/max", "max(" in _go and "min(" in _go)
+check("go: gcd helper emitted", "func cryoGcd" in _go)
+check("go: hypot uses math.Hypot", "math.Hypot(" in _go)
+check("go: starts_with uses strings.HasPrefix", "strings.HasPrefix(" in _go)
+check("go: repeat helper emitted", "func cryoRepeat" in _go)
+# node backend
+_nd = gen_node(_sl)
+check("node: clamp uses Math.max/min", "Math.max(" in _nd and "Math.min(" in _nd)
+check("node: hypot uses Math.hypot", "Math.hypot(" in _nd)
+check("node: starts_with uses startsWith", ".startsWith(" in _nd)
+check("node: repeat uses .repeat", ".repeat(" in _nd)
+# c backend: not supported -> clean error pointing elsewhere
+def expect_c_reject(src, label):
+    try:
+        gen_c(src); check(label, False)
+    except Exception as e:
+        check(label, "backend" in str(e).lower())
+expect_c_reject('print(clamp(1, 0, 2));', "c: clamp rejected with clear error")
+expect_c_reject('print(repeat("x", 2));', "c: repeat rejected with clear error")
+# semantics: all seven are known builtins (no 'unknown function')
+try:
+    from semantic import check as _sem_check2
+    _sem_check2(ast_of(_sl))
+    check("semantics: 10.4 builtins are known", True)
+except Exception:
+    check("semantics: 10.4 builtins are known", False)
+
 # ── result ───────────────────────────────────────────────
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

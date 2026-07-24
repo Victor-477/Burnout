@@ -208,14 +208,19 @@ class TypeEnv:
                        'pyro_args': 'string[]', 'pyro_time': 'int',
                        'pyro_read': 'string', 'pyro_write_file': 'bool',
                        'pyro_open': 'bool',
+                       'sign': 'int', 'gcd': 'int', 'hypot': 'number',
                        'upper': 'string', 'lower': 'string', 'trim': 'string',
                        'contains': 'bool', 'find': 'int', 'replace': 'string',
                        'substr': 'string', 'split': 'string[]', 'join': 'string',
+                       'starts_with': 'bool', 'ends_with': 'bool', 'repeat': 'string',
                        'http_get': 'string',
                        'http_post': 'string', 'schema_of': 'string',
                        'llm': 'string', 'tools': 'string[]',
                        'tools_json': 'string', 'tool_get': 'Tool',
                        'agent': 'string'}.get(node.callee)
+            # clamp/min/max preserve the type of their first argument
+            if node.callee in ('clamp', 'min', 'max') and node.args:
+                return self.infer(node.args[0])
             return builtin or self.fn_ret(node.callee)
         if isinstance(node, StructInit):
             return node.struct_name
@@ -429,6 +434,18 @@ class CodeGenGo:
                   "\treturn a % b", "}", ""]
         if 'absi' in self._helpers:
             H += ["func cryoAbsI(x int64) int64 { if x < 0 { return -x }; return x }", ""]
+        if 'sign' in self._helpers:
+            H += ["func cryoSign(x float64) int64 { if x < 0 { return -1 }; if x > 0 { return 1 }; return 0 }", ""]
+        if 'gcd' in self._helpers:
+            H += ["func cryoGcd(a, b int64) int64 {",
+                  "\tif a < 0 { a = -a }; if b < 0 { b = -b }",
+                  "\tfor b != 0 { a, b = b, a%b }",
+                  "\treturn a", "}", ""]
+        if 'repeat' in self._helpers:
+            self._imports.add('strings')
+            H += ["func cryoRepeat(s string, n int64) string {",
+                  "\tif n < 0 { n = 0 }",
+                  "\treturn strings.Repeat(s, int(n))", "}", ""]
         if 'jsonenc' in self._helpers:
             H += ["func cryoJSONEncode(v any) string {",
                   "\tb, err := json.Marshal(v)",
@@ -1414,6 +1431,18 @@ class CodeGenGo:
             self._imports.add('math'); return f"math.Ceil({self._expr(a[0])})"
         if c == 'round':
             self._imports.add('math'); return f"math.Round({self._expr(a[0])})"
+        if c == 'clamp' and len(a) == 3:
+            # Go builtins min/max (>=1.21) handle int64 and float64
+            return f"max({self._expr(a[1])}, min({self._expr(a[0])}, {self._expr(a[2])}))"
+        if c == 'sign' and len(a) == 1:
+            self._helpers.add('sign')
+            return f"cryoSign(float64({self._expr(a[0])}))"
+        if c == 'gcd' and len(a) == 2:
+            self._helpers.add('gcd')
+            return f"cryoGcd(int64({self._expr(a[0])}), int64({self._expr(a[1])}))"
+        if c == 'hypot' and len(a) == 2:
+            self._imports.add('math')
+            return f"math.Hypot({self._expr(a[0])}, {self._expr(a[1])})"
         if c == 'to_string':
             self._helpers.add('str'); return f"cryoStr({self._expr(a[0])})"
         if c == 'to_int':
@@ -1482,6 +1511,15 @@ class CodeGenGo:
         if c == 'join' and len(a) == 2:
             self._imports.add('strings')
             return f"strings.Join({self._expr(a[0])}, {self._expr(a[1])})"
+        if c == 'starts_with' and len(a) == 2:
+            self._imports.add('strings')
+            return f"strings.HasPrefix({self._expr(a[0])}, {self._expr(a[1])})"
+        if c == 'ends_with' and len(a) == 2:
+            self._imports.add('strings')
+            return f"strings.HasSuffix({self._expr(a[0])}, {self._expr(a[1])})"
+        if c == 'repeat' and len(a) == 2:
+            self._helpers.add('repeat')
+            return f"cryoRepeat({self._expr(a[0])}, int64({self._expr(a[1])}))"
         # ── Pyro: introspection of native skills (no .md files) ──
         if c == 'skills':
             self._use_skills = True
