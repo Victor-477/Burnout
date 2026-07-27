@@ -39,12 +39,13 @@
 | :--- | :--- |
 | 📄 [`cryoc.py`](cryoc.py) | **CLI Entry Point:** Command-line driver for compilation, LSP server launch (`--lsp`), and formatting (`fmt`). |
 | 📄 [`compiler.py`](compiler.py) | **Orchestration Driver:** Manages source reading, AST loading, backend dispatching, and binary execution. |
-| 📄 [`codegen_pyro.py`](codegen_pyro.py) | **Pyro Bytecode Generator:** Emits v2 binary bytecode (`.pyro`) for execution on the Go VM or C VM. |
+| 📄 [`codegen_pyro.py`](codegen_pyro.py) | **Pyro Bytecode Generator:** Emits v3 binary bytecode (`.pyro`) for execution on the Go VM or C VM. v3 widened string constants to u32 and added the function-value opcodes (`PUSHFN`/`CALL_VALUE`/`CLOSURE`); both VMs still load v2. |
 | 📄 [`codegen_go.py`](codegen_go.py) | **Go Generator:** Emits native Go source code, providing full SaaS, HTTP, and LLM features. |
 | 📄 [`codegen_node.py`](codegen_node.py) | **Node.js Generator:** Emits CommonJS JavaScript for Node.js environments. |
 | 📄 [`codegen_c.py`](codegen_c.py) | **Native C Generator:** Emits safe, high-performance C source files. |
 | 📄 [`codegen_asm.py`](codegen_asm.py) | **x86-64 Assembly Generator:** Emits native assembly for System V AMD64 and Windows x64 ABIs. |
 | 📄 [`codegen_wasm.py`](codegen_wasm.py) | **WebAssembly Generator:** Emits a `.wasm` binary module directly (no `wat2wasm`), for the browser. |
+| 📄 [`../Cryo/frontend.py`](../Cryo/frontend.py) | **Front-End Assembler:** Behind `--backend frontend`, composes `>html(`/`>javascript(`/`>CSS(` blocks into a page — `--emit html` for one vanilla file, `--emit pyro` for an `.html` shell plus `app.wasm`. |
 | 📄 [`aot_pyro.py`](aot_pyro.py) | **AOT Translator:** Lowers `.pyro` to standalone C against the Pyro runtime — a native binary with no VM at runtime. |
 | 📄 [`pyro.py`](pyro.py) | **Unified CLI:** `pyro build \| run \| vm \| c` over `.cryo` or `.pyro`; auto-detects the C toolchain and VM. |
 | 📄 [`lsp.py`](lsp.py) | **Language Server:** Provides JSON-RPC Language Server Protocol (LSP) diagnostics, hover, and definitions. |
@@ -120,8 +121,11 @@ print(disassembly_listing)
 Run the test suite from the repository root:
 
 ```bash
-# Run 410+ frontend, backend, and security assertions
+# Run 530+ frontend, backend, and security assertions
 python Burnout/tests/test_smoke.py
+
+# Compile AND run each program through the CLI, asserting exact stdout per backend
+python Burnout/tests/test_cli.py
 
 # Verify byte-level execution parity between the C VM and Go VM
 python Burnout/tests/test_c_vm.py
@@ -135,6 +139,9 @@ python Burnout/tests/test_aot.py
 python Burnout/tests/test_pyro_cli.py
 python Burnout/tests/test_wasm.py
 python Burnout/tests/test_fullstack.py
+
+# Verify front-end structure, structure parameters and both page output modes
+python Burnout/tests/test_frontend.py
 ```
 
 Suites skip any leg whose toolchain is missing (C compiler, Node, Go) instead of
