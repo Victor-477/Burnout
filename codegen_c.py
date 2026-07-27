@@ -95,9 +95,10 @@ class TypeEnv:
             t = self.infer(node.then_value)
             return t if t != 'unknown' else self.infer(node.else_value)
         if isinstance(node, CallExpr):
-            if node.callee in ('to_string', 'input', 'upper', 'lower', 'trim', 'substr', 'concat'):
+            if node.callee in ('to_string', 'input', 'upper', 'lower', 'trim', 'substr',
+                               'concat', 'repeat', 'pad_start', 'pad_end'):
                 return 'string'
-            if node.callee in ('to_int', 'len', 'sign', 'gcd'):
+            if node.callee in ('to_int', 'len', 'sign', 'gcd', 'find'):
                 return 'int'
             if node.callee in ('to_number', 'sqrt', 'pow', 'hypot', 'floor', 'ceil', 'round'):
                 return 'number'
@@ -109,6 +110,11 @@ class TypeEnv:
             # cryo_print_i64() on a double and truncate (abs(-2.5) -> 2).
             if node.callee in ('abs', 'min', 'max'):
                 return self.infer(node.args[0]) if node.args else 'number'
+            # clamp(x, lo, hi) is int only when ALL THREE are int — mixing in a
+            # float makes the result a float, matching the Pyro runtime.
+            if node.callee == 'clamp':
+                ts = [self.infer(a) for a in node.args]
+                return 'int' if ts and all(t == 'int' for t in ts) else 'number'
             return self.fn_ret(node.callee)
         if isinstance(node, StructInit):
             return node.struct_name
@@ -711,17 +717,11 @@ class CodeGenC:
             raise CodeGenError(
                 f"'{callee}()' only exists in the Go backend (JSON/concurrency/HTTP/LLM); "
                 f"use --backend go.")
-        # string builtins: covered by go/node/pyro, not C
-        if callee in ('upper', 'lower', 'trim', 'contains', 'find',
-                      'replace', 'substr', 'split', 'join', 'remove',
-                      'starts_with', 'ends_with', 'repeat'):
+        # string builtins still needing an array/map (split/join) or a map
+        # (remove), plus replace which needs a growing buffer — go/node/pyro
+        if callee in ('replace', 'split', 'join', 'remove'):
             raise CodeGenError(
                 f"'{callee}()' is not supported in the C backend; "
-                f"use --backend go, node or pyro.")
-        # extended stdlib math (Phase 10.4): available on go/node/pyro
-        if callee in ('clamp', 'sign', 'gcd', 'hypot'):
-            raise CodeGenError(
-                f"'{callee}()' is not yet implemented in the C backend; "
                 f"use --backend go, node or pyro.")
         # stateless collection ops (Phase 10.2): available on go/node/pyro
         if callee in ('sort', 'reverse', 'slice', 'index_of'):
@@ -729,7 +729,7 @@ class CodeGenC:
                 f"'{callee}()' is not yet implemented in the C backend; "
                 f"use --backend go, node or pyro.")
         # stdlib slice 2 (Phase 10.4): padding + collection reducers
-        if callee in ('pad_start', 'pad_end', 'concat', 'count', 'sum'):
+        if callee in ('concat', 'count', 'sum'):
             raise CodeGenError(
                 f"'{callee}()' is not yet implemented in the C backend; "
                 f"use --backend go, node or pyro.")
@@ -749,6 +749,47 @@ class CodeGenC:
             t = self.te.infer(args[0])
             suf = 'i' if t == 'int' else 'f'
             return f"cryo_{callee}_{suf}({self._expr(args[0])}, {self._expr(args[1])})"
+        # ── Phase 10.4 stdlib math (ISSUES/09) ──
+        if callee == 'clamp' and len(args) == 3:
+            # keeps the argument's type: int only when ALL three are int, so the
+            # result matches what the Pyro VM computes for the same call
+            ts = [self.te.infer(a) for a in args]
+            suf = 'i' if all(t == 'int' for t in ts) else 'f'
+            a = ', '.join(self._expr(x) for x in args)
+            return f"cryo_clamp_{suf}({a})"
+        if callee == 'sign' and len(args) == 1:
+            suf = 'i' if self.te.infer(args[0]) == 'int' else 'f'
+            return f"cryo_sign_{suf}({self._expr(args[0])})"
+        if callee == 'gcd' and len(args) == 2:
+            return f"cryo_gcd({self._expr(args[0])}, {self._expr(args[1])})"
+        if callee == 'hypot' and len(args) == 2:
+            return f"cryo_hypot({self._expr(args[0])}, {self._expr(args[1])})"
+        # ── Phase 10.4 strings (ISSUES/09) ──
+        if callee == 'upper' and len(args) == 1:
+            return f"cryo_str_upper({self._expr(args[0])})"
+        if callee == 'lower' and len(args) == 1:
+            return f"cryo_str_lower({self._expr(args[0])})"
+        if callee == 'trim' and len(args) == 1:
+            return f"cryo_str_trim({self._expr(args[0])})"
+        if callee == 'contains' and len(args) == 2:
+            return f"cryo_str_contains({self._expr(args[0])}, {self._expr(args[1])})"
+        if callee == 'find' and len(args) == 2:
+            return f"cryo_str_find({self._expr(args[0])}, {self._expr(args[1])})"
+        if callee == 'starts_with' and len(args) == 2:
+            return f"cryo_str_starts_with({self._expr(args[0])}, {self._expr(args[1])})"
+        if callee == 'ends_with' and len(args) == 2:
+            return f"cryo_str_ends_with({self._expr(args[0])}, {self._expr(args[1])})"
+        if callee == 'repeat' and len(args) == 2:
+            return f"cryo_str_repeat({self._expr(args[0])}, {self._expr(args[1])})"
+        if callee in ('pad_start', 'pad_end') and len(args) == 3:
+            fn = 'cryo_str_pad_start' if callee == 'pad_start' else 'cryo_str_pad_end'
+            return (f"{fn}({self._expr(args[0])}, {self._expr(args[1])}, "
+                    f"{self._expr(args[2])})")
+        if callee == 'substr' and len(args) == 3:
+            # Cryo substr(s, start, n) takes a LENGTH; cryo_str_slice takes an
+            # END offset — pass start+n, and the helper clamps.
+            s, st, n = (self._expr(a) for a in args)
+            return f"cryo_str_slice({s}, {st}, ({st}) + ({n}))"
         if callee == 'floor':
             return f"cryo_floor({self._expr(args[0])})"
         if callee == 'ceil':

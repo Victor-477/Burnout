@@ -230,6 +230,84 @@ char* cryo_str_lower(const char* s) {
     return out;
 }
 
+/* ── Phase 10.4 strings (ISSUES/09) ──────────────────────────
+   Semantics mirror the Pyro runtime (pyro/vm/pyro_runtime.c) so --backend c
+   agrees with the VM.
+
+   OWNERSHIP: every char*-returning helper here returns a freshly malloc'd
+   string that the CALLER DOES NOT FREE — the generated C never frees, matching
+   cryo_str_concat/upper/lower above. Short-lived programs trade the leak for a
+   much simpler code generator; do not "fix" one of these in isolation. */
+
+char* cryo_str_trim(const char* s) {
+    if (!s) return strdup("");
+    while (*s && isspace((unsigned char)*s)) s++;
+    size_t len = strlen(s);
+    while (len > 0 && isspace((unsigned char)s[len - 1])) len--;
+    char* out = malloc(len + 1);
+    if (!out) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    memcpy(out, s, len);
+    out[len] = '\0';
+    return out;
+}
+
+bool cryo_str_contains(const char* s, const char* sub) {
+    if (!s || !sub) return false;
+    return strstr(s, sub) != NULL;
+}
+
+int64_t cryo_str_find(const char* s, const char* sub) {
+    if (!s || !sub) return -1;
+    const char* at = strstr(s, sub);
+    return at ? (int64_t)(at - s) : -1;
+}
+
+bool cryo_str_starts_with(const char* s, const char* p) {
+    if (!s || !p) return false;
+    size_t pl = strlen(p);
+    return strlen(s) >= pl && strncmp(s, p, pl) == 0;
+}
+
+bool cryo_str_ends_with(const char* s, const char* p) {
+    if (!s || !p) return false;
+    size_t sl = strlen(s), pl = strlen(p);
+    return sl >= pl && strcmp(s + sl - pl, p) == 0;
+}
+
+char* cryo_str_repeat(const char* s, int64_t n) {
+    if (!s) s = "";
+    if (n < 0) n = 0;
+    size_t sl = strlen(s), total = sl * (size_t)n;
+    char* out = malloc(total + 1);
+    if (!out) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    for (int64_t i = 0; i < n; i++) memcpy(out + (size_t)i * sl, s, sl);
+    out[total] = '\0';
+    return out;
+}
+
+/* pad_start/pad_end: JS padStart/padEnd — the pad is repeated and TRUNCATED to
+   fill exactly (width - len) bytes. */
+static char* cryo_str_pad(const char* s, int64_t width, const char* pad, bool at_start) {
+    if (!s) s = "";
+    if (!pad) pad = "";
+    size_t sl = strlen(s), pl = strlen(pad);
+    if ((int64_t)sl >= width || pl == 0) return strdup(s);
+    size_t need = (size_t)width - sl;
+    char* out = malloc(need + sl + 1);
+    if (!out) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    if (at_start) {
+        for (size_t i = 0; i < need; i++) out[i] = pad[i % pl];
+        memcpy(out + need, s, sl);
+    } else {
+        memcpy(out, s, sl);
+        for (size_t i = 0; i < need; i++) out[sl + i] = pad[i % pl];
+    }
+    out[need + sl] = '\0';
+    return out;
+}
+char* cryo_str_pad_start(const char* s, int64_t w, const char* p) { return cryo_str_pad(s, w, p, true); }
+char* cryo_str_pad_end  (const char* s, int64_t w, const char* p) { return cryo_str_pad(s, w, p, false); }
+
 /* ---------- Print ---------- */
 
 void cryo_print_str(const char* s)  { puts(s ? s : "(null)"); }

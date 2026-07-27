@@ -1112,6 +1112,17 @@ class CodeGenPyro:
             elif tag == TAG_BOOL: out.append(1 if val else 0)
             elif tag == TAG_STR:
                 b = val.encode('utf-8')
+                # A .pyro string constant carries a u16 length, so 65535 bytes is
+                # a hard format limit. Without this check struct.pack raises a
+                # bare "'H' format requires 0 <= number <= 65535" that names
+                # neither the constant nor the cause — it cost real debugging
+                # time once already (see ISSUES/16).
+                if len(b) > 0xFFFF:
+                    head = val[:60].replace('\n', '\\n')
+                    raise CodeGenPyroError(
+                        f"string constant of {len(b)} bytes exceeds the .pyro limit "
+                        f"of 65535 (starts: \"{head}…\"). Split it, or load it at "
+                        f"runtime with read_file().")
                 out += struct.pack('<H', len(b)); out += b
         # functions
         out += struct.pack('<H', len(self._funcs))

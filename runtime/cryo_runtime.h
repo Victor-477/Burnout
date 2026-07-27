@@ -51,6 +51,16 @@ int64_t cryo_str_len(const char* s);
 bool    cryo_str_eq(const char* a, const char* b);
 char*   cryo_str_slice(const char* s, int64_t start, int64_t end);
 char*   cryo_str_upper(const char* s);
+/* Phase 10.4 strings (ISSUES/09). Every char* returned is malloc'd and NOT
+   freed by the generated code — see the ownership note in cryo_runtime.c. */
+char*   cryo_str_trim(const char* s);
+bool    cryo_str_contains(const char* s, const char* sub);
+int64_t cryo_str_find(const char* s, const char* sub);
+bool    cryo_str_starts_with(const char* s, const char* p);
+bool    cryo_str_ends_with(const char* s, const char* p);
+char*   cryo_str_repeat(const char* s, int64_t n);
+char*   cryo_str_pad_start(const char* s, int64_t w, const char* p);
+char*   cryo_str_pad_end(const char* s, int64_t w, const char* p);
 char*   cryo_str_lower(const char* s);
 
 /* ---------- Print ---------- */
@@ -89,6 +99,25 @@ static inline double  cryo_log10(double x)           { return log10(x); }
 static inline double  cryo_sin(double x)             { return sin(x); }
 static inline double  cryo_cos(double x)             { return cos(x); }
 static inline double  cryo_tan(double x)             { return tan(x); }
+
+/* ── Phase 10.4 stdlib: same semantics as the Pyro runtime (ISSUES/09) ──
+   clamp keeps the argument's type, so there are int and float variants, exactly
+   like min/max above. sign and gcd always return int. */
+static inline int64_t cryo_clamp_i(int64_t x, int64_t lo, int64_t hi) {
+    return x < lo ? lo : (x > hi ? hi : x);
+}
+static inline double  cryo_clamp_f(double x, double lo, double hi) {
+    return x < lo ? lo : (x > hi ? hi : x);
+}
+static inline int64_t cryo_sign_f(double x)   { return x < 0 ? -1 : (x > 0 ? 1 : 0); }
+static inline int64_t cryo_sign_i(int64_t x)  { return x < 0 ? -1 : (x > 0 ? 1 : 0); }
+static inline int64_t cryo_gcd(int64_t a, int64_t b) {
+    if (a < 0) a = -a;
+    if (b < 0) b = -b;
+    while (b != 0) { int64_t t = a % b; a = b; b = t; }
+    return a;
+}
+static inline double  cryo_hypot(double a, double b) { return hypot(a, b); }
 
 #define CRYO_PI 3.14159265358979323846
 #define CRYO_E  2.71828182845904523536
