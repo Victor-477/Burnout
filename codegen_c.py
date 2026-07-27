@@ -95,10 +95,20 @@ class TypeEnv:
             t = self.infer(node.then_value)
             return t if t != 'unknown' else self.infer(node.else_value)
         if isinstance(node, CallExpr):
-            if node.callee in ('floor', 'ceil', 'round', 'min', 'max'):
-                if node.callee in ('min', 'max'):
-                    return self.infer(node.args[0]) if node.args else 'number'
+            if node.callee in ('to_string', 'input', 'upper', 'lower', 'trim', 'substr', 'concat'):
+                return 'string'
+            if node.callee in ('to_int', 'len', 'sign', 'gcd'):
+                return 'int'
+            if node.callee in ('to_number', 'sqrt', 'pow', 'hypot', 'floor', 'ceil', 'round'):
                 return 'number'
+            if node.callee in ('starts_with', 'ends_with', 'contains'):
+                return 'bool'
+            # abs/min/max preserve the argument's type. `abs` must NOT be typed
+            # `int` unconditionally: _call() already picks cryo_abs_f for a
+            # `number`, so claiming `int` here made print() emit
+            # cryo_print_i64() on a double and truncate (abs(-2.5) -> 2).
+            if node.callee in ('abs', 'min', 'max'):
+                return self.infer(node.args[0]) if node.args else 'number'
             return self.fn_ret(node.callee)
         if isinstance(node, StructInit):
             return node.struct_name
@@ -108,6 +118,10 @@ class TypeEnv:
             ot = self.infer(node.obj)
             if node.field == 'length': return 'int'
             return self.struct_field(ot, node.field)
+        if isinstance(node, MethodCallExpr):
+            if node.method in ('upper', 'lower', 'substr'): return 'string'
+            if node.method in ('length', 'size'): return 'int'
+            if node.method == 'contains': return 'bool'
         if isinstance(node, IndexAccess):
             at = self.infer(node.obj)
             return elem_type(at)
@@ -252,6 +266,7 @@ class CodeGenC:
         elif isinstance(node, Switch):              self._switch(node)
         elif isinstance(node, Assert):              self._assert(node)
         elif isinstance(node, SafetyBlock):         self._safety(node)
+        elif isinstance(node, Block):               self._safety(node)
         elif isinstance(node, Import):              self._import(node)
         elif isinstance(node, Library):             self._library(node)
         elif isinstance(node, ForeignBlock):        self._foreign(node)
@@ -811,4 +826,4 @@ class CodeGenC:
         if typ == 'int':    return f"cryo_i64_to_str({expr})"
         if typ == 'number': return f"cryo_f64_to_str({expr})"
         if typ == 'bool':   return f"cryo_bool_to_str({expr})"
-        return f"cryo_i64_to_str((int64_t)({expr}))"
+        raise CodeGenError(f"cannot convert type '{typ}' to string in C backend")

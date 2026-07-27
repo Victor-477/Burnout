@@ -103,6 +103,22 @@ PROGRAMS = [
      ["n=7 sq=49"],
      ("pyro", "go", "node")),
 
+    # Conversions and 64-bit width (ISSUES/11 and /15). The literal exceeds both
+    # 2^32 and 2^53, so a truncating format (%ld on Windows) or a stray
+    # pointer-cast shows up as a wrong number rather than a crash. abs() is here
+    # because typing it `int` unconditionally silently truncated abs(-2.5).
+    ("conversions",
+     'int big = 9007199254740993; print(big); print(to_string(big)); '
+     'print(to_string(big) + "!"); '
+     'number f = 2.5; print(to_string(f)); print(abs(0.0 - 2.5)); '
+     'print(to_string(true)); print(0 - 4294967296);',
+     ["9007199254740993", "9007199254740993!", "2.5", "true", "-4294967296"],
+     # node is excluded ON PURPOSE, not because it is broken: its numbers are
+     # IEEE-754 doubles, exact only to 2^53, so 2^53+1 rounds to ...992. That
+     # is the documented "no 64-bit integer" limit of the node backend, and
+     # asserting otherwise would encode a wrong expectation.
+     ("pyro", "go", "c")),
+
     # The construct whose NameError this suite exists to catch. There is no
     # bare-block syntax in Cryo: a `Block` node is produced by the parser when
     # it DESUGARS a for-each over an expression, so that is what reaches the
@@ -113,6 +129,11 @@ PROGRAMS = [
      'for (string c in "ab") { print(c); }',
      ["6", "a", "b"],
      ("pyro", "go", "node")),
+
+    ("large_int_to_string",
+     'int big = 8000000000000; print(to_string(big)); print(to_string(to_string(big))); print(to_string(big) + "!");',
+     ["8000000000000", "8000000000000", "8000000000000!"],
+     ("pyro", "go", "node", "c")),
 ]
 
 # backends that can RUN here (generation is always checked)
