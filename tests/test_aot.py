@@ -101,6 +101,14 @@ PROGRAMS = [
                  'string[] s = []; s.push("k"); string first = s[0]; '
                  'string junk = "xxxxxxxx" + to_string(len(s)); print(first); print(s[0]); '
                  'int n = 0; for (int v in a) { n += v; } print(n);'),
+    # Phase 10.6: function values lower to a function-pointer table in the AOT
+    ("funcvalues",'fn dbl(int x) -> int ={ return x * 2; } '
+                  'fn inc(int x) -> int ={ return x + 1; } '
+                  'fn apply(fn(int)->int f, int v) -> int ={ return f(v); } '
+                  'fn twice(fn(int)->int f, int v) -> int ={ return f(f(v)); } '
+                  'print(apply(dbl, 21)); print(twice(inc, 5)); '
+                  'print(twice((int x) => x * 3, 2)); '
+                  'fn(int)->int g = dbl; print(g(50));'),
     ("trycatch", 'fn risky(int n) -> int ={ if (n < 0) { throw("neg"); } return n * 2; } '
                  'int a = 0; try { a = risky(5); } catch (string e) { a = -1; } print(a); '
                  'try { a = risky(-3); } catch (string e) { print("caught:" + e); a = -99; } print(a); '

@@ -278,6 +278,18 @@ def test_parity():
                           'print(repeat("ab", 3)); print(repeat("x", 0)); '
                           'print(repeat("-", 5));'),
         # Phase 10.2 stateless collection ops — sort/reverse/slice/index_of
+        # Phase 10.6 function values: PUSHFN / CALL_VALUE on both engines
+        ("funcvalues", 'fn dbl(int x) -> int ={ return x * 2; } '
+                       'fn inc(int x) -> int ={ return x + 1; } '
+                       'fn apply(fn(int)->int f, int v) -> int ={ return f(v); } '
+                       'fn twice(fn(int)->int f, int v) -> int ={ return f(f(v)); } '
+                       'print(apply(dbl, 21)); print(apply(inc, 41)); '
+                       'print(twice(dbl, 3)); print(twice((int x) => x + 5, 10)); '
+                       'fn(int)->int g = dbl; print(g(50)); '
+                       'g = (int x) => x - 1; print(g(50)); '
+                       'fn pick(bool b) -> fn(int)->int ={ if (b) { return dbl; } return inc; } '
+                       'fn(int)->int c1 = pick(true); print(c1(10)); '
+                       'c1 = pick(false); print(c1(10));'),
         ("stdlib2", 'print(pad_start("7", 3, "0")); print(pad_start("x", 5, "ab")); '
                     'print(pad_end("x", 5, "ab")); print(pad_start("toolong", 3, " ")); '
                     'int[] a = [1, 2, 3]; int[] b = [4, 5]; int[] c = concat(a, b); '

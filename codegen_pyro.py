@@ -60,6 +60,8 @@ OP_JMPF  = 0x31   # i16 rel (pop; jumps if false)
 OP_JMPT  = 0x32   # i16 rel (pop; jumps if true)
 OP_CALL  = 0x40   # u16 funcidx, u8 argc
 OP_RET   = 0x41
+OP_PUSHFN     = 0x42   # u16 funcidx -> pushes a function value (first-class fn)
+OP_CALL_VALUE = 0x43   # u8 argc -> pops argc args + the fn value beneath, calls it
 OP_PRINT = 0x50   # pops and prints (with \n) according to the type at runtime
 OP_PRINTLN = 0x52 # prints \n
 OP_ASSERT = 0x51  # pop cond, pop msg; if cond is false aborts
@@ -86,6 +88,7 @@ _OPERAND = {
     OP_JMP: 4, OP_JMPF: 4, OP_JMPT: 4,
     OP_CALL: 3, OP_NEWARR: 2, OP_NEWMAP: 2,
     OP_NATIVE: 2, OP_TRYPUSH: 6,   # i32 rel + u16 slot
+    OP_PUSHFN: 2, OP_CALL_VALUE: 1,
 }
 
 _NO_SLOT = 0xFFFF   # TRYPUSH without catch variable
@@ -174,6 +177,7 @@ class CodeGenPyro:
         self._const_idx: Dict = {}
         self._funcs: List[_Func] = []
         self._fnindex: Dict[str, int] = {}
+        self._pending_lambdas: List = []   # (name, Lambda) queued for compilation
         self._cur: Optional[_Func] = None
         self._nlabels = 0
         self._loop_stack: List = []        # (break_label, continue_label)
@@ -274,6 +278,14 @@ class CodeGenPyro:
             self._compile_fn(fn.name, fn.params, fn.body)
         self._compile_fn('main', [], top, synthetic=True)
 
+        # lambdas discovered while compiling bodies are queued (with their index
+        # reserved) and compiled here in index order, so each lands at the
+        # function-table position equal to its index. A lambda body may enqueue
+        # more lambdas — FIFO keeps positions monotonic.
+        while self._pending_lambdas:
+            name, lam = self._pending_lambdas.pop(0)
+            self._compile_fn(name, lam.params, lam.body, synthetic=True)
+
         return self._assemble()
 
     def _compile_fn(self, name, params, body, synthetic=False):
@@ -291,6 +303,54 @@ class CodeGenPyro:
         self._emit(OP_RET)
         self._funcs.append(f)
         self._cur = None
+
+    def _compile_lambda(self, lam: Lambda) -> int:
+        """Reserve a function index for a (non-capturing) lambda and queue its
+        body for compilation after `main`, so its position in the function table
+        equals its index. Capturing lambdas — which reference a variable from the
+        enclosing scope — are rejected: the Pyro VM has no closure cells yet
+        (go/node do)."""
+        self._reject_captures(lam)
+        idx = len(self._fnindex)
+        name = f"__lambda_{idx}"
+        self._fnindex[name] = idx
+        self._pending_lambdas.append((name, lam))
+        return idx
+
+    def _reject_captures(self, lam: Lambda):
+        """Raise if the lambda references a free variable (a capture)."""
+        bound = {pn for _pt, pn in lam.params}
+        used, declared = set(), set()
+        self._walk_names(lam.body, used, declared)
+        free = used - bound - declared
+        # names resolvable without a closure: globals, enum members, functions, builtins
+        free -= set(self._global_consts) | set(self._enum_consts) | set(self._enum_maps)
+        free -= set(self._fnindex) | set(NATIVES)
+        free -= {'print', 'len', 'has', 'keys', 'assert', 'throw'}
+        if free:
+            raise CodeGenPyroError(
+                f"lambda captures {sorted(free)} from the enclosing scope; the pyro "
+                f"backend supports non-capturing lambdas only (use --backend go/node "
+                f"for closures).")
+
+    def _walk_names(self, node, used: set, declared: set):
+        """Collect Identifier names (used) and VarDecl names (declared) in a subtree."""
+        if isinstance(node, list):
+            for x in node:
+                self._walk_names(x, used, declared)
+            return
+        if not isinstance(node, Node):
+            return
+        if isinstance(node, Identifier):
+            used.add(node.name)
+        elif isinstance(node, CallExpr):
+            used.add(node.callee)          # a called name is a use too
+        elif isinstance(node, (VarDecl, ConstDecl)):
+            declared.add(node.name)
+        elif isinstance(node, Lambda):
+            declared.update(pn for _pt, pn in node.params)   # nested lambda's own params
+        for fld in getattr(node, '__dataclass_fields__', {}):
+            self._walk_names(getattr(node, fld), used, declared)
 
     # ── statements ──────────────────────────────────────────
 
@@ -593,16 +653,14 @@ class CodeGenPyro:
         if isinstance(n, Literal):
             self._literal(n); return
         if isinstance(n, Lambda):
-            raise CodeGenPyroError(
-                "first-class functions (lambdas) are not yet supported "
-                "in pyro backend; use --backend go or node. "
-                "(function-values in the Pyro VM are planned — Phase 9)")
+            idx = self._compile_lambda(n)
+            self._emit(OP_PUSHFN, idx)
+            return
         if isinstance(n, Identifier):
-            # function name used as value (1st class) — not yet in the VM
+            # a top-level function name used as a value -> function value
             if n.name in self._fnindex and n.name not in self._cur.locals:
-                raise CodeGenPyroError(
-                    f"function '{n.name}' used as value (1st class) is not yet "
-                    f"supported in the pyro backend; use --backend go or node.")
+                self._emit(OP_PUSHFN, self._fnindex[n.name])
+                return
             if n.name in self._enum_consts:      # enum member -> const int
                 self._emit(OP_CONST, self._const(TAG_INT, self._enum_consts[n.name]))
                 return
@@ -738,6 +796,14 @@ class CodeGenPyro:
             self._expr(n.args[0]); self._expr(n.args[1]); self._emit(OP_HAS); return
         if n.callee == 'keys' and len(n.args) == 1:
             self._expr(n.args[0]); self._emit(OP_KEYS); return
+        # calling a function-valued local variable: load it, then the args,
+        # then CALL_VALUE (a local shadows a top-level function of the same name)
+        if n.callee in self._cur.locals:
+            self._emit(OP_LOAD, self._get_slot(n.callee))
+            for a in n.args:
+                self._expr(a)
+            self._emit(OP_CALL_VALUE, len(n.args))
+            return
         # user-defined functions shadow the native builtins (so a program may
         # define its own `fn sum(...)` etc. without colliding with the stdlib)
         fi = self._fnindex.get(n.callee)
@@ -959,6 +1025,10 @@ class CodeGenPyro:
                 rel = label_off[lbl.id] - (off + 7)   # 1 opcode + 6 (i32 + u16)
                 code += struct.pack('<i', rel)
                 code += struct.pack('<H', slot)
+            elif op == OP_PUSHFN:
+                code += struct.pack('<H', arg)
+            elif op == OP_CALL_VALUE:
+                code.append(arg & 0xFF)
         assert len(code) == code_len
 
         flags = 0

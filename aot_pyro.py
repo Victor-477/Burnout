@@ -136,6 +136,16 @@ def _emit_op(op, operand, off, size, consts, funcs, nloc):
     if op == bc.OP_CALL:
         fi = struct.unpack('<H', operand[:2])[0]
         return f"fn_{fi}();"                       # callee pops its args, leaves result on g_stack
+    if op == bc.OP_PUSHFN:
+        fi = struct.unpack('<H', operand[:2])[0]
+        return f"{{ Value f = val_null(); f.kind = VAL_FUNC; f.as.i = {fi}; g_stack[g_sp++] = f; }}"
+    if op == bc.OP_CALL_VALUE:
+        argc = operand[0]
+        # the fn value sits beneath the args: shift the args down over it, then
+        # dispatch through the function-pointer table (callee pops its own args)
+        return (f"{{ Value fv = g_stack[g_sp - {argc} - 1]; "
+                f"for (int k = 0; k < {argc}; k++) g_stack[g_sp-{argc}-1+k] = g_stack[g_sp-{argc}+k]; "
+                f"g_sp--; g_fntab[fv.as.i](); }}")
     if op == bc.OP_RET:
         return ("{ Value r = g_stack[--g_sp]; "
                 "for (int i = 0; i < %d; i++) release_value(g_locals[base + i]); "
@@ -258,6 +268,10 @@ def compile_to_c(data: bytes) -> str:
 
     for i in range(len(funcs)):
         out.append(f"static void fn_{i}(void);")
+    out.append("")
+    # dispatch table for first-class function values (CALL_VALUE)
+    out.append("static void (*g_fntab[])(void) = { " +
+               ", ".join(f"fn_{i}" for i in range(len(funcs))) + " };")
     out.append("")
 
     for i in range(len(funcs)):

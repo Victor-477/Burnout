@@ -1073,9 +1073,18 @@ def _pyro_err8(src):
         gen_pyro(src); return False
     except _PErr:
         return True
-check("pyro: lambda blocked (fail-closed)", _pyro_err8('fn(int)->int f = (int x) => x + 1;'))
-check("pyro: function as value blocked",
-      _pyro_err8('fn d(int n)->int ={return n;} fn(int)->int f = d;'))
+# Phase 10.6: the pyro VM now has function values. Non-capturing lambdas and
+# named functions used as values compile; only CAPTURING lambdas fail-closed.
+_d106 = disasm_pyro.disassemble(
+    gen_pyro('fn(int)->int f = (int x) => x + 1; print(f(41));', encode=False))
+check("pyro: non-capturing lambda compiles (PUSHFN + CALL_VALUE)",
+      "PUSHFN" in _d106 and "CALL_VALUE" in _d106)
+check("pyro: function as value compiles",
+      "PUSHFN" in disasm_pyro.disassemble(
+          gen_pyro('fn d(int n)->int ={return n;} fn(int)->int f = d; print(f(7));',
+                   encode=False)))
+check("pyro: capturing lambda still fail-closed",
+      _pyro_err8('int k = 3; fn(int)->int f = (int x) => x * k;'))
 
 _bsel, _ = _select(_ast8('fn(int)->int f = (int x) => x + 1; int r = f(1); print(r);'))
 check("auto: firstclassfn not escolhe pyro", _bsel in ('go', 'node'))
