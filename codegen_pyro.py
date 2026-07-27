@@ -20,7 +20,7 @@
 # ============================================================
 import struct
 from ast_nodes import *
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 
 class CodeGenPyroError(Exception):
@@ -175,11 +175,13 @@ _I64_MIN, _I64_MAX = -(1 << 63), (1 << 63) - 1
 
 class CodeGenPyro:
     def __init__(self, safe: bool = True, encode: bool = True,
-                 optimize: bool = True, sandbox: bool = False):
+                 optimize: bool = True, sandbox: bool = False,
+                 extra_natives: Optional[Set[str]] = None):
         self.safe = safe
         self.encode = encode
         self.optimize = optimize
         self.sandbox = sandbox
+        self.extra_natives = set(extra_natives) if extra_natives else set()
         self._consts: List = []            # [(tag, value)]
         self._const_idx: Dict = {}
         self._funcs: List[_Func] = []
@@ -880,6 +882,16 @@ class CodeGenPyro:
             for a in n.args:
                 self._expr(a)
             self._emit(OP_NATIVE, (nid, argc))
+            return
+        if n.callee in self.extra_natives:
+            for a in n.args:
+                self._expr(a)
+            if n.callee not in self._fnindex:
+                f = _Func(n.callee, len(n.args))
+                f.index = len(self._funcs)
+                self._funcs.append(f)
+                self._fnindex[n.callee] = f.index
+            self._emit(OP_CALL, (self._fnindex[n.callee], len(n.args)))
             return
         raise CodeGenPyroError(
             f"function '{n.callee}' unknown in pyro backend "

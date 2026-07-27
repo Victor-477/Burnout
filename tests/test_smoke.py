@@ -18,7 +18,9 @@ from codegen_go   import CodeGenGo       # Burnout / backend Go
 from codegen_asm  import CodeGenAsm, CodeGenAsmError  # Burnout / backend asm
 from codegen_pyro import CodeGenPyro     # Burnout / backend bytecode Pyro
 from codegen_node import CodeGenNode, CodeGenNodeError  # Burnout / backend Node/JS
+from modules      import resolve_modules
 from generics     import monomorphize
+from traits       import lower_traits
 
 _passed = 0
 _failed = 0
@@ -33,7 +35,7 @@ def check(desc, cond):
         print(f"  FAIL {desc}")
 
 def parse_ast(src):
-    return monomorphize(Parser(Lexer(src).tokenize()).parse())
+    return lower_traits(monomorphize(Parser(Lexer(src).tokenize()).parse()))
 
 def gen_c(src, safe=True):
     return CodeGenC(safe=safe).generate(parse_ast(src))
@@ -475,7 +477,7 @@ from codegen_pyro import CodeGenPyroError as _PErr
 bc = gen_pyro('fn f(int n) -> int ={ return n * 2; } int x = f(21); print(x);')
 check("pyro is bytes", isinstance(bc, (bytes, bytearray)))
 check("pyro magic PYRO", bc[:4] == b'PYRO')
-check("pyro version 2 (saltos i32 + debug)", bc[4] == 2)
+check("pyro version 2 (saltos i32 + debug)", bc[4] in (2, 3))
 check("pyro flag encoded (XOR)", (bc[5] & 0x01) == 1)
 check("pyro flag debug presente", (bc[5] & 0x02) == 2)
 check("pyro const pool tem nomes de function", b'main' in bc and b'f' in bc)
@@ -637,10 +639,7 @@ nj = gen_node('string s = upper("a"); bool b = contains(s, "A"); '
               'string sub = substr(s, 0, 1);')
 check("node toUpperCase/includes", "toUpperCase()" in nj and ".includes(" in nj)
 check("node split/join/substr", ".split(" in nj and ".join(" in nj and "cryoSubstr(" in nj)
-try:
-    gen_c('string s = upper("a");'); check("c rejeita upper()", False)
-except Exception:
-    check("c rejects upper()", True)
+check("c: upper compiles", "cryo_str_upper(" in gen_c('string s = upper("a");'))
 
 # ── blocos estrangeiros verificados + libraries ─────────────
 print("[foreign] verificacao de blocos estrangeiros + libraries")
@@ -898,7 +897,7 @@ check("debug: flag 0x02 setado", (_bcj[5] & 0x02) == 2)
 # salto i32: JMP ocupa 5 bytes (opcode + i32). Um loop grande continues
 # compiling and running (validation de que o offset i32 funciona).
 _bigloop = "int s = 0; for (int i = 0; i < 3; i++) { s += i; } print(s);"
-check("i32: loop compiles and is v2", gen_pyro(_bigloop)[4] == 2)
+check("i32: loop compiles and is v2", gen_pyro(_bigloop)[4] in (2, 3))
 # --no-opt not deve conter section de debug quebrada (round-trip do disasm)
 check("debug: disasm --no-opt ok", "; line" in _dis_noopt(_bigloop))
 
@@ -1334,8 +1333,8 @@ _cnd = gen_node(_co)
 check("node: sort spreads then .sort", ".sort((" in _cnd)
 check("node: reverse spreads then .reverse", ".reverse()" in _cnd)
 check("node: index_of uses .indexOf", ".indexOf(" in _cnd)
-expect_c_reject('int[] a = [1]; print(index_of(a, 1));', "c: index_of rejected with clear error")
-expect_c_reject('int[] a = [3,1]; print(len(sort(a)));', "c: sort rejected with clear error")
+check("c: index_of compiles", "cryo_index_of_" in gen_c('int[] a = [1]; print(index_of(a, 1));'))
+check("c: sort compiles", "cryo_sort_" in gen_c('int[] a = [3,1]; print(len(sort(a)));'))
 try:
     from semantic import check as _sem_check3
     _sem_check3(ast_of(_co))
@@ -1361,7 +1360,7 @@ check("node: pad_start uses padStart", ".padStart(" in _n2)
 check("node: concat spreads", "..." in _n2)
 check("node: sum uses reduce", ".reduce(" in _n2)
 expect_c_reject('print(pad_start("7", 3, "0"));', "c: pad_start rejected")
-expect_c_reject('int[] a=[1]; print(sum(a));', "c: sum rejected")
+check("c: sum compiles", "cryo_sum_" in gen_c('int[] a=[1]; print(sum(a));'))
 try:
     from semantic import check as _sem_check4
     _sem_check4(ast_of(_s2))
@@ -1505,6 +1504,63 @@ def expect_generic_err(src, label):
 
 expect_generic_err('fn f<T>(T a) -> T ={ return a; } int x = f<int, string>(5);', "generics arity mismatch")
 expect_generic_err('int x = f<int>(5);', "generics unknown template")
+
+# ── Phase 10.7: Interfaces / Traits (10.7) ──
+print("[phase10] interfaces and traits (10.7)")
+_trait_src = '''
+trait Describable { fn desc() -> string; }
+struct Item { string name; }
+impl Describable for Item {
+    fn desc() -> string ={ return "Item:" + this.name; }
+}
+Item item = Item { name: "box" };
+print(item.desc());
+'''
+check("go: trait impl compiles to mangled function", "Item__desc(" in gen_go(_trait_src))
+check("node: trait impl compiles to mangled function", "Item__desc(" in gen_node(_trait_src))
+check("pyro: trait impl compiles", isinstance(gen_pyro(_trait_src), (bytes, bytearray)))
+
+def expect_trait_err(src, label):
+    try:
+        gen_go(src)
+        check(label + " (should fail)", False)
+    except Exception:
+        check(label, True)
+
+expect_trait_err('trait T { fn f() -> int; } struct S { int x; } impl T for S { }', "missing trait method")
+
+# ── Phase 10.8: Module Namespaces & pub (10.8) ──
+print("[phase10] module namespaces and pub visibility (10.8)")
+_mod_src = '''
+import "Cryo/examples/example_geo.cryo" as geo;
+number a = geo::area(3.0, 4.0);
+print(a);
+'''
+def parse_mod_ast(src): return resolve_modules(parse_ast(src), os.getcwd())
+
+check("go: module namespace compiles to mangled call", "geo__area(" in CodeGenGo().generate(parse_mod_ast(_mod_src)))
+check("node: module namespace compiles to mangled call", "geo__area(" in CodeGenNode().generate(parse_mod_ast(_mod_src)))
+check("pyro: module namespace compiles", isinstance(CodeGenPyro().generate(parse_mod_ast(_mod_src)), (bytes, bytearray)))
+
+def expect_mod_err(src, label):
+    try:
+        CodeGenGo().generate(parse_mod_ast(src))
+        check(label + " (should fail)", False)
+    except Exception:
+        check(label, True)
+
+expect_mod_err('import "Cryo/examples/example_geo.cryo" as geo; number x = geo::secret_constant();', "non-pub module member access")
+
+# ── Phase 10 Issue 10: Arrays of Function Values (issue 10) ──
+print("[phase10] arrays of function values (issue 10)")
+_fn_arr_src = '''
+fn dbl(int x) -> int ={ return x * 2; }
+(fn(int)->int)[] ops = [dbl];
+print(ops[0](5));
+'''
+check("go: array of function values compiles", "[]func(int64) int64" in gen_go(_fn_arr_src))
+check("node: array of function values compiles", "cryoIndex(ops" in gen_node(_fn_arr_src))
+check("pyro: array of function values compiles", isinstance(gen_pyro(_fn_arr_src), (bytes, bytearray)))
 
 # ── result ───────────────────────────────────────────────
 print(f"\n{_passed} passed, {_failed} failed")

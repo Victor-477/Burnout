@@ -593,6 +593,10 @@ class CodeGenNode:
         if isinstance(n, (SpawnExpr, AwaitExpr)):
             self._err("concurrency (spawn/await) is not supported in the node backend; "
                       "use --backend go.")
+        if isinstance(n, CallValueExpr):
+            callee = self._expr(n.callee)
+            args = ", ".join(self._expr(a) for a in n.args)
+            return f"({callee})({args})"
         if isinstance(n, Lambda):
             return self._lambda(n)
         self._err(f"expression not supported in node backend: {type(n).__name__}")

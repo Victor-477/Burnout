@@ -718,14 +718,16 @@ class CodeGenC:
         callee = node.callee
         args   = node.args
 
-        # resources only for Go backend (Pyro/JSON, concurrency, HTTP, LLM)
+        # resources only for Go/Node/Pyro backends
         if callee.startswith('pyro_') or callee in (
                 'skills', 'skill_get', 'skill_has', 'skills_json', 'json_encode',
                 'http_get', 'http_post', 'sleep',
-                'schema_of', 'llm', 'tools', 'tool_get', 'tools_json', 'agent'):
+                'schema_of', 'llm', 'tools', 'tool_get', 'tools_json', 'agent',
+                'clamp', 'sign', 'gcd', 'hypot', 'starts_with', 'ends_with', 'repeat',
+                'pad_start', 'pad_end'):
             raise CodeGenError(
-                f"'{callee}()' only exists in the Go backend (JSON/concurrency/HTTP/LLM); "
-                f"use --backend go.")
+                f"'{callee}()' is not supported in the C backend; "
+                f"use --backend go, node or pyro.")
         # `remove(map, key)` needs MAPS, which the C backend does not have at
         # all (c_type rejects map<...>), so it stays unsupported here.
         if callee == 'remove':

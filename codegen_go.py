@@ -92,6 +92,8 @@ def _go_fn_type(t: str) -> str:
 def go_type(t: str) -> str:
     if not t:
         return ''
+    if t.startswith('(') and t.endswith(')'):
+        return go_type(t[1:-1])
     if t.startswith('fn(') and '->' in t:     # function type -> func(...)...
         return _go_fn_type(t)
     if t.endswith('?'):                       # optional -> pointer
