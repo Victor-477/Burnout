@@ -55,7 +55,9 @@ def load(data: bytes) -> dict:
         elif tag == bc.TAG_FLT: consts.append(('float', rd('<d')))
         elif tag == bc.TAG_BOOL: consts.append(('bool', bool(data[pos]))); pos += 1
         elif tag == bc.TAG_STR:
-            ln = rd('<H'); consts.append(('str', data[pos:pos+ln].decode('utf-8'))); pos += ln
+            # v3 widened the string length u16 -> u32; v2 files still read.
+            ln = rd('<I') if version >= 3 else rd('<H')
+            consts.append(('str', data[pos:pos+ln].decode('utf-8'))); pos += ln
         else:
             raise ValueError(f"unknown constant tag: {tag}")
 

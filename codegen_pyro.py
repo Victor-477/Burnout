@@ -7,13 +7,13 @@
 #
 #  Format of the .pyro file (little-endian):
 #    magic    4  "PYRO"
-#    version  1  0x02
+#    version  1  0x03  (v2 still readable)
 #    flags    1  bit0 = code section encoded (XOR rolling)
 #                bit1 = debugging section present (pc->line)
 #                bit2 = sandbox (VM rejects network/machine natives)
 #    nconsts  u16   after: [ tag(1) + payload ] * nconsts
 #       tag 1 int64  (8)   | tag 2 float64 (8)
-#       tag 3 string (u16 len + bytes utf8) | tag 4 bool (1)
+#       tag 3 string (u32 len + bytes utf8; u16 in v2) | tag 4 bool (1)
 #    nfuncs   u16   after: [ nameidx u16, entry u32, nparams u8, nlocals u16 ] * nfuncs
 #    entryfn  u16   (index of the 'main' function)
 #    codelen  u32   after: code bytes (possibly encoded)
@@ -141,7 +141,10 @@ TAG_STR = 3
 TAG_BOOL = 4
 
 _MAGIC = b"PYRO"
-_VERSION = 2         # v2: jumps i32 + optional debugging section (pc->line)
+_VERSION = 3         # v3: string constants use a u32 length (v2 was u16)
+#   v2: jumps i32 + optional debugging section (pc->line)
+#   v3: TAG_STR length widened u16 -> u32, lifting the 64 KB literal cap.
+#       Readers accept BOTH: the width is chosen by the version byte.
 _FLAG_ENCODED = 0x01
 _FLAG_DEBUG   = 0x02
 _FLAG_SANDBOX = 0x04
@@ -1112,18 +1115,16 @@ class CodeGenPyro:
             elif tag == TAG_BOOL: out.append(1 if val else 0)
             elif tag == TAG_STR:
                 b = val.encode('utf-8')
-                # A .pyro string constant carries a u16 length, so 65535 bytes is
-                # a hard format limit. Without this check struct.pack raises a
-                # bare "'H' format requires 0 <= number <= 65535" that names
-                # neither the constant nor the cause — it cost real debugging
-                # time once already (see ISSUES/16).
-                if len(b) > 0xFFFF:
+                # v3 widened this length u16 -> u32, lifting the old 64 KB cap
+                # (ISSUES/16). The guard stays: 4 GB is not a real program, and a
+                # bare struct.error would name neither the cause nor the constant.
+                if len(b) > 0xFFFFFFFF:
                     head = val[:60].replace('\n', '\\n')
                     raise CodeGenPyroError(
                         f"string constant of {len(b)} bytes exceeds the .pyro limit "
-                        f"of 65535 (starts: \"{head}…\"). Split it, or load it at "
-                        f"runtime with read_file().")
-                out += struct.pack('<H', len(b)); out += b
+                        f"(starts: \"{head}…\"). Split it, or load it at runtime "
+                        f"with read_file().")
+                out += struct.pack('<I', len(b)); out += b
         # functions
         out += struct.pack('<H', len(self._funcs))
         for f in self._funcs:
