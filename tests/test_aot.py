@@ -101,6 +101,14 @@ PROGRAMS = [
                  'string[] s = []; s.push("k"); string first = s[0]; '
                  'string junk = "xxxxxxxx" + to_string(len(s)); print(first); print(s[0]); '
                  'int n = 0; for (int v in a) { n += v; } print(n);'),
+    # Phase 10.6: closures — captures are bundled by OP_CLOSURE and arrive as
+    # the callee's leading locals (AOT reorders the stack to match the VM)
+    ("closures",  'fn adder(int base) -> fn(int)->int ={ return (int x) => x + base; } '
+                  'fn(int)->int a10 = adder(10); fn(int)->int a100 = adder(100); '
+                  'print(a10(5)); print(a100(5)); print(adder(7)(3)); '
+                  'fn mk(int m, string t) -> fn(int)->string ={ '
+                  '  return (int v) => t + to_string(v * m); } '
+                  'fn(int)->string f = mk(3, "n="); print(f(4)); print(a10(0));'),
     # Phase 10.6: function values lower to a function-pointer table in the AOT
     ("funcvalues",'fn dbl(int x) -> int ={ return x * 2; } '
                   'fn inc(int x) -> int ={ return x + 1; } '

@@ -62,6 +62,7 @@ OP_CALL  = 0x40   # u16 funcidx, u8 argc
 OP_RET   = 0x41
 OP_PUSHFN     = 0x42   # u16 funcidx -> pushes a function value (first-class fn)
 OP_CALL_VALUE = 0x43   # u8 argc -> pops argc args + the fn value beneath, calls it
+OP_CLOSURE    = 0x44   # u16 funcidx, u8 ncap -> pops ncap values, pushes a closure
 OP_PRINT = 0x50   # pops and prints (with \n) according to the type at runtime
 OP_PRINTLN = 0x52 # prints \n
 OP_ASSERT = 0x51  # pop cond, pop msg; if cond is false aborts
@@ -88,7 +89,7 @@ _OPERAND = {
     OP_JMP: 4, OP_JMPF: 4, OP_JMPT: 4,
     OP_CALL: 3, OP_NEWARR: 2, OP_NEWMAP: 2,
     OP_NATIVE: 2, OP_TRYPUSH: 6,   # i32 rel + u16 slot
-    OP_PUSHFN: 2, OP_CALL_VALUE: 1,
+    OP_PUSHFN: 2, OP_CALL_VALUE: 1, OP_CLOSURE: 3,
 }
 
 _NO_SLOT = 0xFFFF   # TRYPUSH without catch variable
@@ -283,8 +284,8 @@ class CodeGenPyro:
         # function-table position equal to its index. A lambda body may enqueue
         # more lambdas — FIFO keeps positions monotonic.
         while self._pending_lambdas:
-            name, lam = self._pending_lambdas.pop(0)
-            self._compile_fn(name, lam.params, lam.body, synthetic=True)
+            name, params, body = self._pending_lambdas.pop(0)
+            self._compile_fn(name, params, body, synthetic=True)
 
         return self._assemble()
 
@@ -294,6 +295,10 @@ class CodeGenPyro:
         self._cur = f
         self._loop_stack = []
         self._cur_line = 0
+        # names written anywhere in this function — used to enforce that a
+        # captured variable is effectively final (see _captures_of)
+        self._assigned_names = set()
+        self._collect_assigned(body, self._assigned_names)
         for _pt, pn in params:
             self._slot(pn)
         for s in body:
@@ -304,21 +309,30 @@ class CodeGenPyro:
         self._funcs.append(f)
         self._cur = None
 
-    def _compile_lambda(self, lam: Lambda) -> int:
-        """Reserve a function index for a (non-capturing) lambda and queue its
-        body for compilation after `main`, so its position in the function table
-        equals its index. Capturing lambdas — which reference a variable from the
-        enclosing scope — are rejected: the Pyro VM has no closure cells yet
-        (go/node do)."""
-        self._reject_captures(lam)
+    def _compile_lambda(self, lam: Lambda):
+        """Reserve a function index for a lambda and queue its body, so its
+        position in the function table equals its index. Returns
+        (index, captured_names).
+
+        Captured variables become LEADING parameters of the synthetic function;
+        at the creation site the enclosing frame pushes their current values and
+        OP_CLOSURE bundles them into the function value."""
+        captured = self._captures_of(lam)
         idx = len(self._fnindex)
         name = f"__lambda_{idx}"
         self._fnindex[name] = idx
-        self._pending_lambdas.append((name, lam))
-        return idx
+        # the synthetic function's params are: captured..., then declared
+        params = [("any", c) for c in captured] + list(lam.params)
+        self._pending_lambdas.append((name, params, lam.body))
+        return idx, captured
 
-    def _reject_captures(self, lam: Lambda):
-        """Raise if the lambda references a free variable (a capture)."""
+    def _captures_of(self, lam: Lambda):
+        """Free variables of `lam` that must be captured from the enclosing frame.
+
+        Capture is BY VALUE. To guarantee this can never disagree with the
+        go/node backends (which capture by reference), a captured variable must
+        be "effectively final" — never reassigned in the enclosing function.
+        Otherwise the two would observe different values and Pyro parity breaks."""
         bound = {pn for _pt, pn in lam.params}
         used, declared = set(), set()
         self._walk_names(lam.body, used, declared)
@@ -327,11 +341,34 @@ class CodeGenPyro:
         free -= set(self._global_consts) | set(self._enum_consts) | set(self._enum_maps)
         free -= set(self._fnindex) | set(NATIVES)
         free -= {'print', 'len', 'has', 'keys', 'assert', 'throw'}
-        if free:
+        # only enclosing LOCALS can be captured; anything else is an unknown name
+        captured = sorted(n for n in free if n in self._cur.locals)
+        unknown = sorted(free - set(captured))
+        if unknown:
             raise CodeGenPyroError(
-                f"lambda captures {sorted(free)} from the enclosing scope; the pyro "
-                f"backend supports non-capturing lambdas only (use --backend go/node "
-                f"for closures).")
+                f"lambda references unknown name(s) {unknown}")
+        reassigned = sorted(c for c in captured if c in self._assigned_names)
+        if reassigned:
+            raise CodeGenPyroError(
+                f"lambda captures {reassigned}, which is reassigned in the enclosing "
+                f"function. Captured variables must be effectively final in the pyro "
+                f"backend (capture is by value, so a later write would be invisible "
+                f"here but visible with --backend go/node). Copy it into a new "
+                f"variable and capture that instead.")
+        return captured
+
+    def _collect_assigned(self, node, out: set):
+        """Names written to anywhere in a subtree (assignment/compound/increment)."""
+        if isinstance(node, list):
+            for x in node:
+                self._collect_assigned(x, out)
+            return
+        if not isinstance(node, Node):
+            return
+        if isinstance(node, (Assignment, CompoundAssignment, Increment)):
+            out.add(node.name)
+        for fld in getattr(node, '__dataclass_fields__', {}):
+            self._collect_assigned(getattr(node, fld), out)
 
     def _walk_names(self, node, used: set, declared: set):
         """Collect Identifier names (used) and VarDecl names (declared) in a subtree."""
@@ -385,7 +422,7 @@ class CodeGenPyro:
         elif isinstance(n, Continue):           self._continue()
         elif isinstance(n, Assert):             self._assert(n)
         elif isinstance(n, TryCatch):           self._try(n)
-        elif isinstance(n, SafetyBlock):
+        elif isinstance(n, (SafetyBlock, Block)):
             for s in n.body: self._stmt(s)
         elif isinstance(n, CallExpr) and n.callee == 'throw':
             arg = n.args[0] if n.args else Literal('null', None)
@@ -653,8 +690,15 @@ class CodeGenPyro:
         if isinstance(n, Literal):
             self._literal(n); return
         if isinstance(n, Lambda):
-            idx = self._compile_lambda(n)
-            self._emit(OP_PUSHFN, idx)
+            idx, captured = self._compile_lambda(n)
+            if not captured:
+                self._emit(OP_PUSHFN, idx)
+            else:
+                # push the captured values from the current frame, then bundle
+                # them into a closure (captured BY VALUE — see _captures_of)
+                for c in captured:
+                    self._emit(OP_LOAD, self._get_slot(c))
+                self._emit(OP_CLOSURE, (idx, len(captured)))
             return
         if isinstance(n, CallValueExpr):
             # calling the result of an expression: push the function value,
@@ -1037,6 +1081,10 @@ class CodeGenPyro:
                 code += struct.pack('<H', arg)
             elif op == OP_CALL_VALUE:
                 code.append(arg & 0xFF)
+            elif op == OP_CLOSURE:
+                fi, ncap = arg
+                code += struct.pack('<H', fi)
+                code.append(ncap & 0xFF)
         assert len(code) == code_len
 
         flags = 0

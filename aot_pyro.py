@@ -138,14 +138,28 @@ def _emit_op(op, operand, off, size, consts, funcs, nloc):
         return f"fn_{fi}();"                       # callee pops its args, leaves result on g_stack
     if op == bc.OP_PUSHFN:
         fi = struct.unpack('<H', operand[:2])[0]
-        return f"{{ Value f = val_null(); f.kind = VAL_FUNC; f.as.i = {fi}; g_stack[g_sp++] = f; }}"
+        return f"g_stack[g_sp++] = val_func({fi}, NULL);"
+    if op == bc.OP_CLOSURE:
+        fi = struct.unpack('<H', operand[:2])[0]
+        ncap = operand[2]
+        return (f"{{ RcArray* cap = rc_array_new(); "
+                f"for (int k = 0; k < {ncap}; k++) rc_array_push(cap, g_stack[g_sp-{ncap}+k]); "
+                f"for (int k = 0; k < {ncap}; k++) release_value(g_stack[g_sp-{ncap}+k]); "
+                f"g_sp -= {ncap}; g_stack[g_sp++] = val_func({fi}, cap); }}")
     if op == bc.OP_CALL_VALUE:
         argc = operand[0]
-        # the fn value sits beneath the args: shift the args down over it, then
-        # dispatch through the function-pointer table (callee pops its own args)
+        # The callee pops its own args off g_stack, and (for a closure) its
+        # captured values must arrive as the LEADING args. So: lift the args,
+        # drop the fn value, push captures, push the args back, then dispatch.
         return (f"{{ Value fv = g_stack[g_sp - {argc} - 1]; "
-                f"for (int k = 0; k < {argc}; k++) g_stack[g_sp-{argc}-1+k] = g_stack[g_sp-{argc}+k]; "
-                f"g_sp--; g_fntab[fv.as.i](); }}")
+                f"Value _a[{argc if argc else 1}]; "
+                f"for (int k = 0; k < {argc}; k++) _a[k] = g_stack[g_sp-{argc}+k]; "
+                f"g_sp -= {argc} + 1; "
+                f"int nc = fv.as.arr ? (int)fv.as.arr->length : 0; "
+                f"for (int k = 0; k < nc; k++) {{ Value c = fv.as.arr->data[k]; "
+                f"retain_value(c); g_stack[g_sp++] = c; }} "
+                f"for (int k = 0; k < {argc}; k++) g_stack[g_sp++] = _a[k]; "
+                f"void (*_f)(void) = g_fntab[fv.fnidx]; release_value(fv); _f(); }}")
     if op == bc.OP_RET:
         return ("{ Value r = g_stack[--g_sp]; "
                 "for (int i = 0; i < %d; i++) release_value(g_locals[base + i]); "

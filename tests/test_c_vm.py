@@ -278,6 +278,17 @@ def test_parity():
                           'print(repeat("ab", 3)); print(repeat("x", 0)); '
                           'print(repeat("-", 5));'),
         # Phase 10.2 stateless collection ops — sort/reverse/slice/index_of
+        # Phase 10.6 closures: OP_CLOSURE captures by value into leading locals
+        ("closures", 'fn adder(int base) -> fn(int)->int ={ return (int x) => x + base; } '
+                     'fn(int)->int a10 = adder(10); fn(int)->int a100 = adder(100); '
+                     'print(a10(5)); print(a100(5)); print(a10(1) + a100(1)); '
+                     'print(adder(7)(3)); '
+                     # two captures, and a captured string
+                     'fn mk(int m, string tag) -> fn(int)->string ={ '
+                     '  return (int v) => tag + to_string(v * m); } '
+                     'fn(int)->string f = mk(3, "n="); print(f(4)); '
+                     # each closure keeps its own captured value
+                     'print(a10(0)); print(a100(0));'),
         # Phase 10.6 function values: PUSHFN / CALL_VALUE on both engines
         ("funcvalues", 'fn dbl(int x) -> int ={ return x * 2; } '
                        'fn inc(int x) -> int ={ return x + 1; } '

@@ -14,7 +14,7 @@
 # ============================================================
 from ast_nodes import (
     Program, FunctionDecl, VarDecl, Assignment, CompoundAssignment, Increment,
-    Return, If, While, For, ForEach, Break, Continue,
+    Return, If, While, For, ForEach, Break, Continue, Block,
     BinaryExpr, UnaryExpr, CallExpr, Identifier, Literal,
 )
 
@@ -248,6 +248,9 @@ class CodeGenWasm:
                 raise CodeGenWasmError("'continue' outside a loop (wasm backend)")
             _bpos, cpos = self._loops[-1]
             self.body += bytes([0x0C]) + _uleb(len(self._blocks) - 1 - cpos)
+        elif isinstance(n, Block):
+            for s in n.body:
+                self._stmt(s)
         elif isinstance(n, CallExpr):
             self._call(n)
             if n.callee != "print":

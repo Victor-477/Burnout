@@ -1083,8 +1083,15 @@ check("pyro: function as value compiles",
       "PUSHFN" in disasm_pyro.disassemble(
           gen_pyro('fn d(int n)->int ={return n;} fn(int)->int f = d; print(f(7));',
                    encode=False)))
-check("pyro: capturing lambda still fail-closed",
-      _pyro_err8('int k = 3; fn(int)->int f = (int x) => x * k;'))
+# Phase 10.6 closures: a capturing lambda compiles to OP_CLOSURE...
+_dclo = disasm_pyro.disassemble(gen_pyro(
+    'fn adder(int b) -> fn(int)->int ={ return (int x) => x + b; } '
+    'fn(int)->int a = adder(10); print(a(5));', encode=False))
+check("pyro: capturing lambda emits CLOSURE", "CLOSURE" in _dclo)
+# ...but capture is BY VALUE, so a captured variable must be effectively final,
+# otherwise pyro and go/node (capture by reference) would disagree.
+check("pyro: capturing a REASSIGNED variable is rejected",
+      _pyro_err8('fn f() -> int ={ int k = 1; fn()->int g = () => k; k = 2; return g(); }'))
 
 _bsel, _ = _select(_ast8('fn(int)->int f = (int x) => x + 1; int r = f(1); print(r);'))
 check("auto: firstclassfn not escolhe pyro", _bsel in ('go', 'node'))
