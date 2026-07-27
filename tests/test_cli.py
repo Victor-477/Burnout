@@ -98,6 +98,19 @@ PROGRAMS = [
      ["2", "3", "3", "2", "2", "0", "20", "30", "999", "10"],
      ("pyro", "go", "node")),
 
+    # Roadmap 10.9, second half: `a..b` outside a `for` is the array itself.
+    # Asserted through len/index/sum for the same reason as slices_array.
+    # The last two cases are the point of the feature: inside a `for` the range
+    # must STILL lower to a counted loop, so the ergonomic form stays free.
+    ("range_values",
+     'int[] r = 0..5; print(len(r)); print(r[0]); print(r[4]); '
+     'print(len(1..=4)); print(sum(0..5)); print((2..6)[1]); '
+     'int n = 3; print(len(0..n+1)); '
+     'print(len(0..0)); print(len(5..2)); '
+     'int t = 0; for (int i in 0..4) { t += i; } print(t);',
+     ["5", "0", "4", "4", "10", "3", "4", "0", "0", "6"],
+     ("pyro", "go", "node")),
+
     ("slices_string",
      'string s = "hello world"; '
      'print(s[0..5]); print(s[0..=4]); print(s[6..]); print(s[..5]); '
