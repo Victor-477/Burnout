@@ -479,6 +479,15 @@ class CodeGenGo:
                   "\tb := make([]T, end-start)",
                   "\tcopy(b, a[start:end])",
                   "\treturn b", "}", ""]
+        if 'strslice' in self._helpers:
+            H += ["// cryoStrSlice: substring [start, end) with safe bounds.",
+                  "// Byte-indexed, matching the VM's slice() on strings.",
+                  "func cryoStrSlice(s string, start, end int64) string {",
+                  "\tn := int64(len(s))",
+                  "\tif start < 0 { start = 0 }",
+                  "\tif end > n { end = n }",
+                  "\tif start > end { start = end }",
+                  "\treturn s[start:end]", "}", ""]
         if 'pad' in self._helpers:
             self._imports.add('strings')
             H += ["// cryoPad: pad_start/pad_end (JS padStart/padEnd semantics).",
@@ -1593,6 +1602,12 @@ class CodeGenGo:
             self._helpers.add('reverse')
             return f"cryoReverse({self._expr(a[0])})"
         if c == 'slice' and len(a) == 3:
+            # slice() is polymorphic over array|string (10.9), but Go's generic
+            # cryoSlice only unifies with []T — a string needs its own helper.
+            if self.te.infer(a[0]) == 'string':
+                self._helpers.add('strslice')
+                return (f"cryoStrSlice({self._expr(a[0])}, "
+                        f"int64({self._expr(a[1])}), int64({self._expr(a[2])}))")
             self._helpers.add('slice')
             return (f"cryoSlice({self._expr(a[0])}, "
                     f"int64({self._expr(a[1])}), int64({self._expr(a[2])}))")

@@ -84,6 +84,27 @@ PROGRAMS = [
      ["10", "30"],
      ("pyro", "go", "node")),
 
+    # Roadmap 10.9. Array slices are asserted through len/index/sum rather than
+    # by printing the slice, because each backend formats arrays differently
+    # (`[20, 30]` vs `[20 30]` vs `[ 20, 30 ]`) and this table holds ONE
+    # expected output for all of them. The printed forms are covered per-engine
+    # by Cryo/examples/example_slices.cryo via test_c_vm.
+    ("slices_array",
+     'int[] xs = [10, 20, 30, 40, 50]; '
+     'print(len(xs[1..3])); print(len(xs[1..=3])); print(len(xs[2..])); '
+     'print(len(xs[..2])); print(len(xs[3..99])); print(len(xs[0..0])); '
+     'print(xs[1..4][0]); print(sum(xs[0..2])); '
+     'int[] p = xs[0..2]; p[0] = 999; print(p[0]); print(xs[0]);',
+     ["2", "3", "3", "2", "2", "0", "20", "30", "999", "10"],
+     ("pyro", "go", "node")),
+
+    ("slices_string",
+     'string s = "hello world"; '
+     'print(s[0..5]); print(s[0..=4]); print(s[6..]); print(s[..5]); '
+     'print(s[3..99]); print(upper(s[0..5]));',
+     ["hello", "hello", "world", "hello", "lo world", "HELLO"],
+     ("pyro", "go", "node", "c")),
+
     ("structs_match",
      'enum Res { Ok(int), Err(string) } '
      'fn f(int x) -> string ={ Res r = x > 0 ? Ok(x) : Err("neg"); '

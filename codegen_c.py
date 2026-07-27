@@ -800,7 +800,12 @@ class CodeGenC:
             if callee == 'concat' and len(args) == 2:
                 return f"cryo_array_concat({self._expr(args[0])}, {self._expr(args[1])})"
             if callee == 'slice' and len(args) == 3:
-                return (f"cryo_array_slice({self._expr(args[0])}, "
+                # slice() is polymorphic over array|string (10.9); C is not, so
+                # dispatch on the inferred operand type. Both helpers already
+                # clamp out-of-range bounds the same way the VM does.
+                fn = ('cryo_str_slice' if self.te.infer(args[0]) == 'string'
+                      else 'cryo_array_slice')
+                return (f"{fn}({self._expr(args[0])}, "
                         f"{self._expr(args[1])}, {self._expr(args[2])})")
             if callee == 'sort' and len(args) == 1:
                 return f"cryo_sort_{_elem_suffix(args[0])}({self._expr(args[0])})"
