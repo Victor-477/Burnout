@@ -125,7 +125,10 @@ def _run_pyro(pyro_path: str, compiler_dir: str, run: bool, verbose: bool):
         if need:
             if verbose:
                 print(f"→ Compiling Pyro VM: go build -o {pyrovm}  (in {vm_dir})")
-            r = subprocess.run(['go', 'build', '-o', pyrovm, '.'],
+            # Build the specific .go file, NOT the package ('.'): pyro/vm also
+            # holds the C VM (main.c, pyro_runtime.c) and `go build .` refuses
+            # with "C source files not allowed when not using cgo or SWIG".
+            r = subprocess.run(['go', 'build', '-o', pyrovm, 'main.go'],
                                cwd=vm_dir, capture_output=True, text=True)
             if r.returncode != 0:
                 print(f"[go] Error compiling Pyro VM:\n{r.stderr}", file=sys.stderr)
