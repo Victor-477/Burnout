@@ -96,11 +96,13 @@ class TypeEnv:
             return t if t != 'unknown' else self.infer(node.else_value)
         if isinstance(node, CallExpr):
             if node.callee in ('to_string', 'input', 'upper', 'lower', 'trim', 'substr',
-                               'concat', 'repeat', 'pad_start', 'pad_end'):
+                               'concat', 'repeat', 'pad_start', 'pad_end', 'replace', 'join'):
                 return 'string'
             if node.callee in ('to_int', 'len', 'sign', 'gcd', 'find',
                                'count', 'index_of'):
                 return 'int'
+            if node.callee == 'split':
+                return 'string[]'
             # these return a NEW array of the same type as their first argument
             if node.callee in ('sort', 'reverse', 'slice', 'concat') and node.args:
                 return self.infer(node.args[0])
@@ -724,11 +726,11 @@ class CodeGenC:
             raise CodeGenError(
                 f"'{callee}()' only exists in the Go backend (JSON/concurrency/HTTP/LLM); "
                 f"use --backend go.")
-        # string builtins still needing an array/map (split/join) or a map
-        # (remove), plus replace which needs a growing buffer — go/node/pyro
-        if callee in ('replace', 'split', 'join', 'remove'):
+        # `remove(map, key)` needs MAPS, which the C backend does not have at
+        # all (c_type rejects map<...>), so it stays unsupported here.
+        if callee == 'remove':
             raise CodeGenError(
-                f"'{callee}()' is not supported in the C backend; "
+                f"'{callee}()' needs maps, which the C backend does not support; "
                 f"use --backend go, node or pyro.")
 
         # ── built-ins ──
@@ -811,6 +813,13 @@ class CodeGenC:
                 fn = 'cryo_count' if callee == 'count' else 'cryo_index_of'
                 return (f"{fn}_{_elem_suffix(args[0])}({self._expr(args[0])}, "
                         f"{self._expr(args[1])})")
+        if callee == 'replace' and len(args) == 3:
+            a = ', '.join(self._expr(x) for x in args)
+            return f"cryo_str_replace({a})"
+        if callee == 'split' and len(args) == 2:
+            return f"cryo_str_split({self._expr(args[0])}, {self._expr(args[1])})"
+        if callee == 'join' and len(args) == 2:
+            return f"cryo_str_join({self._expr(args[0])}, {self._expr(args[1])})"
         if callee == 'substr' and len(args) == 3:
             # Cryo substr(s, start, n) takes a LENGTH; cryo_str_slice takes an
             # END offset — pass start+n, and the helper clamps.

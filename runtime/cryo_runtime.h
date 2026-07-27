@@ -77,6 +77,9 @@ bool    cryo_str_ends_with(const char* s, const char* p);
 char*   cryo_str_repeat(const char* s, int64_t n);
 char*   cryo_str_pad_start(const char* s, int64_t w, const char* p);
 char*   cryo_str_pad_end(const char* s, int64_t w, const char* p);
+char*   cryo_str_replace(const char* s, const char* old, const char* rep);
+CryoArray* cryo_str_split(const char* s, const char* sep);   /* -> string[] */
+char*   cryo_str_join(CryoArray* a, const char* sep);
 char*   cryo_str_lower(const char* s);
 
 /* ---------- Print ---------- */

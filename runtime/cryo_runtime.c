@@ -404,6 +404,85 @@ static char* cryo_str_pad(const char* s, int64_t width, const char* pad, bool at
 char* cryo_str_pad_start(const char* s, int64_t w, const char* p) { return cryo_str_pad(s, w, p, true); }
 char* cryo_str_pad_end  (const char* s, int64_t w, const char* p) { return cryo_str_pad(s, w, p, false); }
 
+/* replace ALL occurrences. Sized exactly up front (count the matches) instead of
+   growing, so there is a single allocation and no realloc dance. An empty `old`
+   would match forever, so it returns the input unchanged — same as the VM. */
+char* cryo_str_replace(const char* s, const char* old, const char* rep) {
+    if (!s) s = "";
+    if (!old) old = "";
+    if (!rep) rep = "";
+    size_t ol = strlen(old);
+    if (ol == 0) return strdup(s);
+    size_t rl = strlen(rep), n = 0;
+    for (const char* p = s; (p = strstr(p, old)) != NULL; p += ol) n++;
+    if (n == 0) return strdup(s);
+    size_t out_len = strlen(s) + n * (rl > ol ? rl - ol : 0) - n * (ol > rl ? ol - rl : 0);
+    char* out = malloc(out_len + 1);
+    if (!out) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    char* w = out;
+    for (const char* p = s;;) {
+        const char* at = strstr(p, old);
+        if (!at) { size_t t = strlen(p); memcpy(w, p, t); w += t; break; }
+        size_t pre = (size_t)(at - p);
+        memcpy(w, p, pre); w += pre;
+        memcpy(w, rep, rl); w += rl;
+        p = at + ol;
+    }
+    *w = '\0';
+    return out;
+}
+
+/* split -> string[] (a CryoArray of char*). An empty separator splits into
+   single characters, matching split_str() in the Pyro runtime. */
+CryoArray* cryo_str_split(const char* s, const char* sep) {
+    if (!s) s = "";
+    if (!sep) sep = "";
+    CryoArray* arr = cryo_array_new();
+    size_t seplen = strlen(sep);
+    if (seplen == 0) {
+        for (const char* p = s; *p; p++) {
+            char* ch = malloc(2);
+            if (!ch) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+            ch[0] = *p; ch[1] = '\0';
+            cryo_push_str(arr, ch);
+        }
+        return arr;
+    }
+    const char* curr = s;
+    const char* next;
+    while ((next = strstr(curr, sep)) != NULL) {
+        size_t n = (size_t)(next - curr);
+        char* part = malloc(n + 1);
+        if (!part) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+        memcpy(part, curr, n); part[n] = '\0';
+        cryo_push_str(arr, part);
+        curr = next + seplen;
+    }
+    cryo_push_str(arr, strdup(curr));      /* trailing piece (may be "") */
+    return arr;
+}
+
+char* cryo_str_join(CryoArray* a, const char* sep) {
+    if (!sep) sep = "";
+    size_t seplen = strlen(sep), total = 0;
+    for (int64_t i = 0; i < a->length; i++) {
+        const char* e = (const char*)(uintptr_t)a->data[i];
+        total += e ? strlen(e) : 0;
+    }
+    if (a->length > 1) total += seplen * (size_t)(a->length - 1);
+    char* out = malloc(total + 1);
+    if (!out) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    char* w = out;
+    for (int64_t i = 0; i < a->length; i++) {
+        if (i > 0) { memcpy(w, sep, seplen); w += seplen; }
+        const char* e = (const char*)(uintptr_t)a->data[i];
+        size_t n = e ? strlen(e) : 0;
+        if (n) { memcpy(w, e, n); w += n; }
+    }
+    *w = '\0';
+    return out;
+}
+
 /* ---------- Print ---------- */
 
 void cryo_print_str(const char* s)  { puts(s ? s : "(null)"); }
