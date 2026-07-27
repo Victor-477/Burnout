@@ -29,6 +29,22 @@ void       cryo_array_push(CryoArray* a, uint64_t v);
 uint64_t   cryo_array_get(CryoArray* a, int64_t i);
 void       cryo_array_set(CryoArray* a, int64_t i, uint64_t v);
 CryoArray* cryo_array_slice(CryoArray* a, int64_t start, int64_t end);
+/* Phase 10.2 collection ops (ISSUES/09). All NON-MUTATING: a fresh array is
+   returned and the source is untouched. CryoArray is untyped (raw uint64_t), so
+   anything needing equality/ordering/arithmetic has per-element-type variants. */
+CryoArray* cryo_array_reverse(CryoArray* a);
+CryoArray* cryo_array_concat(CryoArray* a, CryoArray* b);
+int64_t    cryo_sum_i(CryoArray* a);
+double     cryo_sum_f(CryoArray* a);
+int64_t    cryo_count_i(CryoArray* a, int64_t v);
+int64_t    cryo_count_f(CryoArray* a, double v);
+int64_t    cryo_count_s(CryoArray* a, const char* v);
+int64_t    cryo_index_of_i(CryoArray* a, int64_t v);
+int64_t    cryo_index_of_f(CryoArray* a, double v);
+int64_t    cryo_index_of_s(CryoArray* a, const char* v);
+CryoArray* cryo_sort_i(CryoArray* a);
+CryoArray* cryo_sort_f(CryoArray* a);
+CryoArray* cryo_sort_s(CryoArray* a);
 void       cryo_array_free(CryoArray* a);
 
 /* Helpers for push/get by type */

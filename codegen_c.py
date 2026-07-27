@@ -98,8 +98,15 @@ class TypeEnv:
             if node.callee in ('to_string', 'input', 'upper', 'lower', 'trim', 'substr',
                                'concat', 'repeat', 'pad_start', 'pad_end'):
                 return 'string'
-            if node.callee in ('to_int', 'len', 'sign', 'gcd', 'find'):
+            if node.callee in ('to_int', 'len', 'sign', 'gcd', 'find',
+                               'count', 'index_of'):
                 return 'int'
+            # these return a NEW array of the same type as their first argument
+            if node.callee in ('sort', 'reverse', 'slice', 'concat') and node.args:
+                return self.infer(node.args[0])
+            # sum() yields the element type of its array
+            if node.callee == 'sum' and node.args:
+                return elem_type(self.infer(node.args[0]))
             if node.callee in ('to_number', 'sqrt', 'pow', 'hypot', 'floor', 'ceil', 'round'):
                 return 'number'
             if node.callee in ('starts_with', 'ends_with', 'contains'):
@@ -723,16 +730,6 @@ class CodeGenC:
             raise CodeGenError(
                 f"'{callee}()' is not supported in the C backend; "
                 f"use --backend go, node or pyro.")
-        # stateless collection ops (Phase 10.2): available on go/node/pyro
-        if callee in ('sort', 'reverse', 'slice', 'index_of'):
-            raise CodeGenError(
-                f"'{callee}()' is not yet implemented in the C backend; "
-                f"use --backend go, node or pyro.")
-        # stdlib slice 2 (Phase 10.4): padding + collection reducers
-        if callee in ('concat', 'count', 'sum'):
-            raise CodeGenError(
-                f"'{callee}()' is not yet implemented in the C backend; "
-                f"use --backend go, node or pyro.")
 
         # ── built-ins ──
         if callee == 'print':
@@ -785,6 +782,35 @@ class CodeGenC:
             fn = 'cryo_str_pad_start' if callee == 'pad_start' else 'cryo_str_pad_end'
             return (f"{fn}({self._expr(args[0])}, {self._expr(args[1])}, "
                     f"{self._expr(args[2])})")
+        # ── Phase 10.2 collection ops (ISSUES/09) ──
+        # CryoArray is untyped, so equality/ordering/sum need the ELEMENT type.
+        if callee in ('sort', 'reverse', 'slice', 'index_of', 'concat', 'count', 'sum'):
+            def _elem_suffix(arr_node):
+                et = elem_type(self.te.infer(arr_node))
+                if et == 'string': return 's'
+                if et == 'number': return 'f'
+                if et == 'int':    return 'i'
+                raise CodeGenError(
+                    f"'{callee}()' needs a typed array in the C backend "
+                    f"(element type is '{et}'); use --backend go, node or pyro.")
+            if callee == 'reverse' and len(args) == 1:
+                return f"cryo_array_reverse({self._expr(args[0])})"
+            if callee == 'concat' and len(args) == 2:
+                return f"cryo_array_concat({self._expr(args[0])}, {self._expr(args[1])})"
+            if callee == 'slice' and len(args) == 3:
+                return (f"cryo_array_slice({self._expr(args[0])}, "
+                        f"{self._expr(args[1])}, {self._expr(args[2])})")
+            if callee == 'sort' and len(args) == 1:
+                return f"cryo_sort_{_elem_suffix(args[0])}({self._expr(args[0])})"
+            if callee == 'sum' and len(args) == 1:
+                suf = _elem_suffix(args[0])
+                if suf == 's':
+                    raise CodeGenError("'sum()' needs a numeric array")
+                return f"cryo_sum_{suf}({self._expr(args[0])})"
+            if callee in ('count', 'index_of') and len(args) == 2:
+                fn = 'cryo_count' if callee == 'count' else 'cryo_index_of'
+                return (f"{fn}_{_elem_suffix(args[0])}({self._expr(args[0])}, "
+                        f"{self._expr(args[1])})")
         if callee == 'substr' and len(args) == 3:
             # Cryo substr(s, start, n) takes a LENGTH; cryo_str_slice takes an
             # END offset — pass start+n, and the helper clamps.

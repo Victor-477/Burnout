@@ -164,6 +164,102 @@ void cryo_array_free(CryoArray* a) {
     if (a) { free(a->data); free(a); }
 }
 
+/* ── Phase 10.2 collection ops (ISSUES/09) ───────────────────
+   CryoArray stores raw uint64_t, so the ELEMENT TYPE is a compile-time fact
+   only. Anything needing equality, ordering or arithmetic therefore comes in
+   per-type variants, exactly like cryo_push_i64/f64/str. Type-agnostic ops
+   (reverse, concat, slice) need just one.
+
+   All of these are NON-MUTATING: they return a fresh CryoArray and leave the
+   source untouched, matching sort/reverse/slice/concat on the Pyro VM. */
+
+static double _cryo_bits_to_f64(uint64_t u) { double d; memcpy(&d, &u, 8); return d; }
+
+CryoArray* cryo_array_reverse(CryoArray* a) {
+    CryoArray* out = cryo_array_new();
+    for (int64_t i = a->length - 1; i >= 0; i--) cryo_array_push(out, a->data[i]);
+    return out;
+}
+
+CryoArray* cryo_array_concat(CryoArray* a, CryoArray* b) {
+    CryoArray* out = cryo_array_new();
+    for (int64_t i = 0; i < a->length; i++) cryo_array_push(out, a->data[i]);
+    for (int64_t i = 0; i < b->length; i++) cryo_array_push(out, b->data[i]);
+    return out;
+}
+
+int64_t cryo_sum_i(CryoArray* a) {
+    int64_t s = 0;
+    for (int64_t i = 0; i < a->length; i++) s += (int64_t)a->data[i];
+    return s;
+}
+double cryo_sum_f(CryoArray* a) {
+    double s = 0;
+    for (int64_t i = 0; i < a->length; i++) s += _cryo_bits_to_f64(a->data[i]);
+    return s;
+}
+
+int64_t cryo_count_i(CryoArray* a, int64_t v) {
+    int64_t n = 0;
+    for (int64_t i = 0; i < a->length; i++) if ((int64_t)a->data[i] == v) n++;
+    return n;
+}
+int64_t cryo_count_f(CryoArray* a, double v) {
+    int64_t n = 0;
+    for (int64_t i = 0; i < a->length; i++) if (_cryo_bits_to_f64(a->data[i]) == v) n++;
+    return n;
+}
+int64_t cryo_count_s(CryoArray* a, const char* v) {
+    int64_t n = 0;
+    for (int64_t i = 0; i < a->length; i++) {
+        const char* e = (const char*)(uintptr_t)a->data[i];
+        if (e && v && strcmp(e, v) == 0) n++;
+    }
+    return n;
+}
+
+int64_t cryo_index_of_i(CryoArray* a, int64_t v) {
+    for (int64_t i = 0; i < a->length; i++) if ((int64_t)a->data[i] == v) return i;
+    return -1;
+}
+int64_t cryo_index_of_f(CryoArray* a, double v) {
+    for (int64_t i = 0; i < a->length; i++) if (_cryo_bits_to_f64(a->data[i]) == v) return i;
+    return -1;
+}
+int64_t cryo_index_of_s(CryoArray* a, const char* v) {
+    for (int64_t i = 0; i < a->length; i++) {
+        const char* e = (const char*)(uintptr_t)a->data[i];
+        if (e && v && strcmp(e, v) == 0) return i;
+    }
+    return -1;
+}
+
+/* Stable insertion sort, matching the Pyro VM's stable ordering for equal keys
+   (the Go VM uses SliceStable and the Pyro C runtime the same algorithm). */
+#define _CRYO_SORT_BODY(CMP_LT)                                   \
+    CryoArray* out = cryo_array_new();                            \
+    for (int64_t i = 0; i < a->length; i++)                       \
+        cryo_array_push(out, a->data[i]);                         \
+    for (int64_t i = 1; i < out->length; i++) {                   \
+        uint64_t key = out->data[i];                              \
+        int64_t j = i - 1;                                        \
+        while (j >= 0 && (CMP_LT)) { out->data[j+1] = out->data[j]; j--; } \
+        out->data[j+1] = key;                                     \
+    }                                                             \
+    return out;
+
+CryoArray* cryo_sort_i(CryoArray* a) {
+    _CRYO_SORT_BODY((int64_t)key < (int64_t)out->data[j])
+}
+CryoArray* cryo_sort_f(CryoArray* a) {
+    _CRYO_SORT_BODY(_cryo_bits_to_f64(key) < _cryo_bits_to_f64(out->data[j]))
+}
+CryoArray* cryo_sort_s(CryoArray* a) {
+    _CRYO_SORT_BODY(strcmp((const char*)(uintptr_t)key,
+                           (const char*)(uintptr_t)out->data[j]) < 0)
+}
+#undef _CRYO_SORT_BODY
+
 /* ---------- Strings ---------- */
 
 char* cryo_str_concat(const char* a, const char* b) {
