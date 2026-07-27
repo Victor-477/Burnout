@@ -3,6 +3,49 @@
    ============================================================ */
 #include "cryo_runtime.h"
 #include <ctype.h>
+#include <inttypes.h>   /* PRId64: the portable int64_t format specifier */
+
+/* ---------- Portability: POSIX functions are NOT ISO C ----------
+   The c backend compiles with -std=c11, which defines __STRICT_ANSI__ and makes
+   MinGW hide its POSIX/MSVCRT extensions. A hidden function is then implicitly
+   declared as returning `int`, which TRUNCATES a returned pointer on 64-bit
+   hosts — silent corruption, not a mere warning. `getline`/`ssize_t` are worse
+   still: genuinely absent in some MinGW configurations.
+
+   So: supply our own `strdup`, and read lines with a portable `fgets` loop
+   instead of `getline`. (The same class of bug, and the same remedy, is
+   documented in pyro/vm/pyro_runtime.c.) */
+static char* cryo_strdup(const char* s) {
+    if (!s) s = "";
+    size_t n = strlen(s) + 1;
+    char* p = (char*)malloc(n);
+    if (!p) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    memcpy(p, s, n);
+    return p;
+}
+#define strdup cryo_strdup
+
+/* Reads one line from `f` without the trailing newline, growing as needed.
+   Returns a malloc'd string (never NULL — "" at EOF), so callers can always
+   free() and never have to null-check. */
+static char* cryo_read_line(FILE* f) {
+    size_t cap = 128, len = 0;
+    char* buf = (char*)malloc(cap);
+    if (!buf) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    buf[0] = '\0';
+    for (;;) {
+        if (!fgets(buf + len, (int)(cap - len), f)) break;   /* EOF or error */
+        len += strlen(buf + len);
+        if (len > 0 && buf[len - 1] == '\n') { buf[--len] = '\0'; break; }
+        if (len + 1 < cap) break;                            /* short read: done */
+        cap *= 2;                                            /* line continues */
+        char* bigger = (char*)realloc(buf, cap);
+        if (!bigger) { free(buf); fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+        buf = bigger;
+    }
+    if (len > 0 && buf[len - 1] == '\r') buf[len - 1] = '\0';  /* CRLF input */
+    return buf;
+}
 
 /* Excecao global */
 CryoException _cryo_exc = {.active = false};
@@ -93,7 +136,8 @@ void cryo_array_push(CryoArray* a, uint64_t v) {
 
 uint64_t cryo_array_get(CryoArray* a, int64_t i) {
     if (i < 0 || i >= a->length) {
-        fprintf(stderr, "[Cryo] IndexError: indice %ld fora dos limites (length=%ld)\n", i, a->length);
+        fprintf(stderr, "[Cryo] IndexError: indice %" PRId64
+                        " fora dos limites (length=%" PRId64 ")\n", i, a->length);
         exit(1);
     }
     return a->data[i];
@@ -101,7 +145,7 @@ uint64_t cryo_array_get(CryoArray* a, int64_t i) {
 
 void cryo_array_set(CryoArray* a, int64_t i, uint64_t v) {
     if (i < 0 || i >= a->length) {
-        fprintf(stderr, "[Cryo] IndexError: indice %ld fora dos limites\n", i);
+        fprintf(stderr, "[Cryo] IndexError: indice %" PRId64 " fora dos limites\n", i);
         exit(1);
     }
     a->data[i] = v;
@@ -123,7 +167,8 @@ void cryo_array_free(CryoArray* a) {
 /* ---------- Strings ---------- */
 
 char* cryo_str_concat(const char* a, const char* b) {
-    if (!a) a = ""; if (!b) b = "";
+    if (!a) a = "";
+    if (!b) b = "";
     size_t len = strlen(a) + strlen(b) + 1;
     char* r = malloc(len);
     if (!r) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
@@ -133,7 +178,10 @@ char* cryo_str_concat(const char* a, const char* b) {
 
 char* cryo_i64_to_str(int64_t n) {
     char* buf = malloc(32);
-    snprintf(buf, 32, "%ld", n);
+    /* int64_t is `long long` on Windows, where `long` is 32-bit: %ld would
+       read the wrong width, and this MinGW's printf checker rejects %lld
+       outright. PRId64 expands to whatever the target C library wants. */
+    snprintf(buf, 32, "%" PRId64, n);
     return buf;
 }
 
@@ -185,7 +233,7 @@ char* cryo_str_lower(const char* s) {
 /* ---------- Print ---------- */
 
 void cryo_print_str(const char* s)  { puts(s ? s : "(null)"); }
-void cryo_print_i64(int64_t n)      { printf("%ld\n", n); }
+void cryo_print_i64(int64_t n)      { printf("%" PRId64 "\n", n); }
 void cryo_print_f64(double n)       { printf("%g\n", n); }
 void cryo_print_bool(bool b)        { puts(b ? "true" : "false"); }
 void cryo_print_newline(void)       { putchar('\n'); }
@@ -194,10 +242,7 @@ void cryo_print_newline(void)       { putchar('\n'); }
 
 char* cryo_input(const char* prompt) {
     if (prompt && *prompt) { printf("%s", prompt); fflush(stdout); }
-    char* buf = NULL; size_t cap = 0;
-    ssize_t len = getline(&buf, &cap, stdin);
-    if (len > 0 && buf[len-1] == '\n') buf[len-1] = '\0';
-    return buf;
+    return cryo_read_line(stdin);   /* never NULL; "" at EOF */
 }
 
 int64_t cryo_input_int(const char* prompt) {
