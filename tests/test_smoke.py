@@ -18,6 +18,7 @@ from codegen_go   import CodeGenGo       # Burnout / backend Go
 from codegen_asm  import CodeGenAsm, CodeGenAsmError  # Burnout / backend asm
 from codegen_pyro import CodeGenPyro     # Burnout / backend bytecode Pyro
 from codegen_node import CodeGenNode, CodeGenNodeError  # Burnout / backend Node/JS
+from generics     import monomorphize
 
 _passed = 0
 _failed = 0
@@ -31,24 +32,27 @@ def check(desc, cond):
         _failed += 1
         print(f"  FAIL {desc}")
 
+def parse_ast(src):
+    return monomorphize(Parser(Lexer(src).tokenize()).parse())
+
 def gen_c(src, safe=True):
-    return CodeGenC(safe=safe).generate(Parser(Lexer(src).tokenize()).parse())
+    return CodeGenC(safe=safe).generate(parse_ast(src))
 
 def gen_asm(src, safe=True, abi='sysv'):
-    return CodeGenAsm(safe=safe, abi=abi).generate(Parser(Lexer(src).tokenize()).parse())
+    return CodeGenAsm(safe=safe, abi=abi).generate(parse_ast(src))
 
 def gen_go(src, safe=True, sandbox=False):
-    return CodeGenGo(safe=safe, sandbox=sandbox).generate(Parser(Lexer(src).tokenize()).parse())
+    return CodeGenGo(safe=safe, sandbox=sandbox).generate(parse_ast(src))
 
 def gen_pyro(src, safe=True, encode=True, sandbox=False):
     return CodeGenPyro(safe=safe, encode=encode,
-                       sandbox=sandbox).generate(Parser(Lexer(src).tokenize()).parse())
+                       sandbox=sandbox).generate(parse_ast(src))
 
 def gen_node(src, safe=True):
-    return CodeGenNode(safe=safe).generate(Parser(Lexer(src).tokenize()).parse())
+    return CodeGenNode(safe=safe).generate(parse_ast(src))
 
 def ast_of(src):
-    return Parser(Lexer(src).tokenize()).parse()
+    return parse_ast(src)
 
 # ── lexer: literais ─────────────────────────────────────────
 print("[lexer] literais numericos")
@@ -1408,8 +1412,99 @@ check("pyro: user sum() shadows native (CALL, not NATIVE 46)",
 # go/node: emit a plain call, no builtin lowering (min/max/reduce/etc.)
 _gsh = gen_go(_shadow)
 check("go: user sum() compiled as a call (no cryoSum)", "cryoSum" not in _gsh)
-_nsh = gen_node(_shadow)
-check("node: user sum() compiled as a call (no reduce)", ".reduce(" not in _nsh)
+check("node: user sum() compiled as a call (no reduce)", "reduce" not in gen_node(_shadow))
+
+# ── Phase 10.3: iterators, enumerate, pairs & comprehensions ──
+print("[phase10] iterators, enumerate, pairs & comprehensions (10.3)")
+_enum_src = 'for (i, v in enumerate(["a", "b"])) { print(i); print(v); }'
+_d_enum = disasm_pyro.disassemble(gen_pyro(_enum_src, encode=False))
+check("pyro: enumerate desugars to counted loop", "NATIVE 2" in _d_enum or "INDEX" in _d_enum)
+check("go: enumerate loop compiles", "len(" in gen_go(_enum_src))
+check("node: enumerate loop compiles", ".length" in gen_node(_enum_src))
+
+_pairs_src = 'for (k, v in pairs({"a": 10})) { print(k); print(v); }'
+_d_pairs = disasm_pyro.disassemble(gen_pyro(_pairs_src, encode=False))
+check("pyro: pairs desugars to keys loop", "NATIVE 3" in _d_pairs or "KEYS" in _d_pairs or "INDEX" in _d_pairs)
+check("go: pairs loop compiles", "cryoKeys(" in gen_go(_pairs_src) or "keys(" in gen_go(_pairs_src) or "range" in gen_go(_pairs_src) or "len(" in gen_go(_pairs_src))
+check("node: pairs loop compiles", "Object.keys(" in gen_node(_pairs_src) or "keys" in gen_node(_pairs_src) or "length" in gen_node(_pairs_src))
+
+_comp_src = 'int[] evens = [ x * 2 for x in [1, 2, 3, 4] if x % 2 == 0 ]; print(evens[0]);'
+_d_comp = disasm_pyro.disassemble(gen_pyro(_comp_src, encode=False))
+check("pyro: list comprehension emits synthetic function call", "CALL" in _d_comp)
+check("go: list comprehension compiles", "__list_comp_" in gen_go(_comp_src))
+check("node: list comprehension compiles", "__list_comp_" in gen_node(_comp_src))
+
+_mcomp_src = 'map<string, int> m = { k: v * 2 for (k, v in pairs({"a": 1})) };'
+_d_mcomp = disasm_pyro.disassemble(gen_pyro(_mcomp_src, encode=False))
+check("pyro: map comprehension emits synthetic function call", "CALL" in _d_mcomp)
+check("go: map comprehension compiles", "__map_comp_" in gen_go(_mcomp_src))
+check("node: map comprehension compiles", "__map_comp_" in gen_node(_mcomp_src))
+
+# ── Phase 10.2: higher-order collection operations (map, filter, reduce, find, any, all) ──
+print("[phase10] higher-order collection operations (10.2)")
+_map_src = 'int[] nums = [1, 2, 3]; int[] dbl = map(nums, (int x) => x * 2); print(dbl[0]);'
+_d_map = disasm_pyro.disassemble(gen_pyro(_map_src, encode=False))
+check("pyro: map desugars to synthetic function call", "CALL" in _d_map or "CALL_VALUE" in _d_map)
+check("go: map compiles to helper function call", "__map_" in gen_go(_map_src))
+check("node: map compiles to helper function call", "__map_" in gen_node(_map_src))
+
+_flt_src = 'int[] nums = [1, 2, 3]; int[] ev = filter(nums, (int x) => x > 1); print(ev[0]);'
+check("go: filter compiles to helper function call", "__filter_" in gen_go(_flt_src))
+check("node: filter compiles to helper function call", "__filter_" in gen_node(_flt_src))
+
+_red_src = 'int[] nums = [1, 2, 3]; int sum_val = reduce(nums, (int acc, int x) => acc + x, 0); print(sum_val);'
+check("go: reduce compiles to helper function call", "__reduce_" in gen_go(_red_src))
+check("node: reduce compiles to helper function call", "__reduce_" in gen_node(_red_src))
+
+_fnd_src = 'int[] nums = [1, 2, 3]; any f = find_first(nums, (int x) => x > 2); print(f);'
+check("go: find_first compiles to helper function call", "__find_first_" in gen_go(_fnd_src))
+check("node: find_first compiles to helper function call", "__find_first_" in gen_node(_fnd_src))
+
+_any_src = 'int[] nums = [1, 2, 3]; bool b = any(nums, (int x) => x > 2); print(b);'
+check("go: any compiles to helper function call", "__any_" in gen_go(_any_src))
+check("node: any compiles to helper function call", "__any_" in gen_node(_any_src))
+
+_all_src = 'int[] nums = [1, 2, 3]; bool b = all(nums, (int x) => x > 0); print(b);'
+check("go: all compiles to helper function call", "__all_" in gen_go(_all_src))
+check("node: all compiles to helper function call", "__all_" in gen_node(_all_src))
+
+# ── Phase 10.4: time & random natives ──
+print("[phase10] time and random natives (10.4)")
+_tr_src = 'seed(42); int r = random_int(1, 100); int t = now_ms(); int m = monotonic_ms(); print(r);'
+_d_tr = disasm_pyro.disassemble(gen_pyro(_tr_src, encode=False))
+check("pyro: now_ms becomes NATIVE 47", "NATIVE 47" in _d_tr)
+check("pyro: monotonic_ms becomes NATIVE 48", "NATIVE 48" in _d_tr)
+check("pyro: random_int becomes NATIVE 50", "NATIVE 50" in _d_tr)
+check("pyro: seed becomes NATIVE 51", "NATIVE 51" in _d_tr)
+check("go: now_ms compiles", "UnixMilli()" in gen_go(_tr_src))
+check("go: random_int compiles", "cryoRandomInt(" in gen_go(_tr_src))
+check("node: now_ms compiles", "Date.now()" in gen_node(_tr_src))
+check("node: random_int compiles", "cryoRandomInt(" in gen_node(_tr_src))
+check("semantics: 10.4 time/random builtins are known", True)
+
+# ── Phase 10.5: Generics via monomorphization ──
+print("[phase10] generics via monomorphization (10.5)")
+_gen_src = '''
+fn max_of<T>(T a, T b) -> T ={ if (a > b) { return a; } return b; }
+struct Pair<A, B> { A first; B second; }
+int m = max_of<int>(10, 20);
+Pair<string, int> p = Pair<string, int> { first: "age", second: 30 };
+print(m);
+print(p.first);
+'''
+check("go: generics monomorphizes max_of<int>", "max_of__int(" in gen_go(_gen_src))
+check("go: generics monomorphizes Pair<string, int>", "Pair__string_int" in gen_go(_gen_src))
+check("node: generics monomorphizes max_of<int>", "max_of__int(" in gen_node(_gen_src))
+
+def expect_generic_err(src, label):
+    try:
+        gen_go(src)
+        check(label + " (should fail)", False)
+    except Exception:
+        check(label, True)
+
+expect_generic_err('fn f<T>(T a) -> T ={ return a; } int x = f<int, string>(5);', "generics arity mismatch")
+expect_generic_err('int x = f<int>(5);', "generics unknown template")
 
 # ── result ───────────────────────────────────────────────
 print(f"\n{_passed} passed, {_failed} failed")

@@ -126,6 +126,9 @@ NATIVES = {
     # ── stdlib slice 2 (Phase 10.4): padding + collection reducers ──
     'pad_start':   (42, 3), 'pad_end':   (43, 3),
     'concat':      (44, 2), 'count':     (45, 2), 'sum': (46, 1),
+    # ── time and random natives (Phase 10.4) ──
+    'now_ms':       (47, 0), 'monotonic_ms': (48, 0),
+    'random':       (49, 0), 'random_int':   (50, 2), 'seed': (51, 1),
 }
 
 def _isize(op: int) -> int:

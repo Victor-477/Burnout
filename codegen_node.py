@@ -291,6 +291,22 @@ class CodeGenNode:
                   "  if (x == null) throw new Error('[Cryo Security] unwrap of null');",
                   "  return x;",
                   "}", ""]
+        if 'prng' in self._helpers:
+            H += ["let _cryoPrngState = 0x853c49e6748fea9bn;",
+                  "function cryoSplitMix64Next() {",
+                  "  _cryoPrngState = (_cryoPrngState + 0x9e3779b97f4a7c15n) & 0xffffffffffffffffn;",
+                  "  let z = _cryoPrngState;",
+                  "  z = ((z ^ (z >> 30n)) * 0xbf58476d1ce4e5b9n) & 0xffffffffffffffffn;",
+                  "  z = ((z ^ (z >> 27n)) * 0x94d049bb133111ebn) & 0xffffffffffffffffn;",
+                  "  return (z ^ (z >> 31n)) & 0xffffffffffffffffn;",
+                  "}",
+                  "function cryoRandom() { return Number(cryoSplitMix64Next() >> 11n) / 9007199254740992.0; }",
+                  "function cryoRandomInt(lo, hi) {",
+                  "  if (hi < lo) { let t = lo; lo = hi; hi = t; }",
+                  "  let span = BigInt(hi - lo + 1);",
+                  "  return lo + Number(cryoSplitMix64Next() % span);",
+                  "}",
+                  "function cryoSeed(n) { _cryoPrngState = BigInt(n); }", ""]
         return H
 
     # ── functions ─────────────────────────────────────────────
@@ -401,6 +417,8 @@ class CodeGenNode:
             self._emit(f"if (!({self._expr(n.condition)})) throw new Error({msg});")
         elif isinstance(n, SafetyBlock):
             self._block(n.body)   # JS has no 'unsafe'; emits the body
+        elif isinstance(n, Block):
+            self._block(n.body)
         elif isinstance(n, ForeignBlock):
             self._foreign(n)
         elif isinstance(n, CallExpr) and n.callee == 'throw':
@@ -675,6 +693,16 @@ class CodeGenNode:
             return f"String({A(0)}).includes({A(1)})"
         if c == 'find':
             return f"String({A(0)}).indexOf({A(1)})"
+        if c == 'now_ms':
+            return "Date.now()"
+        if c == 'monotonic_ms':
+            return "Math.floor(performance.now())"
+        if c == 'random':
+            self._helpers.add('prng'); return "cryoRandom()"
+        if c == 'random_int' and len(a) == 2:
+            self._helpers.add('prng'); return f"cryoRandomInt({A(0)}, {A(1)})"
+        if c == 'seed' and len(a) == 1:
+            self._helpers.add('prng'); return f"cryoSeed({A(0)})"
         if c == 'replace':
             return f"String({A(0)}).split({A(1)}).join({A(2)})"
         if c == 'substr':

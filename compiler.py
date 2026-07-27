@@ -39,6 +39,7 @@ from foreign     import verify as verify_foreign, ForeignError   # CRYO
 from backends     import select_backend, missing_capabilities   # CRYO
 from modules      import resolve_modules, ModuleError           # CRYO
 from semantic     import check as semantic_check, SemanticError  # CRYO
+from generics     import monomorphize                             # CRYO
 from codegen_c    import CodeGenC,    CodeGenError       # C backend
 from codegen_go   import CodeGenGo,   CodeGenGoError     # Go backend
 from codegen_asm  import CodeGenAsm,  CodeGenAsmError    # x86-64 backend
@@ -68,6 +69,7 @@ def compile_source(source: str, backend: str, safe: bool,
                    optimize: bool = True, sandbox: bool = False):
     """Returns str (go/c/asm) or bytes (pyro = bytecode)."""
     ast = load_ast(source, base_dir)
+    ast = monomorphize(ast)
     semantic_check(ast)   # variable/function/aridade/break — errors early, with line
     verify_foreign(ast)   # foreign blocks/libraries require `import >Lang<`
     if backend == 'asm':

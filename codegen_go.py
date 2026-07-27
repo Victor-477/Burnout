@@ -548,6 +548,26 @@ class CodeGenGo:
                   "\tif prompt != \"\" { fmt.Print(prompt) }",
                   "\ts, _ := cryoStdin.ReadString('\\n')",
                   "\treturn strings.TrimRight(s, \"\\r\\n\")", "}", ""]
+        if 'prng' in self._helpers:
+            H += ["var cryoPrngState uint64 = 0x853c49e6748fea9b",
+                  "func cryoSplitMix64Next() uint64 {",
+                  "\tcryoPrngState += 0x9e3779b97f4a7c15",
+                  "\tz := cryoPrngState",
+                  "\tz = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9",
+                  "\tz = (z ^ (z >> 27)) * 0x94d049bb133111eb",
+                  "\treturn z ^ (z >> 31)",
+                  "}",
+                  "func cryoRandom() float64 { return float64(cryoSplitMix64Next()>>11) / 9007199254740992.0 }",
+                  "func cryoRandomInt(lo, hi int64) int64 {",
+                  "\tif hi < lo { lo, hi = hi, lo }",
+                  "\tspan := uint64(hi - lo + 1)",
+                  "\treturn lo + int64(cryoSplitMix64Next()%span)",
+                  "}",
+                  "func cryoSeed(n int64) { cryoPrngState = uint64(n) }", ""]
+        if 'monotime' in self._helpers:
+            self._imports.add('time')
+            H += ["var cryoStartTime = time.Now()",
+                  "func cryoMonotonicMs() int64 { return time.Since(cryoStartTime).Milliseconds() }", ""]
         if 'httpget' in self._helpers:
             self._imports.update(('net/http', 'io'))
             H += ["func cryoHTTPGet(url string) string {",
@@ -903,6 +923,7 @@ class CodeGenGo:
         elif isinstance(node, Continue):           self._emit("continue")
         elif isinstance(node, Assert):             self._assert(node)
         elif isinstance(node, SafetyBlock):        self._safety(node)
+        elif isinstance(node, Block):              self._emit("{"); self._indent += 1; [self._gen(s) for s in node.body]; self._indent -= 1; self._emit("}")
         elif isinstance(node, TryCatch):           self._try(node)
         elif isinstance(node, ForeignBlock):       self._foreign(node)
         elif isinstance(node, TryExpr):
@@ -1577,7 +1598,7 @@ class CodeGenGo:
         if c == 'contains' and len(a) == 2:
             self._imports.add('strings')
             return f"strings.Contains({self._expr(a[0])}, {self._expr(a[1])})"
-        if c == 'find' and len(a) == 2:
+        if c == 'find' and len(a) == 2 and self.te.infer(a[0]) == 'string':
             self._imports.add('strings')
             return f"int64(strings.Index({self._expr(a[0])}, {self._expr(a[1])}))"
         if c == 'replace' and len(a) == 3:
@@ -1608,6 +1629,16 @@ class CodeGenGo:
             at_start = 'true' if c == 'pad_start' else 'false'
             return (f"cryoPad({self._expr(a[0])}, int({self._expr(a[1])}), "
                     f"{self._expr(a[2])}, {at_start})")
+        if c == 'now_ms':
+            self._imports.add('time'); return "time.Now().UnixMilli()"
+        if c == 'monotonic_ms':
+            self._helpers.add('monotime'); return "cryoMonotonicMs()"
+        if c == 'random':
+            self._helpers.add('prng'); return "cryoRandom()"
+        if c == 'random_int' and len(a) == 2:
+            self._helpers.add('prng'); return f"cryoRandomInt({self._expr(a[0])}, {self._expr(a[1])})"
+        if c == 'seed' and len(a) == 1:
+            self._helpers.add('prng'); return f"cryoSeed({self._expr(a[0])})"
         # ── Pyro: introspection of native skills (no .md files) ──
         if c == 'skills':
             self._use_skills = True
