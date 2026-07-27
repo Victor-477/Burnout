@@ -1277,6 +1277,11 @@ class CodeGenGo:
         if isinstance(node, CallExpr):
             return self._call(node)
 
+        if isinstance(node, CallValueExpr):
+            # calling the result of an expression: `f(a)(b)`
+            args = ', '.join(self._expr(x) for x in node.args)
+            return f"{self._expr(node.callee)}({args})"
+
         if isinstance(node, MethodCallExpr):
             return self._method(node)
 

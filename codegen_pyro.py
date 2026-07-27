@@ -656,6 +656,14 @@ class CodeGenPyro:
             idx = self._compile_lambda(n)
             self._emit(OP_PUSHFN, idx)
             return
+        if isinstance(n, CallValueExpr):
+            # calling the result of an expression: push the function value,
+            # then the args, then CALL_VALUE
+            self._expr(n.callee)
+            for a in n.args:
+                self._expr(a)
+            self._emit(OP_CALL_VALUE, len(n.args))
+            return
         if isinstance(n, Identifier):
             # a top-level function name used as a value -> function value
             if n.name in self._fnindex and n.name not in self._cur.locals:

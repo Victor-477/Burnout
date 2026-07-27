@@ -26,6 +26,13 @@ def c_type(t: str) -> str:
         raise CodeGenError(
             f"type '{t}' (map/optional) is not yet supported in the C backend; "
             f"use --backend go.")
+    # function types have no C spelling here: unknown types pass through
+    # verbatim, so without this guard `fn(int)->int` leaked into the output and
+    # produced invalid C that only failed later, inside gcc.
+    if t and t.startswith('fn('):
+        raise CodeGenError(
+            f"function type '{t}' (first-class functions) is not supported in the C "
+            f"backend; use --backend go, node or pyro.")
     if t and t.endswith('[]'):
         return 'CryoArray*'
     return C_TYPE.get(t, t)          # struct types pass directly

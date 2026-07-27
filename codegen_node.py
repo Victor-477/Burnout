@@ -538,6 +538,10 @@ class CodeGenNode:
                     f" : {self._expr(n.else_value)})")
         if isinstance(n, CallExpr):
             return self._call(n)
+        if isinstance(n, CallValueExpr):
+            # calling the result of an expression: `f(a)(b)`
+            args = ', '.join(self._expr(a) for a in n.args)
+            return f"{self._expr(n.callee)}({args})"
         if isinstance(n, MethodCallExpr):
             args = ', '.join(self._expr(a) for a in n.args)
             return f"{self._expr(n.obj)}.{n.method}({args})"

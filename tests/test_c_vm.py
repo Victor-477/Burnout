@@ -289,7 +289,12 @@ def test_parity():
                        'g = (int x) => x - 1; print(g(50)); '
                        'fn pick(bool b) -> fn(int)->int ={ if (b) { return dbl; } return inc; } '
                        'fn(int)->int c1 = pick(true); print(c1(10)); '
-                       'c1 = pick(false); print(c1(10));'),
+                       'c1 = pick(false); print(c1(10)); '
+                       # 10.10: chained call on the returned function value
+                       'print(pick(true)(10)); print(pick(false)(10)); '
+                       'print(apply(pick(true), 4));',
+                       # expected values, so a bug shared by both engines fails
+                       "42\n42\n12\n20\n100\n49\n20\n11\n20\n11\n8"),
         ("stdlib2", 'print(pad_start("7", 3, "0")); print(pad_start("x", 5, "ab")); '
                     'print(pad_end("x", 5, "ab")); print(pad_start("toolong", 3, " ")); '
                     'int[] a = [1, 2, 3]; int[] b = [4, 5]; int[] c = concat(a, b); '
@@ -310,7 +315,13 @@ def test_parity():
                         'number[] f = [2.5, 1.5, 3.0]; number[] sf = sort(f); '
                         'print(to_string(sf[0]) + " " + to_string(sf[2]));'),
     ]
-    for name, src in sem:
+    # entries are (name, src) or (name, src, expected_output). The optional
+    # third element is an ABSOLUTE correctness check: Go == C only proves the
+    # two engines agree, and a bug present in both would pass silently (that is
+    # exactly how the f(a)(b) mis-parse of 10.10 slipped through).
+    for entry in sem:
+        name, src = entry[0], entry[1]
+        expected = entry[2] if len(entry) > 2 else None
         with tempfile.NamedTemporaryFile(suffix=".cryo", delete=False, mode="w", encoding="utf-8") as tc:
             tc.write(src); sc = tc.name
         with tempfile.NamedTemporaryFile(suffix=".pyro", delete=False) as tp:
@@ -323,13 +334,18 @@ def test_parity():
             g_, go_o, _ = run_command([GO_VM, sp_])
             c_, c_o, _ = run_command([C_VM, sp_])
             go_o, c_o = go_o.replace("\r\n", "\n").strip(), c_o.replace("\r\n", "\n").strip()
-            if g_ == c_ and go_o == c_o:
-                print(f"[OK] {name}: Go == C")
-                passed += 1
-            else:
+            if g_ != c_ or go_o != c_o:
                 print(f"[FAIL] {name} diverged")
                 print(f"  Go={go_o!r}\n  C ={c_o!r}")
                 failed += 1
+            elif expected is not None and go_o != expected.strip():
+                print(f"[FAIL] {name}: Go == C but the VALUE is wrong")
+                print(f"  got     ={go_o!r}\n  expected={expected.strip()!r}")
+                failed += 1
+            else:
+                suffix = " (value verified)" if expected is not None else ""
+                print(f"[OK] {name}: Go == C{suffix}")
+                passed += 1
         for p in (sc, sp_):
             try: os.remove(p)
             except OSError: pass

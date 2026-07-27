@@ -1358,6 +1358,39 @@ try:
 except Exception:
     check("semantics: 10.4 slice-2 builtins are known", False)
 
+# ── postfix calls f(a)(b) + strict argument lists (Phase 10.10) ─────
+print("[phase10] postfix calls and strict argument lists")
+from ast_nodes import CallValueExpr as _CVE, CallExpr as _CE
+# BUG WAS: the arg-list loop accepted a MISSING comma, so `print(p(1)(10))`
+# silently parsed as `print(p(1), 10)` -- wrong code, no diagnostic.
+_chain = 'fn p(int b) -> int ={ return b; } print(p(1)(10));'
+_cast = ast_of(_chain).statements[-1]
+check("parser: f(a)(b) is a CallValueExpr, not a second argument",
+      len(_cast.args) == 1 and isinstance(_cast.args[0], _CVE))
+check("parser: the inner call is preserved as the callee",
+      isinstance(_cast.args[0].callee, _CE) and _cast.args[0].callee.callee == 'p')
+# a genuinely missing comma is now an error instead of silent mis-parse
+def _parse_err(src):
+    try:
+        ast_of(src); return False
+    except Exception:
+        return True
+check("parser: missing comma between args is an error", _parse_err('print(max(1 2));'))
+check("parser: valid arg lists still parse", not _parse_err('print(max(1, 2));'))
+check("parser: valid method call still parses",
+      not _parse_err('int[] a = [1]; a.push(2); print(len(a));'))
+# codegen: pyro lowers the chained call through CALL_VALUE
+_fvsrc = ('fn dbl(int x) -> int ={ return x * 2; } fn inc(int x) -> int ={ return x + 1; } '
+          'fn pick(bool b) -> fn(int)->int ={ if (b) { return dbl; } return inc; } '
+          'print(pick(true)(10));')
+check("pyro: chained call uses CALL_VALUE",
+      "CALL_VALUE" in disasm_pyro.disassemble(gen_pyro(_fvsrc, encode=False)))
+check("go: chained call emits a direct call", "pick(true)(" in gen_go(_fvsrc))
+check("node: chained call emits a direct call", "pick(true)(" in gen_node(_fvsrc))
+# the C backend must REJECT function types instead of emitting invalid C
+expect_c_reject('fn d(int x)->int ={return x;} fn(int)->int f = d; print(f(1));',
+                "c: function type rejected (no invalid C emitted)")
+
 # a user-defined function must SHADOW a stdlib builtin of the same name
 print("[phase10] user functions shadow builtins")
 _shadow = ('fn sum(int a, int b) -> int ={ return a + b; } print(sum(20, 22));')
