@@ -142,9 +142,8 @@ _RUNNABLE = {"go": HAS_GO, "node": HAS_NODE, "c": HAS_CC, "pyro": HAS_GO or HAS_
 # Real, already-filed bugs this suite surfaced. They are reported as `xfail`
 # rather than failing the run, so the suite stays actionable — and if one starts
 # PASSING the test fails instead, so a fixed bug cannot linger here unnoticed.
-KNOWN_FAIL = {
-    ("structs_match", "go"):  "ISSUES/12 — ternary yielding an enum is typed `any`",
-}
+# (Currently empty: 11, 12, 13 and 15 are all fixed.)
+KNOWN_FAIL = {}
 
 
 def cryoc(args, timeout=180):

@@ -330,6 +330,15 @@ class CodeGenGo:
                 for m in n.members:
                     self._member_to_enum[m.name] = n.name
                     self._member_to_enum[f"{n.name}_{m.name}"] = n.name
+                    # A variant with data compiles to a constructor function, so
+                    # register its RETURN TYPE (the enum). Without this,
+                    # infer(Ok(x)) is 'unknown' and every context that needs a
+                    # concrete Go type falls back to `any` — which does not
+                    # satisfy the enum interface. That is what made
+                    #     Res r = cond ? Ok(x) : Err("e");
+                    # emit `func() any {…}()` and fail to compile.
+                    self.te.reg_fn(m.name, n.name)
+                    self.te.reg_fn(f"{n.name}_{m.name}", n.name)
             elif isinstance(n, FunctionDecl):
                 self.te.reg_fn(n.name, n.return_type or 'void')
             elif isinstance(n, ConstDecl):
