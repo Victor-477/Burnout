@@ -963,8 +963,7 @@ class CodeGenGo:
         vt = n.var_type
         name = gid(n.name)
         if isinstance(n.value, ArrayLiteral):
-            elems = ', '.join(self._expr(e) for e in n.value.elements)
-            self._emit(f"{name} := {gt}{{{elems}}}")
+            self._emit(f"{name} := {self._array_literal(n.value, vt)}")
         elif isinstance(n.value, MapLiteral):
             self._emit(f"var {name} {gt} = {self._map_literal(n.value, vt)}")
         elif is_map(vt) and n.value is None:
@@ -1017,6 +1016,18 @@ class CodeGenGo:
     def _incr(self, n: Increment):
         self._emit(f"{gid(n.name)}{n.op}")
 
+    def _array_literal(self, node: ArrayLiteral, typ) -> str:
+        """Emit an array literal, using the type the CONTEXT expects.
+
+        Go cannot infer an element type from `[]any{…}`, so a literal has to be
+        spelled with the type of the place it is going into (declared variable,
+        function return, …). Without such a hint we fall back to []any, which is
+        right only in a genuinely typeless position."""
+        elems = ', '.join(self._expr(e) for e in node.elements)
+        if typ and typ.endswith('[]'):
+            return f"{go_type(typ)}{{{elems}}}"
+        return f"[]any{{{elems}}}"
+
     def _return(self, n: Return):
         if isinstance(n.value, TryExpr):
             okv = self._go_try(n.value.operand)
@@ -1026,6 +1037,10 @@ class CodeGenGo:
             self._emit("return")
         elif is_optional(self._cur_fn_ret):
             self._emit(f"return {self._to_optional(n.value, self._cur_fn_ret)}")
+        elif isinstance(n.value, ArrayLiteral):
+            # `return [1, 2, 3]` in a `-> int[]` function: the literal must be
+            # []int64{…}, not []any{…}, or Go rejects the return statement.
+            self._emit(f"return {self._array_literal(n.value, self._cur_fn_ret)}")
         else:
             self._emit(f"return {self._expr(n.value)}")
 
@@ -1316,8 +1331,7 @@ class CodeGenGo:
             return f"{self._expr(node.obj)}[{self._expr(node.index)}]"
 
         if isinstance(node, ArrayLiteral):
-            elems = ', '.join(self._expr(e) for e in node.elements)
-            return f"[]any{{{elems}}}"   # typeless context: fallback
+            return self._array_literal(node, None)   # typeless context
 
         if isinstance(node, MapLiteral):
             return self._map_literal(node, None)

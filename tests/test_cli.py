@@ -144,7 +144,6 @@ _RUNNABLE = {"go": HAS_GO, "node": HAS_NODE, "c": HAS_CC, "pyro": HAS_GO or HAS_
 # PASSING the test fails instead, so a fixed bug cannot linger here unnoticed.
 KNOWN_FAIL = {
     ("structs_match", "go"):  "ISSUES/12 — ternary yielding an enum is typed `any`",
-    ("foreach_block", "go"):  "ISSUES/13 — array literal in `return` is typed []any",
 }
 
 
