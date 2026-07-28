@@ -142,6 +142,9 @@ python Burnout/tests/test_fullstack.py
 
 # Verify front-end structure, structure parameters and both page output modes
 python Burnout/tests/test_frontend.py
+
+# Build a Cryo REST API into an executable, run it, and call every endpoint
+python Burnout/tests/test_api.py
 ```
 
 Suites skip any leg whose toolchain is missing (C compiler, Node, Go) instead of
