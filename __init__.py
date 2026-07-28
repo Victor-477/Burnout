@@ -75,7 +75,7 @@ try:                                          # Pyro bytecode disassembler
 except Exception:                             # pragma: no cover
     disassemble = None
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"
 
 BACKENDS = ("go", "pyro", "c", "asm", "node", "wasm")
 

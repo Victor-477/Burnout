@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ==========================================================================
-# Cryo Compiler — Entry Point / CLI (v1.0.0)
+# Cryo Compiler — Entry Point / CLI (v1.1.0)
 # 
 # Usage:
 # python compiler.py app.cryo # C backend (default)
@@ -56,7 +56,7 @@ BANNER = r"""
 | |   | '__| | | |/ _ \ | |   / _ \ '_ ` _ \| '_ \| | |/ _ \ '__|
 | |___| |  | |_| | (_) || |__|  __/ | | | | | |_) | | |  __/ |
  \____|_|   \__, |\___/  \_____\___|_| |_| |_| .__/|_|_|\___|_|
-            |___/                            |_|   v1.0.0
+            |___/                            |_|   v1.1.0
    .cryo  ->  native C  |  x86-64 assembly   (safe mode)
 """
 
@@ -382,7 +382,7 @@ def compile_file(input_path: str,
 def main() -> None:
     ap = argparse.ArgumentParser(
         prog='cryo',
-        description='Cryo compiler v1.0.0 — .cryo → Go (base), native C, x86-64 asm, Pyro bytecode/native',
+        description='Cryo compiler v1.1.0 — .cryo → Go (base), native C, x86-64 asm, Pyro bytecode/native, front-end pages',
     )
     ap.add_argument('input',           help='Input file (.cryo)')
     ap.add_argument('-o', '--output',  help='Output file (.go/.pyro/.s)')
