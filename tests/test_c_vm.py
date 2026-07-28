@@ -19,6 +19,30 @@ CRYO_EXAMPLES = os.path.join(_root, "Cryo", "examples")
 CRYOC = os.path.join(_root, "Burnout", "cryoc.py")
 GO_VM = os.path.join(_root, "Pyro", "vm", "pyrovm_go.exe")
 
+C_VM_BIN = os.path.join(_root, "Pyro", "vm", "pyrovm.exe")
+_SRC = [os.path.join(_root, "Pyro", "vm", "main.c"),
+        os.path.join(_root, "Pyro", "vm", "pyro_runtime.c")]
+# pyro_runtime.c uses sockets for http_serve(), so Windows links winsock too.
+_SYSLIBS = ["-lm"] + (["-lws2_32"] if sys.platform == "win32" else [])
+
+def _c_vm_build_cmd():
+    """Pick a C toolchain: gcc/clang if on PATH, else MSVC via vcvars.
+
+    Both compilers are told to read the sources as UTF-8, so the accented
+    error messages stay byte-identical to the Go VM's — essential for the
+    stderr parity checks below. Returns (cmd, use_shell) or None.
+    """
+    import shutil
+    for cc in ("gcc", "clang", "cc"):
+        if shutil.which(cc):
+            return ([cc, "-O2", "-std=c11", "-finput-charset=UTF-8",
+                     "-fexec-charset=UTF-8", "-o", C_VM_BIN] + _SRC + _SYSLIBS, False)
+    for vc in (r"C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\Build\vcvars64.bat",
+               r"C:\Program Files (x86)\Microsoft Visual Studio\2019\Community\VC\Auxiliary\Build\vcvars64.bat"):
+        if os.path.exists(vc):
+            return (f'call "{vc}" && cl /O2 /utf-8 /Fe:{C_VM_BIN} ' + " ".join(_SRC) + ' ws2_32.lib', True)
+    return None
+
 def compile_c_vm():
     print("Compiling Go VM...")
     go_build = ["go", "build", "-o", GO_VM, os.path.join(_root, "Pyro", "vm", "main.go")]
@@ -27,12 +51,14 @@ def compile_c_vm():
         print("Go VM compilation error:")
         print(res_go.stderr)
         sys.exit(1)
-        
-    print("Compiling C VM...")
-    # /utf-8: keeps the source's UTF-8 literals (accented error messages)
-    # identical to the Go VM's — essential for stderr parity.
-    cmd = 'call "C:\\Program Files\\Microsoft Visual Studio\\2022\\Community\\VC\\Auxiliary\\Build\\vcvars64.bat" && cl /O2 /utf-8 /Fe:Pyro\\vm\\pyrovm.exe Pyro\\vm\\main.c Pyro\\vm\\pyro_runtime.c'
-    res = subprocess.run(cmd, shell=True, capture_output=True, text=True)
+
+    built = _c_vm_build_cmd()
+    if built is None:
+        print("No C toolchain (gcc/clang/cl) found — C VM parity test skipped.")
+        sys.exit(0)
+    cmd, use_shell = built
+    print(f"Compiling C VM ({cmd if use_shell else cmd[0]})...")
+    res = subprocess.run(cmd, shell=use_shell, capture_output=True, text=True)
     if res.returncode != 0:
         print("C VM compilation error:")
         print(res.stdout)
@@ -214,6 +240,218 @@ def test_parity():
             print(f"  bytes  Go={gdata!r} C={cdata!r} expected={wb_expected!r}")
             failed += 1
     for p in (wb_cryo, wb_pyro):
+        try: os.remove(p)
+        except OSError: pass
+
+    # ── runtime semantics parity (regressions) ────────────
+    # These cover bugs the example programs above did not reach:
+    #   * float SUB/DIV/MOD on *variables* (literal-only expressions are
+    #     constant-folded by the front-end and never hit the runtime path)
+    #   * OP_APPEND popping both operands, so a push inside one branch of an
+    #     if leaves both paths at the same stack depth
+    #   * indexing an array must retain, or the element is freed in place
+    print("\n-- runtime semantics parity --")
+    sem = [
+        ("float-arith", 'number y = 2.5; number o = 1.0; print(y - o); print(y + o); '
+                        'print(y * o); print(y / o); print(y % o); print(0.0 - y); '
+                        'print(y - o >= 1.5); print(y - o == 1.5);'),
+        ("float-mantissa", 'number o = 1.0; number f = 1.0 - o; int mant = 0; int bit = 0; '
+                           'while (bit < 12) { f = f * 2.0; mant = mant << 1; '
+                           'if (f >= 1.0) { mant = mant + 1; f = f - 1.0; } bit = bit + 1; } print(mant); '
+                           'number g = to_number("1.5") - o; print(g);'),
+        ("cond-push",   'int[] a = []; int i = 0; '
+                        'while (i < 6) { if (i % 2 == 0) { a.push(i); } else { a.push(i * 10); } i = i + 1; } '
+                        'print(len(a)); print(a[0]); print(a[1]); print(a[5]); '
+                        'int n = 0; for (int v in a) { n += v; } print(n);'),
+        ("index-alias", 'string[] s = []; s.push("keepme"); string first = s[0]; '
+                        'string junk = "filler" + to_string(len(s)); '
+                        'print(first); print(s[0]); print(len(s));'),
+        # Phase 10.4 extended stdlib — clamp/sign/gcd/hypot + starts_with/ends_with/repeat
+        ("stdlib-math", 'print(clamp(15, 0, 10)); print(clamp(-3, 0, 10)); print(clamp(5, 0, 10)); '
+                        'number cf = clamp(2.5, 0.0, 1.0); print(cf); '
+                        'print(sign(0 - 7)); print(sign(0)); print(sign(42)); '
+                        'print(gcd(48, 36)); print(gcd(0, 5)); print(gcd(17, 5)); '
+                        'print(hypot(3.0, 4.0)); print(hypot(5.0, 12.0));'),
+        ("stdlib-string", 'print(starts_with("hello world", "hello")); '
+                          'print(ends_with("hello world", "world")); '
+                          'print(starts_with("abc", "xyz")); print(ends_with("abc", "")); '
+                          'print(repeat("ab", 3)); print(repeat("x", 0)); '
+                          'print(repeat("-", 5));'),
+        # Phase 10.2 stateless collection ops — sort/reverse/slice/index_of
+        # Phase 10.6 closures: OP_CLOSURE captures by value into leading locals
+        ("closures", 'fn adder(int base) -> fn(int)->int ={ return (int x) => x + base; } '
+                     'fn(int)->int a10 = adder(10); fn(int)->int a100 = adder(100); '
+                     'print(a10(5)); print(a100(5)); print(a10(1) + a100(1)); '
+                     'print(adder(7)(3)); '
+                     # two captures, and a captured string
+                     'fn mk(int m, string tag) -> fn(int)->string ={ '
+                     '  return (int v) => tag + to_string(v * m); } '
+                     'fn(int)->string f = mk(3, "n="); print(f(4)); '
+                     # each closure keeps its own captured value
+                     'print(a10(0)); print(a100(0));'),
+        # Phase 10.6 function values: PUSHFN / CALL_VALUE on both engines
+        ("funcvalues", 'fn dbl(int x) -> int ={ return x * 2; } '
+                       'fn inc(int x) -> int ={ return x + 1; } '
+                       'fn apply(fn(int)->int f, int v) -> int ={ return f(v); } '
+                       'fn twice(fn(int)->int f, int v) -> int ={ return f(f(v)); } '
+                       'print(apply(dbl, 21)); print(apply(inc, 41)); '
+                       'print(twice(dbl, 3)); print(twice((int x) => x + 5, 10)); '
+                       'fn(int)->int g = dbl; print(g(50)); '
+                       'g = (int x) => x - 1; print(g(50)); '
+                       'fn pick(bool b) -> fn(int)->int ={ if (b) { return dbl; } return inc; } '
+                       'fn(int)->int c1 = pick(true); print(c1(10)); '
+                       'c1 = pick(false); print(c1(10)); '
+                       # 10.10: chained call on the returned function value
+                       'print(pick(true)(10)); print(pick(false)(10)); '
+                       'print(apply(pick(true), 4));',
+                       # expected values, so a bug shared by both engines fails
+                       "42\n42\n12\n20\n100\n49\n20\n11\n20\n11\n8"),
+        ("stdlib2", 'print(pad_start("7", 3, "0")); print(pad_start("x", 5, "ab")); '
+                    'print(pad_end("x", 5, "ab")); print(pad_start("toolong", 3, " ")); '
+                    'int[] a = [1, 2, 3]; int[] b = [4, 5]; int[] c = concat(a, b); '
+                    'print(len(c) + index_of(c, 5)); '
+                    'int[] d = [2, 2, 3, 2]; print(count(d, 2)); print(count(d, 9)); '
+                    'print(sum(d)); number[] f = [1.5, 2.5, 1.0]; print(sum(f)); '
+                    'int[] e = []; print(sum(e));'),
+        ("collections", 'int[] a = [3, 1, 4, 1, 5, 9, 2, 6]; '
+                        'int[] s = sort(a); string o = ""; '
+                        'for (int i in 0..len(s)) { o = o + to_string(s[i]) + " "; } print(o); '
+                        'int[] r = reverse(a); o = ""; '
+                        'for (int i in 0..len(r)) { o = o + to_string(r[i]) + " "; } print(o); '
+                        'int[] sl = slice(a, 2, 5); o = ""; '
+                        'for (int i in 0..len(sl)) { o = o + to_string(sl[i]) + " "; } print(o); '
+                        'print(index_of(a, 5)); print(index_of(a, 7)); '
+                        'string[] w = ["pear", "apple", "fig"]; string[] sw = sort(w); '
+                        'print(join(sw, ",")); '
+                        'number[] f = [2.5, 1.5, 3.0]; number[] sf = sort(f); '
+                        'print(to_string(sf[0]) + " " + to_string(sf[2]));'),
+    ]
+    # entries are (name, src) or (name, src, expected_output). The optional
+    # third element is an ABSOLUTE correctness check: Go == C only proves the
+    # two engines agree, and a bug present in both would pass silently (that is
+    # exactly how the f(a)(b) mis-parse of 10.10 slipped through).
+    for entry in sem:
+        name, src = entry[0], entry[1]
+        expected = entry[2] if len(entry) > 2 else None
+        with tempfile.NamedTemporaryFile(suffix=".cryo", delete=False, mode="w", encoding="utf-8") as tc:
+            tc.write(src); sc = tc.name
+        with tempfile.NamedTemporaryFile(suffix=".pyro", delete=False) as tp:
+            sp_ = tp.name
+        rc, _o, _e = run_command([sys.executable, CRYOC, sc, "--backend", "pyro",
+                                  "-o", sp_, "--no-banner"])
+        if rc != 0:
+            print(f"[FAIL] {name}: did not compile to pyro"); failed += 1
+        else:
+            g_, go_o, _ = run_command([GO_VM, sp_])
+            c_, c_o, _ = run_command([C_VM, sp_])
+            go_o, c_o = go_o.replace("\r\n", "\n").strip(), c_o.replace("\r\n", "\n").strip()
+            if g_ != c_ or go_o != c_o:
+                print(f"[FAIL] {name} diverged")
+                print(f"  Go={go_o!r}\n  C ={c_o!r}")
+                failed += 1
+            elif expected is not None and go_o != expected.strip():
+                print(f"[FAIL] {name}: Go == C but the VALUE is wrong")
+                print(f"  got     ={go_o!r}\n  expected={expected.strip()!r}")
+                failed += 1
+            else:
+                suffix = " (value verified)" if expected is not None else ""
+                print(f"[OK] {name}: Go == C{suffix}")
+                passed += 1
+        for p in (sc, sp_):
+            try: os.remove(p)
+            except OSError: pass
+
+    # ── args() / read_file() parity ───────────────────────
+    print("\n-- args/read_file parity --")
+    rf_target = os.path.join(_root, "Cryo", "examples", "fullstack", "client.cryo").replace("\\", "/")
+    nat_src = ('string[] a = args(); print("argc=" + to_string(len(a))); '
+               'for (int i = 0; i < len(a); i++) { print(a[i]); } '
+               'print("len=" + to_string(len(read_file("' + rf_target + '")))); '
+               'print("missing=[" + read_file("no/such/file.txt") + "]");')
+    with tempfile.NamedTemporaryFile(suffix=".cryo", delete=False, mode="w", encoding="utf-8") as tc:
+        tc.write(nat_src); nat_cryo = tc.name
+    with tempfile.NamedTemporaryFile(suffix=".pyro", delete=False) as tp:
+        nat_pyro = tp.name
+    rc, _o, _e = run_command([sys.executable, CRYOC, nat_cryo, "--backend", "pyro",
+                              "-o", nat_pyro, "--no-banner"])
+    if rc != 0:
+        print("[FAIL] args/read_file: did not compile to pyro"); failed += 1
+    else:
+        gc_, go_o, _ = run_command([GO_VM, nat_pyro, "alpha", "beta"])
+        cc_, c_o, _ = run_command([C_VM, nat_pyro, "alpha", "beta"])
+        go_o, c_o = go_o.replace("\r\n", "\n").strip(), c_o.replace("\r\n", "\n").strip()
+        # must agree with each other AND actually see the args / read the file
+        want = "argc=2\nalpha\nbeta"
+        if gc_ == cc_ and go_o == c_o and go_o.startswith(want) and "missing=[]" in go_o:
+            print(f"[OK] args/read_file identical (Go == C)")
+            passed += 1
+        else:
+            print("[FAIL] args/read_file diverged")
+            print(f"  exit Go={gc_} C={cc_}")
+            print(f"  stdout Go={go_o!r}\n         C={c_o!r}")
+            failed += 1
+    for p in (nat_cryo, nat_pyro):
+        try: os.remove(p)
+        except OSError: pass
+
+    # ── http_serve() parity ───────────────────────────────
+    # Both VMs serve the same directory on their own port; every response
+    # (status, content-type, body) must be identical.
+    print("\n-- http_serve parity --")
+    import socket, time, urllib.request, urllib.error
+    serve_dir = os.path.join(_root, "Cryo", "examples", "fullstack", "public")
+    srv_src = ('string[] a = args(); http_serve(to_int(a[1]), a[0]);')
+    with tempfile.NamedTemporaryFile(suffix=".cryo", delete=False, mode="w", encoding="utf-8") as tc:
+        tc.write(srv_src); srv_cryo = tc.name
+    with tempfile.NamedTemporaryFile(suffix=".pyro", delete=False) as tp:
+        srv_pyro = tp.name
+    rc, _o, _e = run_command([sys.executable, CRYOC, srv_cryo, "--backend", "pyro",
+                              "-o", srv_pyro, "--no-banner"])
+    if rc != 0 or not os.path.isdir(serve_dir):
+        print("[SKIP] http_serve: no compiled server or demo dir absent")
+    else:
+        def _free_port():
+            s = socket.socket(); s.bind(("127.0.0.1", 0)); p = s.getsockname()[1]; s.close(); return p
+        def _probe(vm):
+            port = _free_port()
+            proc = subprocess.Popen([vm, srv_pyro, serve_dir, str(port)],
+                                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            base = f"http://127.0.0.1:{port}"
+            res = {}
+            try:
+                for _ in range(60):
+                    try:
+                        urllib.request.urlopen(base + "/", timeout=1).read(); break
+                    except urllib.error.HTTPError:
+                        break
+                    except Exception:
+                        time.sleep(0.1)
+                for name, path in (("index", "/"), ("wasm", "/app.wasm"),
+                                   ("missing", "/nope.txt")):
+                    try:
+                        r = urllib.request.urlopen(base + path, timeout=2)
+                        res[name] = (r.status, r.headers.get("Content-Type", ""), r.read())
+                    except urllib.error.HTTPError as e:
+                        res[name] = (e.code, "", b"")
+                    except Exception as e:
+                        res[name] = ("ERR", str(e), b"")
+            finally:
+                proc.terminate()
+                try: proc.wait(timeout=5)
+                except subprocess.TimeoutExpired: proc.kill()
+            return res
+        gres, cres = _probe(GO_VM), _probe(C_VM)
+        for name in ("index", "wasm", "missing"):
+            g, c = gres.get(name), cres.get(name)
+            if g == c and g is not None and g[0] in (200, 404):
+                print(f"[OK] http_serve {name}: Go == C (status={g[0]}, type={g[1] or 'n/a'})")
+                passed += 1
+            else:
+                print(f"[FAIL] http_serve {name} diverged")
+                print(f"  Go={None if g is None else (g[0], g[1], len(g[2]))}")
+                print(f"  C ={None if c is None else (c[0], c[1], len(c[2]))}")
+                failed += 1
+    for p in (srv_cryo, srv_pyro):
         try: os.remove(p)
         except OSError: pass
 

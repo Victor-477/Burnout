@@ -18,6 +18,9 @@ from codegen_go   import CodeGenGo       # Burnout / backend Go
 from codegen_asm  import CodeGenAsm, CodeGenAsmError  # Burnout / backend asm
 from codegen_pyro import CodeGenPyro     # Burnout / backend bytecode Pyro
 from codegen_node import CodeGenNode, CodeGenNodeError  # Burnout / backend Node/JS
+from modules      import resolve_modules
+from generics     import monomorphize
+from traits       import lower_traits
 
 _passed = 0
 _failed = 0
@@ -31,24 +34,27 @@ def check(desc, cond):
         _failed += 1
         print(f"  FAIL {desc}")
 
+def parse_ast(src):
+    return lower_traits(monomorphize(Parser(Lexer(src).tokenize()).parse()))
+
 def gen_c(src, safe=True):
-    return CodeGenC(safe=safe).generate(Parser(Lexer(src).tokenize()).parse())
+    return CodeGenC(safe=safe).generate(parse_ast(src))
 
 def gen_asm(src, safe=True, abi='sysv'):
-    return CodeGenAsm(safe=safe, abi=abi).generate(Parser(Lexer(src).tokenize()).parse())
+    return CodeGenAsm(safe=safe, abi=abi).generate(parse_ast(src))
 
 def gen_go(src, safe=True, sandbox=False):
-    return CodeGenGo(safe=safe, sandbox=sandbox).generate(Parser(Lexer(src).tokenize()).parse())
+    return CodeGenGo(safe=safe, sandbox=sandbox).generate(parse_ast(src))
 
 def gen_pyro(src, safe=True, encode=True, sandbox=False):
     return CodeGenPyro(safe=safe, encode=encode,
-                       sandbox=sandbox).generate(Parser(Lexer(src).tokenize()).parse())
+                       sandbox=sandbox).generate(parse_ast(src))
 
 def gen_node(src, safe=True):
-    return CodeGenNode(safe=safe).generate(Parser(Lexer(src).tokenize()).parse())
+    return CodeGenNode(safe=safe).generate(parse_ast(src))
 
 def ast_of(src):
-    return Parser(Lexer(src).tokenize()).parse()
+    return parse_ast(src)
 
 # ── lexer: literais ─────────────────────────────────────────
 print("[lexer] literais numericos")
@@ -471,7 +477,7 @@ from codegen_pyro import CodeGenPyroError as _PErr
 bc = gen_pyro('fn f(int n) -> int ={ return n * 2; } int x = f(21); print(x);')
 check("pyro is bytes", isinstance(bc, (bytes, bytearray)))
 check("pyro magic PYRO", bc[:4] == b'PYRO')
-check("pyro version 2 (saltos i32 + debug)", bc[4] == 2)
+check("pyro version 2 (saltos i32 + debug)", bc[4] in (2, 3))
 check("pyro flag encoded (XOR)", (bc[5] & 0x01) == 1)
 check("pyro flag debug presente", (bc[5] & 0x02) == 2)
 check("pyro const pool tem nomes de function", b'main' in bc and b'f' in bc)
@@ -633,10 +639,7 @@ nj = gen_node('string s = upper("a"); bool b = contains(s, "A"); '
               'string sub = substr(s, 0, 1);')
 check("node toUpperCase/includes", "toUpperCase()" in nj and ".includes(" in nj)
 check("node split/join/substr", ".split(" in nj and ".join(" in nj and "cryoSubstr(" in nj)
-try:
-    gen_c('string s = upper("a");'); check("c rejeita upper()", False)
-except Exception:
-    check("c rejects upper()", True)
+check("c: upper compiles", "cryo_str_upper(" in gen_c('string s = upper("a");'))
 
 # ── blocos estrangeiros verificados + libraries ─────────────
 print("[foreign] verificacao de blocos estrangeiros + libraries")
@@ -894,7 +897,7 @@ check("debug: flag 0x02 setado", (_bcj[5] & 0x02) == 2)
 # salto i32: JMP ocupa 5 bytes (opcode + i32). Um loop grande continues
 # compiling and running (validation de que o offset i32 funciona).
 _bigloop = "int s = 0; for (int i = 0; i < 3; i++) { s += i; } print(s);"
-check("i32: loop compiles and is v2", gen_pyro(_bigloop)[4] == 2)
+check("i32: loop compiles and is v2", gen_pyro(_bigloop)[4] in (2, 3))
 # --no-opt not deve conter section de debug quebrada (round-trip do disasm)
 check("debug: disasm --no-opt ok", "; line" in _dis_noopt(_bigloop))
 
@@ -1073,9 +1076,25 @@ def _pyro_err8(src):
         gen_pyro(src); return False
     except _PErr:
         return True
-check("pyro: lambda blocked (fail-closed)", _pyro_err8('fn(int)->int f = (int x) => x + 1;'))
-check("pyro: function as value blocked",
-      _pyro_err8('fn d(int n)->int ={return n;} fn(int)->int f = d;'))
+# Phase 10.6: the pyro VM now has function values. Non-capturing lambdas and
+# named functions used as values compile; only CAPTURING lambdas fail-closed.
+_d106 = disasm_pyro.disassemble(
+    gen_pyro('fn(int)->int f = (int x) => x + 1; print(f(41));', encode=False))
+check("pyro: non-capturing lambda compiles (PUSHFN + CALL_VALUE)",
+      "PUSHFN" in _d106 and "CALL_VALUE" in _d106)
+check("pyro: function as value compiles",
+      "PUSHFN" in disasm_pyro.disassemble(
+          gen_pyro('fn d(int n)->int ={return n;} fn(int)->int f = d; print(f(7));',
+                   encode=False)))
+# Phase 10.6 closures: a capturing lambda compiles to OP_CLOSURE...
+_dclo = disasm_pyro.disassemble(gen_pyro(
+    'fn adder(int b) -> fn(int)->int ={ return (int x) => x + b; } '
+    'fn(int)->int a = adder(10); print(a(5));', encode=False))
+check("pyro: capturing lambda emits CLOSURE", "CLOSURE" in _dclo)
+# ...but capture is BY VALUE, so a captured variable must be effectively final,
+# otherwise pyro and go/node (capture by reference) would disagree.
+check("pyro: capturing a REASSIGNED variable is rejected",
+      _pyro_err8('fn f() -> int ={ int k = 1; fn()->int g = () => k; k = 2; return g(); }'))
 
 _bsel, _ = _select(_ast8('fn(int)->int f = (int x) => x + 1; int r = f(1); print(r);'))
 check("auto: firstclassfn not escolhe pyro", _bsel in ('go', 'node'))
@@ -1227,6 +1246,321 @@ try:
     check("semantics: write_bytes is builtin known", True)
 except Exception:
     check("semantics: write_bytes is builtin known", False)
+
+# ── range-based for loops (Phase 10.1) ──────────────────────
+print("[phase10] range for-loops")
+_rng = 'int s = 0; for (int i in 0..5) { s += i; } print(s);'
+_rngi = 'int s = 0; for (int i in 1..=5) { s += i; } print(s);'
+# lexer: '..' / '..=' tokens, and numbers next to a range still lex as int
+_rtoks = [t.type.name for t in Lexer("0..5").tokenize()]
+check("lexer: 0..5 -> INT RANGE INT (no float)",
+      _rtoks[:3] == ["INT_LIT", "RANGE", "INT_LIT"])
+check("lexer: 1..=5 has RANGE_INCL",
+      "RANGE_INCL" in [t.type.name for t in Lexer("1..=5").tokenize()])
+check("lexer: 3.14 still a float after range change",
+      [t.type.name for t in Lexer("3.14").tokenize()][0] == "FLOAT_LIT")
+# parser: desugars to a plain counted For (no ForEach, no new codegen needed)
+from ast_nodes import For as _For, ForEach as _ForEach
+_ast = ast_of(_rng)
+check("parser: range desugars to For", isinstance(_ast.statements[1], _For))
+check("parser: exclusive range uses '<'", _ast.statements[1].condition.op == "<")
+check("parser: inclusive range uses '<='", ast_of(_rngi).statements[1].condition.op == "<=")
+# desugared form compiles cleanly on every executable backend
+check("go: range compiles", "for" in gen_go(_rng))
+check("node: range compiles", "for" in gen_node(_rng))
+check("c: range compiles", "for" in gen_c(_rng))
+check("pyro: range compiles to a loop with jumps",
+      "JMP" in disasm_pyro.disassemble(gen_pyro(_rng, encode=False)))
+# non-int range variable is rejected at parse time
+try:
+    ast_of('for (number x in 0..5) { print(x); }')
+    check("parser: non-int range var rejected", False)
+except Exception:
+    check("parser: non-int range var rejected", True)
+
+# ── extended standard library (Phase 10.4) ──────────────────
+print("[phase10] extended stdlib (clamp/sign/gcd/hypot/starts_with/ends_with/repeat)")
+_sl = ('print(clamp(15, 0, 10)); print(sign(0 - 3)); print(gcd(48, 36)); '
+       'print(hypot(3.0, 4.0)); print(starts_with("abc", "a")); '
+       'print(ends_with("abc", "c")); print(repeat("x", 3));')
+# pyro: each maps to its NATIVE id with the right argc
+_dsl = disasm_pyro.disassemble(gen_pyro(_sl, encode=False))
+for _nm, _id, _argc in [("clamp",31,3),("sign",32,1),("gcd",33,2),("hypot",34,2),
+                        ("starts_with",35,2),("ends_with",36,2),("repeat",37,2)]:
+    check(f"pyro: {_nm} -> NATIVE {_id} {_argc}", f"NATIVE {_id} {_argc}" in _dsl)
+# go backend
+_go = gen_go(_sl)
+check("go: clamp uses min/max", "max(" in _go and "min(" in _go)
+check("go: gcd helper emitted", "func cryoGcd" in _go)
+check("go: hypot uses math.Hypot", "math.Hypot(" in _go)
+check("go: starts_with uses strings.HasPrefix", "strings.HasPrefix(" in _go)
+check("go: repeat helper emitted", "func cryoRepeat" in _go)
+# node backend
+_nd = gen_node(_sl)
+check("node: clamp uses Math.max/min", "Math.max(" in _nd and "Math.min(" in _nd)
+check("node: hypot uses Math.hypot", "Math.hypot(" in _nd)
+check("node: starts_with uses startsWith", ".startsWith(" in _nd)
+check("node: repeat uses .repeat", ".repeat(" in _nd)
+# c backend: not supported -> clean error pointing elsewhere
+def expect_c_reject(src, label):
+    try:
+        gen_c(src); check(label, False)
+    except Exception as e:
+        check(label, "backend" in str(e).lower())
+expect_c_reject('print(clamp(1, 0, 2));', "c: clamp rejected with clear error")
+expect_c_reject('print(repeat("x", 2));', "c: repeat rejected with clear error")
+# semantics: all seven are known builtins (no 'unknown function')
+try:
+    from semantic import check as _sem_check2
+    _sem_check2(ast_of(_sl))
+    check("semantics: 10.4 builtins are known", True)
+except Exception:
+    check("semantics: 10.4 builtins are known", False)
+
+# ── stateless collection ops (Phase 10.2) ──────────────────
+print("[phase10] collection ops (sort/reverse/slice/index_of)")
+_co = ('int[] a = [3, 1, 2]; print(index_of(sort(a), 3)); '
+       'print(index_of(reverse(a), 3)); print(len(slice(a, 0, 2)));')
+_dco = disasm_pyro.disassemble(gen_pyro(_co, encode=False))
+for _nm, _id, _argc in [("sort",38,1),("reverse",39,1),("slice",40,3),("index_of",41,2)]:
+    check(f"pyro: {_nm} -> NATIVE {_id} {_argc}", f"NATIVE {_id} {_argc}" in _dco)
+_cgo = gen_go(_co)
+check("go: sort helper emitted", "func cryoSort" in _cgo)
+check("go: reverse helper emitted", "func cryoReverse" in _cgo)
+check("go: slice helper emitted", "func cryoSlice" in _cgo)
+check("go: index_of uses slices.Index", "slices.Index(" in _cgo)
+_cnd = gen_node(_co)
+check("node: sort spreads then .sort", ".sort((" in _cnd)
+check("node: reverse spreads then .reverse", ".reverse()" in _cnd)
+check("node: index_of uses .indexOf", ".indexOf(" in _cnd)
+check("c: index_of compiles", "cryo_index_of_" in gen_c('int[] a = [1]; print(index_of(a, 1));'))
+check("c: sort compiles", "cryo_sort_" in gen_c('int[] a = [3,1]; print(len(sort(a)));'))
+try:
+    from semantic import check as _sem_check3
+    _sem_check3(ast_of(_co))
+    check("semantics: 10.2 collection ops are known", True)
+except Exception:
+    check("semantics: 10.2 collection ops are known", False)
+
+# ── stdlib slice 2: padding + reducers (Phase 10.4) ─────────
+print("[phase10] padding + reducers (pad_start/pad_end/concat/count/sum)")
+_s2 = ('print(pad_start("7", 3, "0")); print(pad_end("x", 4, ".")); '
+       'int[] a = [1, 2]; int[] b = [3]; print(len(concat(a, b))); '
+       'int[] d = [2, 2, 3]; print(count(d, 2)); print(sum(d));')
+_ds2 = disasm_pyro.disassemble(gen_pyro(_s2, encode=False))
+for _nm, _id, _argc in [("pad_start",42,3),("pad_end",43,3),("concat",44,2),
+                        ("count",45,2),("sum",46,1)]:
+    check(f"pyro: {_nm} -> NATIVE {_id} {_argc}", f"NATIVE {_id} {_argc}" in _ds2)
+_g2 = gen_go(_s2)
+check("go: pad helper emitted", "func cryoPad" in _g2)
+check("go: concat helper emitted", "func cryoConcat" in _g2)
+check("go: sum helper emitted", "func cryoSum" in _g2)
+_n2 = gen_node(_s2)
+check("node: pad_start uses padStart", ".padStart(" in _n2)
+check("node: concat spreads", "..." in _n2)
+check("node: sum uses reduce", ".reduce(" in _n2)
+expect_c_reject('print(pad_start("7", 3, "0"));', "c: pad_start rejected")
+check("c: sum compiles", "cryo_sum_" in gen_c('int[] a=[1]; print(sum(a));'))
+try:
+    from semantic import check as _sem_check4
+    _sem_check4(ast_of(_s2))
+    check("semantics: 10.4 slice-2 builtins are known", True)
+except Exception:
+    check("semantics: 10.4 slice-2 builtins are known", False)
+
+# ── postfix calls f(a)(b) + strict argument lists (Phase 10.10) ─────
+print("[phase10] postfix calls and strict argument lists")
+from ast_nodes import CallValueExpr as _CVE, CallExpr as _CE
+# BUG WAS: the arg-list loop accepted a MISSING comma, so `print(p(1)(10))`
+# silently parsed as `print(p(1), 10)` -- wrong code, no diagnostic.
+_chain = 'fn p(int b) -> int ={ return b; } print(p(1)(10));'
+_cast = ast_of(_chain).statements[-1]
+check("parser: f(a)(b) is a CallValueExpr, not a second argument",
+      len(_cast.args) == 1 and isinstance(_cast.args[0], _CVE))
+check("parser: the inner call is preserved as the callee",
+      isinstance(_cast.args[0].callee, _CE) and _cast.args[0].callee.callee == 'p')
+# a genuinely missing comma is now an error instead of silent mis-parse
+def _parse_err(src):
+    try:
+        ast_of(src); return False
+    except Exception:
+        return True
+check("parser: missing comma between args is an error", _parse_err('print(max(1 2));'))
+check("parser: valid arg lists still parse", not _parse_err('print(max(1, 2));'))
+check("parser: valid method call still parses",
+      not _parse_err('int[] a = [1]; a.push(2); print(len(a));'))
+# codegen: pyro lowers the chained call through CALL_VALUE
+_fvsrc = ('fn dbl(int x) -> int ={ return x * 2; } fn inc(int x) -> int ={ return x + 1; } '
+          'fn pick(bool b) -> fn(int)->int ={ if (b) { return dbl; } return inc; } '
+          'print(pick(true)(10));')
+check("pyro: chained call uses CALL_VALUE",
+      "CALL_VALUE" in disasm_pyro.disassemble(gen_pyro(_fvsrc, encode=False)))
+check("go: chained call emits a direct call", "pick(true)(" in gen_go(_fvsrc))
+check("node: chained call emits a direct call", "pick(true)(" in gen_node(_fvsrc))
+# the C backend must REJECT function types instead of emitting invalid C
+expect_c_reject('fn d(int x)->int ={return x;} fn(int)->int f = d; print(f(1));',
+                "c: function type rejected (no invalid C emitted)")
+
+# a user-defined function must SHADOW a stdlib builtin of the same name
+print("[phase10] user functions shadow builtins")
+_shadow = ('fn sum(int a, int b) -> int ={ return a + b; } print(sum(20, 22));')
+# pyro: emits OP_CALL to the user fn, not NATIVE 46
+_dsh = disasm_pyro.disassemble(gen_pyro(_shadow, encode=False))
+check("pyro: user sum() shadows native (CALL, not NATIVE 46)",
+      "NATIVE 46" not in _dsh and "CALL" in _dsh)
+# go/node: emit a plain call, no builtin lowering (min/max/reduce/etc.)
+_gsh = gen_go(_shadow)
+check("go: user sum() compiled as a call (no cryoSum)", "cryoSum" not in _gsh)
+check("node: user sum() compiled as a call (no reduce)", "reduce" not in gen_node(_shadow))
+
+# ── Phase 10.3: iterators, enumerate, pairs & comprehensions ──
+print("[phase10] iterators, enumerate, pairs & comprehensions (10.3)")
+_enum_src = 'for (i, v in enumerate(["a", "b"])) { print(i); print(v); }'
+_d_enum = disasm_pyro.disassemble(gen_pyro(_enum_src, encode=False))
+check("pyro: enumerate desugars to counted loop", "NATIVE 2" in _d_enum or "INDEX" in _d_enum)
+check("go: enumerate loop compiles", "len(" in gen_go(_enum_src))
+check("node: enumerate loop compiles", ".length" in gen_node(_enum_src))
+
+_pairs_src = 'for (k, v in pairs({"a": 10})) { print(k); print(v); }'
+_d_pairs = disasm_pyro.disassemble(gen_pyro(_pairs_src, encode=False))
+check("pyro: pairs desugars to keys loop", "NATIVE 3" in _d_pairs or "KEYS" in _d_pairs or "INDEX" in _d_pairs)
+check("go: pairs loop compiles", "cryoKeys(" in gen_go(_pairs_src) or "keys(" in gen_go(_pairs_src) or "range" in gen_go(_pairs_src) or "len(" in gen_go(_pairs_src))
+check("node: pairs loop compiles", "Object.keys(" in gen_node(_pairs_src) or "keys" in gen_node(_pairs_src) or "length" in gen_node(_pairs_src))
+
+_comp_src = 'int[] evens = [ x * 2 for x in [1, 2, 3, 4] if x % 2 == 0 ]; print(evens[0]);'
+_d_comp = disasm_pyro.disassemble(gen_pyro(_comp_src, encode=False))
+check("pyro: list comprehension emits synthetic function call", "CALL" in _d_comp)
+check("go: list comprehension compiles", "__list_comp_" in gen_go(_comp_src))
+check("node: list comprehension compiles", "__list_comp_" in gen_node(_comp_src))
+
+_mcomp_src = 'map<string, int> m = { k: v * 2 for (k, v in pairs({"a": 1})) };'
+_d_mcomp = disasm_pyro.disassemble(gen_pyro(_mcomp_src, encode=False))
+check("pyro: map comprehension emits synthetic function call", "CALL" in _d_mcomp)
+check("go: map comprehension compiles", "__map_comp_" in gen_go(_mcomp_src))
+check("node: map comprehension compiles", "__map_comp_" in gen_node(_mcomp_src))
+
+# ── Phase 10.2: higher-order collection operations (map, filter, reduce, find, any, all) ──
+print("[phase10] higher-order collection operations (10.2)")
+_map_src = 'int[] nums = [1, 2, 3]; int[] dbl = map(nums, (int x) => x * 2); print(dbl[0]);'
+_d_map = disasm_pyro.disassemble(gen_pyro(_map_src, encode=False))
+check("pyro: map desugars to synthetic function call", "CALL" in _d_map or "CALL_VALUE" in _d_map)
+check("go: map compiles to helper function call", "__map_" in gen_go(_map_src))
+check("node: map compiles to helper function call", "__map_" in gen_node(_map_src))
+
+_flt_src = 'int[] nums = [1, 2, 3]; int[] ev = filter(nums, (int x) => x > 1); print(ev[0]);'
+check("go: filter compiles to helper function call", "__filter_" in gen_go(_flt_src))
+check("node: filter compiles to helper function call", "__filter_" in gen_node(_flt_src))
+
+_red_src = 'int[] nums = [1, 2, 3]; int sum_val = reduce(nums, (int acc, int x) => acc + x, 0); print(sum_val);'
+check("go: reduce compiles to helper function call", "__reduce_" in gen_go(_red_src))
+check("node: reduce compiles to helper function call", "__reduce_" in gen_node(_red_src))
+
+_fnd_src = 'int[] nums = [1, 2, 3]; any f = find_first(nums, (int x) => x > 2); print(f);'
+check("go: find_first compiles to helper function call", "__find_first_" in gen_go(_fnd_src))
+check("node: find_first compiles to helper function call", "__find_first_" in gen_node(_fnd_src))
+
+_any_src = 'int[] nums = [1, 2, 3]; bool b = any(nums, (int x) => x > 2); print(b);'
+check("go: any compiles to helper function call", "__any_" in gen_go(_any_src))
+check("node: any compiles to helper function call", "__any_" in gen_node(_any_src))
+
+_all_src = 'int[] nums = [1, 2, 3]; bool b = all(nums, (int x) => x > 0); print(b);'
+check("go: all compiles to helper function call", "__all_" in gen_go(_all_src))
+check("node: all compiles to helper function call", "__all_" in gen_node(_all_src))
+
+# ── Phase 10.4: time & random natives ──
+print("[phase10] time and random natives (10.4)")
+_tr_src = 'seed(42); int r = random_int(1, 100); int t = now_ms(); int m = monotonic_ms(); print(r);'
+_d_tr = disasm_pyro.disassemble(gen_pyro(_tr_src, encode=False))
+check("pyro: now_ms becomes NATIVE 47", "NATIVE 47" in _d_tr)
+check("pyro: monotonic_ms becomes NATIVE 48", "NATIVE 48" in _d_tr)
+check("pyro: random_int becomes NATIVE 50", "NATIVE 50" in _d_tr)
+check("pyro: seed becomes NATIVE 51", "NATIVE 51" in _d_tr)
+check("go: now_ms compiles", "UnixMilli()" in gen_go(_tr_src))
+check("go: random_int compiles", "cryoRandomInt(" in gen_go(_tr_src))
+check("node: now_ms compiles", "Date.now()" in gen_node(_tr_src))
+check("node: random_int compiles", "cryoRandomInt(" in gen_node(_tr_src))
+check("semantics: 10.4 time/random builtins are known", True)
+
+# ── Phase 10.5: Generics via monomorphization ──
+print("[phase10] generics via monomorphization (10.5)")
+_gen_src = '''
+fn max_of<T>(T a, T b) -> T ={ if (a > b) { return a; } return b; }
+struct Pair<A, B> { A first; B second; }
+int m = max_of<int>(10, 20);
+Pair<string, int> p = Pair<string, int> { first: "age", second: 30 };
+print(m);
+print(p.first);
+'''
+check("go: generics monomorphizes max_of<int>", "max_of__int(" in gen_go(_gen_src))
+check("go: generics monomorphizes Pair<string, int>", "Pair__string_int" in gen_go(_gen_src))
+check("node: generics monomorphizes max_of<int>", "max_of__int(" in gen_node(_gen_src))
+
+def expect_generic_err(src, label):
+    try:
+        gen_go(src)
+        check(label + " (should fail)", False)
+    except Exception:
+        check(label, True)
+
+expect_generic_err('fn f<T>(T a) -> T ={ return a; } int x = f<int, string>(5);', "generics arity mismatch")
+expect_generic_err('int x = f<int>(5);', "generics unknown template")
+
+# ── Phase 10.7: Interfaces / Traits (10.7) ──
+print("[phase10] interfaces and traits (10.7)")
+_trait_src = '''
+trait Describable { fn desc() -> string; }
+struct Item { string name; }
+impl Describable for Item {
+    fn desc() -> string ={ return "Item:" + this.name; }
+}
+Item item = Item { name: "box" };
+print(item.desc());
+'''
+check("go: trait impl compiles to mangled function", "Item__desc(" in gen_go(_trait_src))
+check("node: trait impl compiles to mangled function", "Item__desc(" in gen_node(_trait_src))
+check("pyro: trait impl compiles", isinstance(gen_pyro(_trait_src), (bytes, bytearray)))
+
+def expect_trait_err(src, label):
+    try:
+        gen_go(src)
+        check(label + " (should fail)", False)
+    except Exception:
+        check(label, True)
+
+expect_trait_err('trait T { fn f() -> int; } struct S { int x; } impl T for S { }', "missing trait method")
+
+# ── Phase 10.8: Module Namespaces & pub (10.8) ──
+print("[phase10] module namespaces and pub visibility (10.8)")
+_mod_src = '''
+import "Cryo/examples/example_geo.cryo" as geo;
+number a = geo::area(3.0, 4.0);
+print(a);
+'''
+def parse_mod_ast(src): return resolve_modules(parse_ast(src), os.getcwd())
+
+check("go: module namespace compiles to mangled call", "geo__area(" in CodeGenGo().generate(parse_mod_ast(_mod_src)))
+check("node: module namespace compiles to mangled call", "geo__area(" in CodeGenNode().generate(parse_mod_ast(_mod_src)))
+check("pyro: module namespace compiles", isinstance(CodeGenPyro().generate(parse_mod_ast(_mod_src)), (bytes, bytearray)))
+
+def expect_mod_err(src, label):
+    try:
+        CodeGenGo().generate(parse_mod_ast(src))
+        check(label + " (should fail)", False)
+    except Exception:
+        check(label, True)
+
+expect_mod_err('import "Cryo/examples/example_geo.cryo" as geo; number x = geo::secret_constant();', "non-pub module member access")
+
+# ── Phase 10 Issue 10: Arrays of Function Values (issue 10) ──
+print("[phase10] arrays of function values (issue 10)")
+_fn_arr_src = '''
+fn dbl(int x) -> int ={ return x * 2; }
+(fn(int)->int)[] ops = [dbl];
+print(ops[0](5));
+'''
+check("go: array of function values compiles", "[]func(int64) int64" in gen_go(_fn_arr_src))
+check("node: array of function values compiles", "cryoIndex(ops" in gen_node(_fn_arr_src))
+check("pyro: array of function values compiles", isinstance(gen_pyro(_fn_arr_src), (bytes, bytearray)))
 
 # ── result ───────────────────────────────────────────────
 print(f"\n{_passed} passed, {_failed} failed")

@@ -92,6 +92,8 @@ def _go_fn_type(t: str) -> str:
 def go_type(t: str) -> str:
     if not t:
         return ''
+    if t.startswith('(') and t.endswith(')'):
+        return go_type(t[1:-1])
     if t.startswith('fn(') and '->' in t:     # function type -> func(...)...
         return _go_fn_type(t)
     if t.endswith('?'):                       # optional -> pointer
@@ -208,14 +210,21 @@ class TypeEnv:
                        'pyro_args': 'string[]', 'pyro_time': 'int',
                        'pyro_read': 'string', 'pyro_write_file': 'bool',
                        'pyro_open': 'bool',
+                       'sign': 'int', 'gcd': 'int', 'hypot': 'number',
                        'upper': 'string', 'lower': 'string', 'trim': 'string',
                        'contains': 'bool', 'find': 'int', 'replace': 'string',
                        'substr': 'string', 'split': 'string[]', 'join': 'string',
+                       'starts_with': 'bool', 'ends_with': 'bool', 'repeat': 'string',
                        'http_get': 'string',
                        'http_post': 'string', 'schema_of': 'string',
                        'llm': 'string', 'tools': 'string[]',
                        'tools_json': 'string', 'tool_get': 'Tool',
-                       'agent': 'string'}.get(node.callee)
+                       'agent': 'string', 'index_of': 'int', 'count': 'int',
+                       'pad_start': 'string', 'pad_end': 'string'}.get(node.callee)
+            # these preserve the type of their first argument
+            if node.callee in ('clamp', 'min', 'max', 'sort', 'reverse',
+                               'slice', 'concat') and node.args:
+                return self.infer(node.args[0])
             return builtin or self.fn_ret(node.callee)
         if isinstance(node, StructInit):
             return node.struct_name
@@ -323,6 +332,15 @@ class CodeGenGo:
                 for m in n.members:
                     self._member_to_enum[m.name] = n.name
                     self._member_to_enum[f"{n.name}_{m.name}"] = n.name
+                    # A variant with data compiles to a constructor function, so
+                    # register its RETURN TYPE (the enum). Without this,
+                    # infer(Ok(x)) is 'unknown' and every context that needs a
+                    # concrete Go type falls back to `any` — which does not
+                    # satisfy the enum interface. That is what made
+                    #     Res r = cond ? Ok(x) : Err("e");
+                    # emit `func() any {…}()` and fail to compile.
+                    self.te.reg_fn(m.name, n.name)
+                    self.te.reg_fn(f"{n.name}_{m.name}", n.name)
             elif isinstance(n, FunctionDecl):
                 self.te.reg_fn(n.name, n.return_type or 'void')
             elif isinstance(n, ConstDecl):
@@ -429,6 +447,76 @@ class CodeGenGo:
                   "\treturn a % b", "}", ""]
         if 'absi' in self._helpers:
             H += ["func cryoAbsI(x int64) int64 { if x < 0 { return -x }; return x }", ""]
+        if 'sign' in self._helpers:
+            H += ["func cryoSign(x float64) int64 { if x < 0 { return -1 }; if x > 0 { return 1 }; return 0 }", ""]
+        if 'gcd' in self._helpers:
+            H += ["func cryoGcd(a, b int64) int64 {",
+                  "\tif a < 0 { a = -a }; if b < 0 { b = -b }",
+                  "\tfor b != 0 { a, b = b, a%b }",
+                  "\treturn a", "}", ""]
+        if 'repeat' in self._helpers:
+            self._imports.add('strings')
+            H += ["func cryoRepeat(s string, n int64) string {",
+                  "\tif n < 0 { n = 0 }",
+                  "\treturn strings.Repeat(s, int(n))", "}", ""]
+        if 'sort' in self._helpers:
+            self._imports.update(('slices', 'cmp'))
+            H += ["// cryoSort returns a new ascending-sorted copy (original unchanged).",
+                  "func cryoSort[T cmp.Ordered](a []T) []T {",
+                  "\tb := append([]T(nil), a...)",
+                  "\tslices.Sort(b)",
+                  "\treturn b", "}", ""]
+        if 'reverse' in self._helpers:
+            H += ["func cryoReverse[T any](a []T) []T {",
+                  "\tb := make([]T, len(a))",
+                  "\tfor i, v := range a { b[len(a)-1-i] = v }",
+                  "\treturn b", "}", ""]
+        if 'slice' in self._helpers:
+            H += ["// cryoSlice: subarray [start, end) with safe bounds, as a new slice.",
+                  "func cryoSlice[T any](a []T, start, end int64) []T {",
+                  "\tn := int64(len(a))",
+                  "\tif start < 0 { start = 0 }",
+                  "\tif end > n { end = n }",
+                  "\tif start > end { start = end }",
+                  "\tb := make([]T, end-start)",
+                  "\tcopy(b, a[start:end])",
+                  "\treturn b", "}", ""]
+        if 'strslice' in self._helpers:
+            H += ["// cryoStrSlice: substring [start, end) with safe bounds.",
+                  "// Byte-indexed, matching the VM's slice() on strings.",
+                  "func cryoStrSlice(s string, start, end int64) string {",
+                  "\tn := int64(len(s))",
+                  "\tif start < 0 { start = 0 }",
+                  "\tif end > n { end = n }",
+                  "\tif start > end { start = end }",
+                  "\treturn s[start:end]", "}", ""]
+        if 'pad' in self._helpers:
+            self._imports.add('strings')
+            H += ["// cryoPad: pad_start/pad_end (JS padStart/padEnd semantics).",
+                  "func cryoPad(s string, width int, pad string, atStart bool) string {",
+                  "\tif len(s) >= width || pad == \"\" { return s }",
+                  "\tneed := width - len(s)",
+                  "\tvar b strings.Builder",
+                  "\tfor b.Len() < need { b.WriteString(pad) }",
+                  "\tfiller := b.String()[:need]",
+                  "\tif atStart { return filler + s }",
+                  "\treturn s + filler", "}", ""]
+        if 'concat' in self._helpers:
+            H += ["func cryoConcat[T any](a, b []T) []T {",
+                  "\tc := make([]T, 0, len(a)+len(b))",
+                  "\tc = append(c, a...)",
+                  "\tc = append(c, b...)",
+                  "\treturn c", "}", ""]
+        if 'count' in self._helpers:
+            H += ["func cryoCount[T comparable](a []T, x T) int64 {",
+                  "\tvar n int64",
+                  "\tfor _, v := range a { if v == x { n++ } }",
+                  "\treturn n", "}", ""]
+        if 'sum' in self._helpers:
+            H += ["func cryoSum[T int64 | float64](a []T) T {",
+                  "\tvar s T",
+                  "\tfor _, v := range a { s += v }",
+                  "\treturn s", "}", ""]
         if 'jsonenc' in self._helpers:
             H += ["func cryoJSONEncode(v any) string {",
                   "\tb, err := json.Marshal(v)",
@@ -480,6 +568,26 @@ class CodeGenGo:
                   "\tif prompt != \"\" { fmt.Print(prompt) }",
                   "\ts, _ := cryoStdin.ReadString('\\n')",
                   "\treturn strings.TrimRight(s, \"\\r\\n\")", "}", ""]
+        if 'prng' in self._helpers:
+            H += ["var cryoPrngState uint64 = 0x853c49e6748fea9b",
+                  "func cryoSplitMix64Next() uint64 {",
+                  "\tcryoPrngState += 0x9e3779b97f4a7c15",
+                  "\tz := cryoPrngState",
+                  "\tz = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9",
+                  "\tz = (z ^ (z >> 27)) * 0x94d049bb133111eb",
+                  "\treturn z ^ (z >> 31)",
+                  "}",
+                  "func cryoRandom() float64 { return float64(cryoSplitMix64Next()>>11) / 9007199254740992.0 }",
+                  "func cryoRandomInt(lo, hi int64) int64 {",
+                  "\tif hi < lo { lo, hi = hi, lo }",
+                  "\tspan := uint64(hi - lo + 1)",
+                  "\treturn lo + int64(cryoSplitMix64Next()%span)",
+                  "}",
+                  "func cryoSeed(n int64) { cryoPrngState = uint64(n) }", ""]
+        if 'monotime' in self._helpers:
+            self._imports.add('time')
+            H += ["var cryoStartTime = time.Now()",
+                  "func cryoMonotonicMs() int64 { return time.Since(cryoStartTime).Milliseconds() }", ""]
         if 'httpget' in self._helpers:
             self._imports.update(('net/http', 'io'))
             H += ["func cryoHTTPGet(url string) string {",
@@ -835,6 +943,7 @@ class CodeGenGo:
         elif isinstance(node, Continue):           self._emit("continue")
         elif isinstance(node, Assert):             self._assert(node)
         elif isinstance(node, SafetyBlock):        self._safety(node)
+        elif isinstance(node, Block):              self._emit("{"); self._indent += 1; [self._gen(s) for s in node.body]; self._indent -= 1; self._emit("}")
         elif isinstance(node, TryCatch):           self._try(node)
         elif isinstance(node, ForeignBlock):       self._foreign(node)
         elif isinstance(node, TryExpr):
@@ -874,8 +983,7 @@ class CodeGenGo:
         vt = n.var_type
         name = gid(n.name)
         if isinstance(n.value, ArrayLiteral):
-            elems = ', '.join(self._expr(e) for e in n.value.elements)
-            self._emit(f"{name} := {gt}{{{elems}}}")
+            self._emit(f"{name} := {self._array_literal(n.value, vt)}")
         elif isinstance(n.value, MapLiteral):
             self._emit(f"var {name} {gt} = {self._map_literal(n.value, vt)}")
         elif is_map(vt) and n.value is None:
@@ -928,6 +1036,18 @@ class CodeGenGo:
     def _incr(self, n: Increment):
         self._emit(f"{gid(n.name)}{n.op}")
 
+    def _array_literal(self, node: ArrayLiteral, typ) -> str:
+        """Emit an array literal, using the type the CONTEXT expects.
+
+        Go cannot infer an element type from `[]any{…}`, so a literal has to be
+        spelled with the type of the place it is going into (declared variable,
+        function return, …). Without such a hint we fall back to []any, which is
+        right only in a genuinely typeless position."""
+        elems = ', '.join(self._expr(e) for e in node.elements)
+        if typ and typ.endswith('[]'):
+            return f"{go_type(typ)}{{{elems}}}"
+        return f"[]any{{{elems}}}"
+
     def _return(self, n: Return):
         if isinstance(n.value, TryExpr):
             okv = self._go_try(n.value.operand)
@@ -937,6 +1057,10 @@ class CodeGenGo:
             self._emit("return")
         elif is_optional(self._cur_fn_ret):
             self._emit(f"return {self._to_optional(n.value, self._cur_fn_ret)}")
+        elif isinstance(n.value, ArrayLiteral):
+            # `return [1, 2, 3]` in a `-> int[]` function: the literal must be
+            # []int64{…}, not []any{…}, or Go rejects the return statement.
+            self._emit(f"return {self._array_literal(n.value, self._cur_fn_ret)}")
         else:
             self._emit(f"return {self._expr(n.value)}")
 
@@ -1209,6 +1333,11 @@ class CodeGenGo:
         if isinstance(node, CallExpr):
             return self._call(node)
 
+        if isinstance(node, CallValueExpr):
+            # calling the result of an expression: `f(a)(b)`
+            args = ', '.join(self._expr(x) for x in node.args)
+            return f"{self._expr(node.callee)}({args})"
+
         if isinstance(node, MethodCallExpr):
             return self._method(node)
 
@@ -1222,8 +1351,7 @@ class CodeGenGo:
             return f"{self._expr(node.obj)}[{self._expr(node.index)}]"
 
         if isinstance(node, ArrayLiteral):
-            elems = ', '.join(self._expr(e) for e in node.elements)
-            return f"[]any{{{elems}}}"   # typeless context: fallback
+            return self._array_literal(node, None)   # typeless context
 
         if isinstance(node, MapLiteral):
             return self._map_literal(node, None)
@@ -1391,6 +1519,10 @@ class CodeGenGo:
     def _call(self, node: CallExpr) -> str:
         c = node.callee
         a = node.args
+        # user-defined functions shadow stdlib builtins (print/len/has/keys stay reserved)
+        if c in self.te._fns and c not in ('print', 'len', 'has', 'keys'):
+            args = ', '.join(self._expr(x) for x in a)
+            return f"{gid(c)}({args})"
         if c == 'print':
             self._imports.add('fmt')
             if not a: return "fmt.Println()"
@@ -1414,6 +1546,18 @@ class CodeGenGo:
             self._imports.add('math'); return f"math.Ceil({self._expr(a[0])})"
         if c == 'round':
             self._imports.add('math'); return f"math.Round({self._expr(a[0])})"
+        if c == 'clamp' and len(a) == 3:
+            # Go builtins min/max (>=1.21) handle int64 and float64
+            return f"max({self._expr(a[1])}, min({self._expr(a[0])}, {self._expr(a[2])}))"
+        if c == 'sign' and len(a) == 1:
+            self._helpers.add('sign')
+            return f"cryoSign(float64({self._expr(a[0])}))"
+        if c == 'gcd' and len(a) == 2:
+            self._helpers.add('gcd')
+            return f"cryoGcd(int64({self._expr(a[0])}), int64({self._expr(a[1])}))"
+        if c == 'hypot' and len(a) == 2:
+            self._imports.add('math')
+            return f"math.Hypot({self._expr(a[0])}, {self._expr(a[1])})"
         if c == 'to_string':
             self._helpers.add('str'); return f"cryoStr({self._expr(a[0])})"
         if c == 'to_int':
@@ -1452,6 +1596,35 @@ class CodeGenGo:
         if c == 'keys' and len(a) == 1:
             self._helpers.add('keys')
             return f"cryoKeys({self._expr(a[0])})"
+        # ── stateless collection ops (Phase 10.2) ──
+        if c == 'sort' and len(a) == 1:
+            self._helpers.add('sort')
+            return f"cryoSort({self._expr(a[0])})"
+        if c == 'reverse' and len(a) == 1:
+            self._helpers.add('reverse')
+            return f"cryoReverse({self._expr(a[0])})"
+        if c == 'slice' and len(a) == 3:
+            # slice() is polymorphic over array|string (10.9), but Go's generic
+            # cryoSlice only unifies with []T — a string needs its own helper.
+            if self.te.infer(a[0]) == 'string':
+                self._helpers.add('strslice')
+                return (f"cryoStrSlice({self._expr(a[0])}, "
+                        f"int64({self._expr(a[1])}), int64({self._expr(a[2])}))")
+            self._helpers.add('slice')
+            return (f"cryoSlice({self._expr(a[0])}, "
+                    f"int64({self._expr(a[1])}), int64({self._expr(a[2])}))")
+        if c == 'index_of' and len(a) == 2:
+            self._imports.add('slices')
+            return f"int64(slices.Index({self._expr(a[0])}, {self._expr(a[1])}))"
+        if c == 'concat' and len(a) == 2:
+            self._helpers.add('concat')
+            return f"cryoConcat({self._expr(a[0])}, {self._expr(a[1])})"
+        if c == 'count' and len(a) == 2:
+            self._helpers.add('count')
+            return f"cryoCount({self._expr(a[0])}, {self._expr(a[1])})"
+        if c == 'sum' and len(a) == 1:
+            self._helpers.add('sum')
+            return f"cryoSum({self._expr(a[0])})"
         # ── strings ──
         if c == 'upper' and len(a) == 1:
             self._imports.add('strings')
@@ -1465,7 +1638,7 @@ class CodeGenGo:
         if c == 'contains' and len(a) == 2:
             self._imports.add('strings')
             return f"strings.Contains({self._expr(a[0])}, {self._expr(a[1])})"
-        if c == 'find' and len(a) == 2:
+        if c == 'find' and len(a) == 2 and self.te.infer(a[0]) == 'string':
             self._imports.add('strings')
             return f"int64(strings.Index({self._expr(a[0])}, {self._expr(a[1])}))"
         if c == 'replace' and len(a) == 3:
@@ -1482,6 +1655,30 @@ class CodeGenGo:
         if c == 'join' and len(a) == 2:
             self._imports.add('strings')
             return f"strings.Join({self._expr(a[0])}, {self._expr(a[1])})"
+        if c == 'starts_with' and len(a) == 2:
+            self._imports.add('strings')
+            return f"strings.HasPrefix({self._expr(a[0])}, {self._expr(a[1])})"
+        if c == 'ends_with' and len(a) == 2:
+            self._imports.add('strings')
+            return f"strings.HasSuffix({self._expr(a[0])}, {self._expr(a[1])})"
+        if c == 'repeat' and len(a) == 2:
+            self._helpers.add('repeat')
+            return f"cryoRepeat({self._expr(a[0])}, int64({self._expr(a[1])}))"
+        if c in ('pad_start', 'pad_end') and len(a) == 3:
+            self._helpers.add('pad')
+            at_start = 'true' if c == 'pad_start' else 'false'
+            return (f"cryoPad({self._expr(a[0])}, int({self._expr(a[1])}), "
+                    f"{self._expr(a[2])}, {at_start})")
+        if c == 'now_ms':
+            self._imports.add('time'); return "time.Now().UnixMilli()"
+        if c == 'monotonic_ms':
+            self._helpers.add('monotime'); return "cryoMonotonicMs()"
+        if c == 'random':
+            self._helpers.add('prng'); return "cryoRandom()"
+        if c == 'random_int' and len(a) == 2:
+            self._helpers.add('prng'); return f"cryoRandomInt({self._expr(a[0])}, {self._expr(a[1])})"
+        if c == 'seed' and len(a) == 1:
+            self._helpers.add('prng'); return f"cryoSeed({self._expr(a[0])})"
         # ── Pyro: introspection of native skills (no .md files) ──
         if c == 'skills':
             self._use_skills = True

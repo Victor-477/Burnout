@@ -89,12 +89,30 @@ def selfhost_via_python(prog, tag):
     return out if os.path.exists(out) else None
 
 def selfhost_via_selfhost(prog, tag):
-    """Compile `prog` with the self-host codegen as built by the self-host itself."""
+    """Compile `prog` with the self-host codegen as built by the self-host itself.
+
+    driver_b is handed to the middle stage via read_file() rather than embedded
+    as a string LITERAL. Embedding was incidental plumbing, and it imposed a hard
+    ceiling: a .pyro string constant carries a u16 length, so once the escaped
+    source passed 65535 bytes this stage failed with
+
+        'H' format requires 0 <= number <= 65535
+
+    for ANY program — a format limit, not a self-hosting failure. The self-host
+    source crossed that line at ~65 KB, so every later addition to codegen.cryo
+    would have "broken the bootstrap" while the fixed point was in fact intact.
+    read_file() (native 28) removes the ceiling and leaves what is actually under
+    test — stage1 output == stage2 output — unchanged."""
     out = os.path.join(TMP, tag + "_B.pyro").replace("\\", "/")
     driver_b = SRC + '\ncompile("' + _embed(prog) + '", "' + out + '");\n'
+    driver_b_path = os.path.join(TMP, tag + "_driver_b.cryo").replace("\\", "/")
+    with open(driver_b_path, "w", encoding="utf-8") as fh:
+        fh.write(driver_b)
     stage2 = os.path.join(TMP, tag + "_stage2.pyro").replace("\\", "/")
     stmid = os.path.join(TMP, tag + "_stmid.pyro")
-    if _ref_compile(SRC + '\ncompile("' + _embed(driver_b) + '", "' + stage2 + '");\n', stmid).returncode != 0:
+    mid_src = (SRC + '\ncompile(read_file("' + driver_b_path + '"), "'
+               + stage2 + '");\n')
+    if _ref_compile(mid_src, stmid).returncode != 0:
         return None
     _run(stmid, stage2)                 # stage2 = self-host-compile(driver_b)
     if not os.path.exists(stage2):
@@ -134,9 +152,15 @@ if pA and pB:
     check("FIXED POINT: byte-identical bytecode from both compilers", _sha(pA) == _sha(pB))
 
 # ── the self-host can compile its OWN full source into a valid .pyro ─────
+# Also fed via read_file() rather than an embedded literal — same u16
+# string-length ceiling as selfhost_via_selfhost(); see the note there.
 own = os.path.join(TMP, "selfsrc.pyro").replace("\\", "/")
 st = os.path.join(TMP, "selfsrc_st.pyro")
-ok_compile = _ref_compile(SRC + '\ncompile("' + _embed(SRC) + '", "' + own + '");\n', st).returncode == 0
+src_path = os.path.join(TMP, "selfsrc_in.cryo").replace("\\", "/")
+with open(src_path, "w", encoding="utf-8") as fh:
+    fh.write(SRC)
+ok_compile = _ref_compile(
+    SRC + '\ncompile(read_file("' + src_path + '"), "' + own + '");\n', st).returncode == 0
 if ok_compile:
     _run(st, own)
 check("self-host compiles its own full source (lexer+codegen) to a valid .pyro",

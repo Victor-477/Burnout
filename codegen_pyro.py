@@ -7,20 +7,20 @@
 #
 #  Format of the .pyro file (little-endian):
 #    magic    4  "PYRO"
-#    version  1  0x02
+#    version  1  0x03  (v2 still readable)
 #    flags    1  bit0 = code section encoded (XOR rolling)
 #                bit1 = debugging section present (pc->line)
 #                bit2 = sandbox (VM rejects network/machine natives)
 #    nconsts  u16   after: [ tag(1) + payload ] * nconsts
 #       tag 1 int64  (8)   | tag 2 float64 (8)
-#       tag 3 string (u16 len + bytes utf8) | tag 4 bool (1)
+#       tag 3 string (u32 len + bytes utf8; u16 in v2) | tag 4 bool (1)
 #    nfuncs   u16   after: [ nameidx u16, entry u32, nparams u8, nlocals u16 ] * nfuncs
 #    entryfn  u16   (index of the 'main' function)
 #    codelen  u32   after: code bytes (possibly encoded)
 # ============================================================
 import struct
 from ast_nodes import *
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Set
 
 
 class CodeGenPyroError(Exception):
@@ -60,6 +60,9 @@ OP_JMPF  = 0x31   # i16 rel (pop; jumps if false)
 OP_JMPT  = 0x32   # i16 rel (pop; jumps if true)
 OP_CALL  = 0x40   # u16 funcidx, u8 argc
 OP_RET   = 0x41
+OP_PUSHFN     = 0x42   # u16 funcidx -> pushes a function value (first-class fn)
+OP_CALL_VALUE = 0x43   # u8 argc -> pops argc args + the fn value beneath, calls it
+OP_CLOSURE    = 0x44   # u16 funcidx, u8 ncap -> pops ncap values, pushes a closure
 OP_PRINT = 0x50   # pops and prints (with \n) according to the type at runtime
 OP_PRINTLN = 0x52 # prints \n
 OP_ASSERT = 0x51  # pop cond, pop msg; if cond is false aborts
@@ -86,6 +89,7 @@ _OPERAND = {
     OP_JMP: 4, OP_JMPF: 4, OP_JMPT: 4,
     OP_CALL: 3, OP_NEWARR: 2, OP_NEWMAP: 2,
     OP_NATIVE: 2, OP_TRYPUSH: 6,   # i32 rel + u16 slot
+    OP_PUSHFN: 2, OP_CALL_VALUE: 1, OP_CLOSURE: 3,
 }
 
 _NO_SLOT = 0xFFFF   # TRYPUSH without catch variable
@@ -108,6 +112,23 @@ NATIVES = {
     'http_get':  (24, 1), 'http_post': (25, 2), 'sleep': (26, 1),
     # ── Binary I/O (Phase 9.3): writes int[] as bytes to a file ──
     'write_bytes': (27, 2),
+    # ── File I/O + argv (Phase 9.6): self-hosted front-end needs these ──
+    'read_file': (28, 1), 'args': (29, 0),
+    # ── static HTTP server (Phase 9.6 full-stack backend) ──
+    'http_serve': (30, 2),
+    # ── extended standard library (Phase 10.4) ──
+    'clamp':       (31, 3), 'sign':      (32, 1),
+    'gcd':         (33, 2), 'hypot':     (34, 2),
+    'starts_with': (35, 2), 'ends_with': (36, 2), 'repeat': (37, 2),
+    # ── stateless collection ops (Phase 10.2) ──
+    'sort':        (38, 1), 'reverse':   (39, 1),
+    'slice':       (40, 3), 'index_of':  (41, 2),
+    # ── stdlib slice 2 (Phase 10.4): padding + collection reducers ──
+    'pad_start':   (42, 3), 'pad_end':   (43, 3),
+    'concat':      (44, 2), 'count':     (45, 2), 'sum': (46, 1),
+    # ── time and random natives (Phase 10.4) ──
+    'now_ms':       (47, 0), 'monotonic_ms': (48, 0),
+    'random':       (49, 0), 'random_int':   (50, 2), 'seed': (51, 1),
 }
 
 def _isize(op: int) -> int:
@@ -120,7 +141,10 @@ TAG_STR = 3
 TAG_BOOL = 4
 
 _MAGIC = b"PYRO"
-_VERSION = 2         # v2: jumps i32 + optional debugging section (pc->line)
+_VERSION = 3         # v3: string constants use a u32 length (v2 was u16)
+#   v2: jumps i32 + optional debugging section (pc->line)
+#   v3: TAG_STR length widened u16 -> u32, lifting the 64 KB literal cap.
+#       Readers accept BOTH: the width is chosen by the version byte.
 _FLAG_ENCODED = 0x01
 _FLAG_DEBUG   = 0x02
 _FLAG_SANDBOX = 0x04
@@ -151,15 +175,18 @@ _I64_MIN, _I64_MAX = -(1 << 63), (1 << 63) - 1
 
 class CodeGenPyro:
     def __init__(self, safe: bool = True, encode: bool = True,
-                 optimize: bool = True, sandbox: bool = False):
+                 optimize: bool = True, sandbox: bool = False,
+                 extra_natives: Optional[Set[str]] = None):
         self.safe = safe
         self.encode = encode
         self.optimize = optimize
         self.sandbox = sandbox
+        self.extra_natives = set(extra_natives) if extra_natives else set()
         self._consts: List = []            # [(tag, value)]
         self._const_idx: Dict = {}
         self._funcs: List[_Func] = []
         self._fnindex: Dict[str, int] = {}
+        self._pending_lambdas: List = []   # (name, Lambda) queued for compilation
         self._cur: Optional[_Func] = None
         self._nlabels = 0
         self._loop_stack: List = []        # (break_label, continue_label)
@@ -260,6 +287,14 @@ class CodeGenPyro:
             self._compile_fn(fn.name, fn.params, fn.body)
         self._compile_fn('main', [], top, synthetic=True)
 
+        # lambdas discovered while compiling bodies are queued (with their index
+        # reserved) and compiled here in index order, so each lands at the
+        # function-table position equal to its index. A lambda body may enqueue
+        # more lambdas — FIFO keeps positions monotonic.
+        while self._pending_lambdas:
+            name, params, body = self._pending_lambdas.pop(0)
+            self._compile_fn(name, params, body, synthetic=True)
+
         return self._assemble()
 
     def _compile_fn(self, name, params, body, synthetic=False):
@@ -268,6 +303,10 @@ class CodeGenPyro:
         self._cur = f
         self._loop_stack = []
         self._cur_line = 0
+        # names written anywhere in this function — used to enforce that a
+        # captured variable is effectively final (see _captures_of)
+        self._assigned_names = set()
+        self._collect_assigned(body, self._assigned_names)
         for _pt, pn in params:
             self._slot(pn)
         for s in body:
@@ -277,6 +316,86 @@ class CodeGenPyro:
         self._emit(OP_RET)
         self._funcs.append(f)
         self._cur = None
+
+    def _compile_lambda(self, lam: Lambda):
+        """Reserve a function index for a lambda and queue its body, so its
+        position in the function table equals its index. Returns
+        (index, captured_names).
+
+        Captured variables become LEADING parameters of the synthetic function;
+        at the creation site the enclosing frame pushes their current values and
+        OP_CLOSURE bundles them into the function value."""
+        captured = self._captures_of(lam)
+        idx = len(self._fnindex)
+        name = f"__lambda_{idx}"
+        self._fnindex[name] = idx
+        # the synthetic function's params are: captured..., then declared
+        params = [("any", c) for c in captured] + list(lam.params)
+        self._pending_lambdas.append((name, params, lam.body))
+        return idx, captured
+
+    def _captures_of(self, lam: Lambda):
+        """Free variables of `lam` that must be captured from the enclosing frame.
+
+        Capture is BY VALUE. To guarantee this can never disagree with the
+        go/node backends (which capture by reference), a captured variable must
+        be "effectively final" — never reassigned in the enclosing function.
+        Otherwise the two would observe different values and Pyro parity breaks."""
+        bound = {pn for _pt, pn in lam.params}
+        used, declared = set(), set()
+        self._walk_names(lam.body, used, declared)
+        free = used - bound - declared
+        # names resolvable without a closure: globals, enum members, functions, builtins
+        free -= set(self._global_consts) | set(self._enum_consts) | set(self._enum_maps)
+        free -= set(self._fnindex) | set(NATIVES)
+        free -= {'print', 'len', 'has', 'keys', 'assert', 'throw'}
+        # only enclosing LOCALS can be captured; anything else is an unknown name
+        captured = sorted(n for n in free if n in self._cur.locals)
+        unknown = sorted(free - set(captured))
+        if unknown:
+            raise CodeGenPyroError(
+                f"lambda references unknown name(s) {unknown}")
+        reassigned = sorted(c for c in captured if c in self._assigned_names)
+        if reassigned:
+            raise CodeGenPyroError(
+                f"lambda captures {reassigned}, which is reassigned in the enclosing "
+                f"function. Captured variables must be effectively final in the pyro "
+                f"backend (capture is by value, so a later write would be invisible "
+                f"here but visible with --backend go/node). Copy it into a new "
+                f"variable and capture that instead.")
+        return captured
+
+    def _collect_assigned(self, node, out: set):
+        """Names written to anywhere in a subtree (assignment/compound/increment)."""
+        if isinstance(node, list):
+            for x in node:
+                self._collect_assigned(x, out)
+            return
+        if not isinstance(node, Node):
+            return
+        if isinstance(node, (Assignment, CompoundAssignment, Increment)):
+            out.add(node.name)
+        for fld in getattr(node, '__dataclass_fields__', {}):
+            self._collect_assigned(getattr(node, fld), out)
+
+    def _walk_names(self, node, used: set, declared: set):
+        """Collect Identifier names (used) and VarDecl names (declared) in a subtree."""
+        if isinstance(node, list):
+            for x in node:
+                self._walk_names(x, used, declared)
+            return
+        if not isinstance(node, Node):
+            return
+        if isinstance(node, Identifier):
+            used.add(node.name)
+        elif isinstance(node, CallExpr):
+            used.add(node.callee)          # a called name is a use too
+        elif isinstance(node, (VarDecl, ConstDecl)):
+            declared.add(node.name)
+        elif isinstance(node, Lambda):
+            declared.update(pn for _pt, pn in node.params)   # nested lambda's own params
+        for fld in getattr(node, '__dataclass_fields__', {}):
+            self._walk_names(getattr(node, fld), used, declared)
 
     # ── statements ──────────────────────────────────────────
 
@@ -311,7 +430,7 @@ class CodeGenPyro:
         elif isinstance(n, Continue):           self._continue()
         elif isinstance(n, Assert):             self._assert(n)
         elif isinstance(n, TryCatch):           self._try(n)
-        elif isinstance(n, SafetyBlock):
+        elif isinstance(n, (SafetyBlock, Block)):
             for s in n.body: self._stmt(s)
         elif isinstance(n, CallExpr) and n.callee == 'throw':
             arg = n.args[0] if n.args else Literal('null', None)
@@ -579,16 +698,29 @@ class CodeGenPyro:
         if isinstance(n, Literal):
             self._literal(n); return
         if isinstance(n, Lambda):
-            raise CodeGenPyroError(
-                "first-class functions (lambdas) are not yet supported "
-                "in pyro backend; use --backend go or node. "
-                "(function-values in the Pyro VM are planned — Phase 9)")
+            idx, captured = self._compile_lambda(n)
+            if not captured:
+                self._emit(OP_PUSHFN, idx)
+            else:
+                # push the captured values from the current frame, then bundle
+                # them into a closure (captured BY VALUE — see _captures_of)
+                for c in captured:
+                    self._emit(OP_LOAD, self._get_slot(c))
+                self._emit(OP_CLOSURE, (idx, len(captured)))
+            return
+        if isinstance(n, CallValueExpr):
+            # calling the result of an expression: push the function value,
+            # then the args, then CALL_VALUE
+            self._expr(n.callee)
+            for a in n.args:
+                self._expr(a)
+            self._emit(OP_CALL_VALUE, len(n.args))
+            return
         if isinstance(n, Identifier):
-            # function name used as value (1st class) — not yet in the VM
+            # a top-level function name used as a value -> function value
             if n.name in self._fnindex and n.name not in self._cur.locals:
-                raise CodeGenPyroError(
-                    f"function '{n.name}' used as value (1st class) is not yet "
-                    f"supported in the pyro backend; use --backend go or node.")
+                self._emit(OP_PUSHFN, self._fnindex[n.name])
+                return
             if n.name in self._enum_consts:      # enum member -> const int
                 self._emit(OP_CONST, self._const(TAG_INT, self._enum_consts[n.name]))
                 return
@@ -724,7 +856,23 @@ class CodeGenPyro:
             self._expr(n.args[0]); self._expr(n.args[1]); self._emit(OP_HAS); return
         if n.callee == 'keys' and len(n.args) == 1:
             self._expr(n.args[0]); self._emit(OP_KEYS); return
-        # VM native builtins (math, conversions, strings, remove)
+        # calling a function-valued local variable: load it, then the args,
+        # then CALL_VALUE (a local shadows a top-level function of the same name)
+        if n.callee in self._cur.locals:
+            self._emit(OP_LOAD, self._get_slot(n.callee))
+            for a in n.args:
+                self._expr(a)
+            self._emit(OP_CALL_VALUE, len(n.args))
+            return
+        # user-defined functions shadow the native builtins (so a program may
+        # define its own `fn sum(...)` etc. without colliding with the stdlib)
+        fi = self._fnindex.get(n.callee)
+        if fi is not None:
+            for a in n.args:
+                self._expr(a)
+            self._emit(OP_CALL, (fi, len(n.args)))
+            return
+        # VM native builtins (math, conversions, strings, collections, …)
         nat = NATIVES.get(n.callee)
         if nat is not None:
             nid, argc = nat
@@ -735,15 +883,19 @@ class CodeGenPyro:
                 self._expr(a)
             self._emit(OP_NATIVE, (nid, argc))
             return
-        # user function
-        fi = self._fnindex.get(n.callee)
-        if fi is None:
-            raise CodeGenPyroError(
-                f"function '{n.callee}' unknown in pyro backend "
-                f"(builtins: print, len, has, keys, {', '.join(sorted(NATIVES))}).")
-        for a in n.args:
-            self._expr(a)
-        self._emit(OP_CALL, (fi, len(n.args)))
+        if n.callee in self.extra_natives:
+            for a in n.args:
+                self._expr(a)
+            if n.callee not in self._fnindex:
+                f = _Func(n.callee, len(n.args))
+                f.index = len(self._funcs)
+                self._funcs.append(f)
+                self._fnindex[n.callee] = f.index
+            self._emit(OP_CALL, (self._fnindex[n.callee], len(n.args)))
+            return
+        raise CodeGenPyroError(
+            f"function '{n.callee}' unknown in pyro backend "
+            f"(builtins: print, len, has, keys, {', '.join(sorted(NATIVES))}).")
 
     # ── bytecode optimizer ──────────────────────────────
     #  Peephole over the (op, arg) list of each function. Since the
@@ -943,6 +1095,14 @@ class CodeGenPyro:
                 rel = label_off[lbl.id] - (off + 7)   # 1 opcode + 6 (i32 + u16)
                 code += struct.pack('<i', rel)
                 code += struct.pack('<H', slot)
+            elif op == OP_PUSHFN:
+                code += struct.pack('<H', arg)
+            elif op == OP_CALL_VALUE:
+                code.append(arg & 0xFF)
+            elif op == OP_CLOSURE:
+                fi, ncap = arg
+                code += struct.pack('<H', fi)
+                code.append(ncap & 0xFF)
         assert len(code) == code_len
 
         flags = 0
@@ -967,7 +1127,16 @@ class CodeGenPyro:
             elif tag == TAG_BOOL: out.append(1 if val else 0)
             elif tag == TAG_STR:
                 b = val.encode('utf-8')
-                out += struct.pack('<H', len(b)); out += b
+                # v3 widened this length u16 -> u32, lifting the old 64 KB cap
+                # (ISSUES/16). The guard stays: 4 GB is not a real program, and a
+                # bare struct.error would name neither the cause nor the constant.
+                if len(b) > 0xFFFFFFFF:
+                    head = val[:60].replace('\n', '\\n')
+                    raise CodeGenPyroError(
+                        f"string constant of {len(b)} bytes exceeds the .pyro limit "
+                        f"(starts: \"{head}…\"). Split it, or load it at runtime "
+                        f"with read_file().")
+                out += struct.pack('<I', len(b)); out += b
         # functions
         out += struct.pack('<H', len(self._funcs))
         for f in self._funcs:

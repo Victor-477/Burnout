@@ -110,10 +110,14 @@ class _Types:
                  'to_number': 'number', 'sqrt': 'number', 'pow': 'number',
                  'abs': 'number', 'floor': 'number', 'ceil': 'number',
                  'round': 'number', 'min': 'number', 'max': 'number',
+                 'clamp': 'number', 'sign': 'int', 'gcd': 'int', 'hypot': 'number',
                  'json_encode': 'string', 'has': 'bool',
                  'upper': 'string', 'lower': 'string', 'trim': 'string',
                  'contains': 'bool', 'find': 'int', 'replace': 'string',
                  'substr': 'string', 'split': 'string[]', 'join': 'string',
+                 'starts_with': 'bool', 'ends_with': 'bool', 'repeat': 'string',
+                 'index_of': 'int', 'count': 'int', 'sum': 'number',
+                 'pad_start': 'string', 'pad_end': 'string',
                  'keys': 'string[]'}.get(node.callee)
             return b or self.fns.get(node.callee, 'unknown')
         if isinstance(node, StructInit):
@@ -287,6 +291,22 @@ class CodeGenNode:
                   "  if (x == null) throw new Error('[Cryo Security] unwrap of null');",
                   "  return x;",
                   "}", ""]
+        if 'prng' in self._helpers:
+            H += ["let _cryoPrngState = 0x853c49e6748fea9bn;",
+                  "function cryoSplitMix64Next() {",
+                  "  _cryoPrngState = (_cryoPrngState + 0x9e3779b97f4a7c15n) & 0xffffffffffffffffn;",
+                  "  let z = _cryoPrngState;",
+                  "  z = ((z ^ (z >> 30n)) * 0xbf58476d1ce4e5b9n) & 0xffffffffffffffffn;",
+                  "  z = ((z ^ (z >> 27n)) * 0x94d049bb133111ebn) & 0xffffffffffffffffn;",
+                  "  return (z ^ (z >> 31n)) & 0xffffffffffffffffn;",
+                  "}",
+                  "function cryoRandom() { return Number(cryoSplitMix64Next() >> 11n) / 9007199254740992.0; }",
+                  "function cryoRandomInt(lo, hi) {",
+                  "  if (hi < lo) { let t = lo; lo = hi; hi = t; }",
+                  "  let span = BigInt(hi - lo + 1);",
+                  "  return lo + Number(cryoSplitMix64Next() % span);",
+                  "}",
+                  "function cryoSeed(n) { _cryoPrngState = BigInt(n); }", ""]
         return H
 
     # ── functions ─────────────────────────────────────────────
@@ -397,6 +417,8 @@ class CodeGenNode:
             self._emit(f"if (!({self._expr(n.condition)})) throw new Error({msg});")
         elif isinstance(n, SafetyBlock):
             self._block(n.body)   # JS has no 'unsafe'; emits the body
+        elif isinstance(n, Block):
+            self._block(n.body)
         elif isinstance(n, ForeignBlock):
             self._foreign(n)
         elif isinstance(n, CallExpr) and n.callee == 'throw':
@@ -534,6 +556,10 @@ class CodeGenNode:
                     f" : {self._expr(n.else_value)})")
         if isinstance(n, CallExpr):
             return self._call(n)
+        if isinstance(n, CallValueExpr):
+            # calling the result of an expression: `f(a)(b)`
+            args = ', '.join(self._expr(a) for a in n.args)
+            return f"{self._expr(n.callee)}({args})"
         if isinstance(n, MethodCallExpr):
             args = ', '.join(self._expr(a) for a in n.args)
             return f"{self._expr(n.obj)}.{n.method}({args})"
@@ -567,6 +593,10 @@ class CodeGenNode:
         if isinstance(n, (SpawnExpr, AwaitExpr)):
             self._err("concurrency (spawn/await) is not supported in the node backend; "
                       "use --backend go.")
+        if isinstance(n, CallValueExpr):
+            callee = self._expr(n.callee)
+            args = ", ".join(self._expr(a) for a in n.args)
+            return f"({callee})({args})"
         if isinstance(n, Lambda):
             return self._lambda(n)
         self._err(f"expression not supported in node backend: {type(n).__name__}")
@@ -628,6 +658,10 @@ class CodeGenNode:
 
         args = ', '.join(self._expr(x) for x in a)
 
+        # user-defined functions shadow stdlib builtins (print/len/has/keys reserved)
+        if c in self._t.fns and c not in ('print', 'len', 'has', 'keys'):
+            return f"{jsid(c)}({args})"
+
         if c == 'print':
             return f"console.log({args})"
         if c == 'len':
@@ -644,6 +678,15 @@ class CodeGenNode:
                       'max': 'max', 'floor': 'floor', 'ceil': 'ceil',
                       'round': 'round'}[c]
             return f"Math.{jsname}({args})"
+        if c == 'clamp':
+            return f"Math.max({A(1)}, Math.min({A(0)}, {A(2)}))"
+        if c == 'sign':
+            return f"Math.sign({A(0)})"
+        if c == 'gcd':
+            return (f"((a,b)=>{{a=Math.abs(a);b=Math.abs(b);"
+                    f"while(b){{const t=a%b;a=b;b=t;}}return a;}})({A(0)}, {A(1)})")
+        if c == 'hypot':
+            return f"Math.hypot({A(0)}, {A(1)})"
         if c == 'upper':
             return f"String({A(0)}).toUpperCase()"
         if c == 'lower':
@@ -654,6 +697,16 @@ class CodeGenNode:
             return f"String({A(0)}).includes({A(1)})"
         if c == 'find':
             return f"String({A(0)}).indexOf({A(1)})"
+        if c == 'now_ms':
+            return "Date.now()"
+        if c == 'monotonic_ms':
+            return "Math.floor(performance.now())"
+        if c == 'random':
+            self._helpers.add('prng'); return "cryoRandom()"
+        if c == 'random_int' and len(a) == 2:
+            self._helpers.add('prng'); return f"cryoRandomInt({A(0)}, {A(1)})"
+        if c == 'seed' and len(a) == 1:
+            self._helpers.add('prng'); return f"cryoSeed({A(0)})"
         if c == 'replace':
             return f"String({A(0)}).split({A(1)}).join({A(2)})"
         if c == 'substr':
@@ -663,10 +716,40 @@ class CodeGenNode:
             return f"String({A(0)}).split({A(1)})"
         if c == 'join':
             return f"({A(0)}).join({A(1)})"
+        if c == 'starts_with':
+            return f"String({A(0)}).startsWith({A(1)})"
+        if c == 'ends_with':
+            return f"String({A(0)}).endsWith({A(1)})"
+        if c == 'repeat':
+            return f"String({A(0)}).repeat(Math.max(0, {A(1)}))"
         if c == 'has':
             return f"Object.prototype.hasOwnProperty.call({A(0)}, {A(1)})"
         if c == 'keys':
             return f"Object.keys({A(0)})"
+        # ── stateless collection ops (Phase 10.2) ──
+        if c == 'sort':
+            # numbers sort numerically, everything else by string form (matches the VM)
+            return (f"[...{A(0)}].sort((x,y)=>{{const nx=typeof x===\"number\",ny=typeof y===\"number\";"
+                    f"if(nx&&ny)return x-y;const sx=String(x),sy=String(y);"
+                    f"return sx<sy?-1:sx>sy?1:0;}})")
+        if c == 'reverse':
+            return f"[...{A(0)}].reverse()"
+        if c == 'slice':
+            # clamp bounds to [0, len] like the VM (JS slice treats negatives as from-end)
+            return (f"((a,s,e)=>{{const n=a.length;if(s<0)s=0;if(e>n)e=n;"
+                    f"if(s>e)s=e;return a.slice(s,e);}})({A(0)}, {A(1)}, {A(2)})")
+        if c == 'index_of':
+            return f"({A(0)}).indexOf({A(1)})"
+        if c == 'pad_start':
+            return f"String({A(0)}).padStart({A(1)}, {A(2)})"
+        if c == 'pad_end':
+            return f"String({A(0)}).padEnd({A(1)}, {A(2)})"
+        if c == 'concat':
+            return f"[...{A(0)}, ...{A(1)}]"
+        if c == 'count':
+            return f"({A(0)}).filter(e=>e==={A(1)}).length"
+        if c == 'sum':
+            return f"({A(0)}).reduce((s,v)=>s+v, 0)"
         if c == 'remove':
             return f"(delete {A(0)}[{A(1)}])"
         if c == 'json_encode':

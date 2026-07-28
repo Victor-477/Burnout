@@ -55,7 +55,9 @@ def load(data: bytes) -> dict:
         elif tag == bc.TAG_FLT: consts.append(('float', rd('<d')))
         elif tag == bc.TAG_BOOL: consts.append(('bool', bool(data[pos]))); pos += 1
         elif tag == bc.TAG_STR:
-            ln = rd('<H'); consts.append(('str', data[pos:pos+ln].decode('utf-8'))); pos += ln
+            # v3 widened the string length u16 -> u32; v2 files still read.
+            ln = rd('<I') if version >= 3 else rd('<H')
+            consts.append(('str', data[pos:pos+ln].decode('utf-8'))); pos += ln
         else:
             raise ValueError(f"unknown constant tag: {tag}")
 
@@ -146,6 +148,12 @@ def disassemble(data: bytes) -> str:
             nid, argc = operand[0], operand[1]
             nname = next((k for k, v in bc.NATIVES.items() if v[0] == nid), '?')
             text += f" {nid} {argc}  ; {nname}(argc={argc})"
+        elif op == bc.OP_PUSHFN:
+            fi = struct.unpack('<H', operand)[0]
+            fname = funcs[fi]['name'] if fi < len(funcs) else '?'
+            text += f" {fi}  ; &{fname}"
+        elif op == bc.OP_CALL_VALUE:
+            text += f" {operand[0]}  ; call value (argc={operand[0]})"
         elif op == bc.OP_TRYPUSH:
             rel = struct.unpack('<i', operand[:4])[0]
             slot = struct.unpack('<H', operand[4:6])[0]

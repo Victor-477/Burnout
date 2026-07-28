@@ -26,6 +26,13 @@ def c_type(t: str) -> str:
         raise CodeGenError(
             f"type '{t}' (map/optional) is not yet supported in the C backend; "
             f"use --backend go.")
+    # function types have no C spelling here: unknown types pass through
+    # verbatim, so without this guard `fn(int)->int` leaked into the output and
+    # produced invalid C that only failed later, inside gcc.
+    if t and t.startswith('fn('):
+        raise CodeGenError(
+            f"function type '{t}' (first-class functions) is not supported in the C "
+            f"backend; use --backend go, node or pyro.")
     if t and t.endswith('[]'):
         return 'CryoArray*'
     return C_TYPE.get(t, t)          # struct types pass directly
@@ -88,10 +95,35 @@ class TypeEnv:
             t = self.infer(node.then_value)
             return t if t != 'unknown' else self.infer(node.else_value)
         if isinstance(node, CallExpr):
-            if node.callee in ('floor', 'ceil', 'round', 'min', 'max'):
-                if node.callee in ('min', 'max'):
-                    return self.infer(node.args[0]) if node.args else 'number'
+            if node.callee in ('to_string', 'input', 'upper', 'lower', 'trim', 'substr',
+                               'concat', 'repeat', 'pad_start', 'pad_end', 'replace', 'join'):
+                return 'string'
+            if node.callee in ('to_int', 'len', 'sign', 'gcd', 'find',
+                               'count', 'index_of'):
+                return 'int'
+            if node.callee == 'split':
+                return 'string[]'
+            # these return a NEW array of the same type as their first argument
+            if node.callee in ('sort', 'reverse', 'slice', 'concat') and node.args:
+                return self.infer(node.args[0])
+            # sum() yields the element type of its array
+            if node.callee == 'sum' and node.args:
+                return elem_type(self.infer(node.args[0]))
+            if node.callee in ('to_number', 'sqrt', 'pow', 'hypot', 'floor', 'ceil', 'round'):
                 return 'number'
+            if node.callee in ('starts_with', 'ends_with', 'contains'):
+                return 'bool'
+            # abs/min/max preserve the argument's type. `abs` must NOT be typed
+            # `int` unconditionally: _call() already picks cryo_abs_f for a
+            # `number`, so claiming `int` here made print() emit
+            # cryo_print_i64() on a double and truncate (abs(-2.5) -> 2).
+            if node.callee in ('abs', 'min', 'max'):
+                return self.infer(node.args[0]) if node.args else 'number'
+            # clamp(x, lo, hi) is int only when ALL THREE are int — mixing in a
+            # float makes the result a float, matching the Pyro runtime.
+            if node.callee == 'clamp':
+                ts = [self.infer(a) for a in node.args]
+                return 'int' if ts and all(t == 'int' for t in ts) else 'number'
             return self.fn_ret(node.callee)
         if isinstance(node, StructInit):
             return node.struct_name
@@ -101,6 +133,10 @@ class TypeEnv:
             ot = self.infer(node.obj)
             if node.field == 'length': return 'int'
             return self.struct_field(ot, node.field)
+        if isinstance(node, MethodCallExpr):
+            if node.method in ('upper', 'lower', 'substr'): return 'string'
+            if node.method in ('length', 'size'): return 'int'
+            if node.method == 'contains': return 'bool'
         if isinstance(node, IndexAccess):
             at = self.infer(node.obj)
             return elem_type(at)
@@ -245,6 +281,7 @@ class CodeGenC:
         elif isinstance(node, Switch):              self._switch(node)
         elif isinstance(node, Assert):              self._assert(node)
         elif isinstance(node, SafetyBlock):         self._safety(node)
+        elif isinstance(node, Block):               self._safety(node)
         elif isinstance(node, Import):              self._import(node)
         elif isinstance(node, Library):             self._library(node)
         elif isinstance(node, ForeignBlock):        self._foreign(node)
@@ -681,19 +718,21 @@ class CodeGenC:
         callee = node.callee
         args   = node.args
 
-        # resources only for Go backend (Pyro/JSON, concurrency, HTTP, LLM)
+        # resources only for Go/Node/Pyro backends
         if callee.startswith('pyro_') or callee in (
                 'skills', 'skill_get', 'skill_has', 'skills_json', 'json_encode',
                 'http_get', 'http_post', 'sleep',
-                'schema_of', 'llm', 'tools', 'tool_get', 'tools_json', 'agent'):
-            raise CodeGenError(
-                f"'{callee}()' only exists in the Go backend (JSON/concurrency/HTTP/LLM); "
-                f"use --backend go.")
-        # string builtins: covered by go/node/pyro, not C
-        if callee in ('upper', 'lower', 'trim', 'contains', 'find',
-                      'replace', 'substr', 'split', 'join', 'remove'):
+                'schema_of', 'llm', 'tools', 'tool_get', 'tools_json', 'agent',
+                'clamp', 'sign', 'gcd', 'hypot', 'starts_with', 'ends_with', 'repeat',
+                'pad_start', 'pad_end'):
             raise CodeGenError(
                 f"'{callee}()' is not supported in the C backend; "
+                f"use --backend go, node or pyro.")
+        # `remove(map, key)` needs MAPS, which the C backend does not have at
+        # all (c_type rejects map<...>), so it stays unsupported here.
+        if callee == 'remove':
+            raise CodeGenError(
+                f"'{callee}()' needs maps, which the C backend does not support; "
                 f"use --backend go, node or pyro.")
 
         # ── built-ins ──
@@ -711,6 +750,88 @@ class CodeGenC:
             t = self.te.infer(args[0])
             suf = 'i' if t == 'int' else 'f'
             return f"cryo_{callee}_{suf}({self._expr(args[0])}, {self._expr(args[1])})"
+        # ── Phase 10.4 stdlib math (ISSUES/09) ──
+        if callee == 'clamp' and len(args) == 3:
+            # keeps the argument's type: int only when ALL three are int, so the
+            # result matches what the Pyro VM computes for the same call
+            ts = [self.te.infer(a) for a in args]
+            suf = 'i' if all(t == 'int' for t in ts) else 'f'
+            a = ', '.join(self._expr(x) for x in args)
+            return f"cryo_clamp_{suf}({a})"
+        if callee == 'sign' and len(args) == 1:
+            suf = 'i' if self.te.infer(args[0]) == 'int' else 'f'
+            return f"cryo_sign_{suf}({self._expr(args[0])})"
+        if callee == 'gcd' and len(args) == 2:
+            return f"cryo_gcd({self._expr(args[0])}, {self._expr(args[1])})"
+        if callee == 'hypot' and len(args) == 2:
+            return f"cryo_hypot({self._expr(args[0])}, {self._expr(args[1])})"
+        # ── Phase 10.4 strings (ISSUES/09) ──
+        if callee == 'upper' and len(args) == 1:
+            return f"cryo_str_upper({self._expr(args[0])})"
+        if callee == 'lower' and len(args) == 1:
+            return f"cryo_str_lower({self._expr(args[0])})"
+        if callee == 'trim' and len(args) == 1:
+            return f"cryo_str_trim({self._expr(args[0])})"
+        if callee == 'contains' and len(args) == 2:
+            return f"cryo_str_contains({self._expr(args[0])}, {self._expr(args[1])})"
+        if callee == 'find' and len(args) == 2:
+            return f"cryo_str_find({self._expr(args[0])}, {self._expr(args[1])})"
+        if callee == 'starts_with' and len(args) == 2:
+            return f"cryo_str_starts_with({self._expr(args[0])}, {self._expr(args[1])})"
+        if callee == 'ends_with' and len(args) == 2:
+            return f"cryo_str_ends_with({self._expr(args[0])}, {self._expr(args[1])})"
+        if callee == 'repeat' and len(args) == 2:
+            return f"cryo_str_repeat({self._expr(args[0])}, {self._expr(args[1])})"
+        if callee in ('pad_start', 'pad_end') and len(args) == 3:
+            fn = 'cryo_str_pad_start' if callee == 'pad_start' else 'cryo_str_pad_end'
+            return (f"{fn}({self._expr(args[0])}, {self._expr(args[1])}, "
+                    f"{self._expr(args[2])})")
+        # ── Phase 10.2 collection ops (ISSUES/09) ──
+        # CryoArray is untyped, so equality/ordering/sum need the ELEMENT type.
+        if callee in ('sort', 'reverse', 'slice', 'index_of', 'concat', 'count', 'sum'):
+            def _elem_suffix(arr_node):
+                et = elem_type(self.te.infer(arr_node))
+                if et == 'string': return 's'
+                if et == 'number': return 'f'
+                if et == 'int':    return 'i'
+                raise CodeGenError(
+                    f"'{callee}()' needs a typed array in the C backend "
+                    f"(element type is '{et}'); use --backend go, node or pyro.")
+            if callee == 'reverse' and len(args) == 1:
+                return f"cryo_array_reverse({self._expr(args[0])})"
+            if callee == 'concat' and len(args) == 2:
+                return f"cryo_array_concat({self._expr(args[0])}, {self._expr(args[1])})"
+            if callee == 'slice' and len(args) == 3:
+                # slice() is polymorphic over array|string (10.9); C is not, so
+                # dispatch on the inferred operand type. Both helpers already
+                # clamp out-of-range bounds the same way the VM does.
+                fn = ('cryo_str_slice' if self.te.infer(args[0]) == 'string'
+                      else 'cryo_array_slice')
+                return (f"{fn}({self._expr(args[0])}, "
+                        f"{self._expr(args[1])}, {self._expr(args[2])})")
+            if callee == 'sort' and len(args) == 1:
+                return f"cryo_sort_{_elem_suffix(args[0])}({self._expr(args[0])})"
+            if callee == 'sum' and len(args) == 1:
+                suf = _elem_suffix(args[0])
+                if suf == 's':
+                    raise CodeGenError("'sum()' needs a numeric array")
+                return f"cryo_sum_{suf}({self._expr(args[0])})"
+            if callee in ('count', 'index_of') and len(args) == 2:
+                fn = 'cryo_count' if callee == 'count' else 'cryo_index_of'
+                return (f"{fn}_{_elem_suffix(args[0])}({self._expr(args[0])}, "
+                        f"{self._expr(args[1])})")
+        if callee == 'replace' and len(args) == 3:
+            a = ', '.join(self._expr(x) for x in args)
+            return f"cryo_str_replace({a})"
+        if callee == 'split' and len(args) == 2:
+            return f"cryo_str_split({self._expr(args[0])}, {self._expr(args[1])})"
+        if callee == 'join' and len(args) == 2:
+            return f"cryo_str_join({self._expr(args[0])}, {self._expr(args[1])})"
+        if callee == 'substr' and len(args) == 3:
+            # Cryo substr(s, start, n) takes a LENGTH; cryo_str_slice takes an
+            # END offset — pass start+n, and the helper clamps.
+            s, st, n = (self._expr(a) for a in args)
+            return f"cryo_str_slice({s}, {st}, ({st}) + ({n}))"
         if callee == 'floor':
             return f"cryo_floor({self._expr(args[0])})"
         if callee == 'ceil':
@@ -788,4 +909,4 @@ class CodeGenC:
         if typ == 'int':    return f"cryo_i64_to_str({expr})"
         if typ == 'number': return f"cryo_f64_to_str({expr})"
         if typ == 'bool':   return f"cryo_bool_to_str({expr})"
-        return f"cryo_i64_to_str((int64_t)({expr}))"
+        raise CodeGenError(f"cannot convert type '{typ}' to string in C backend")

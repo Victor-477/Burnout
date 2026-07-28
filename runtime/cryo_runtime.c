@@ -3,6 +3,49 @@
    ============================================================ */
 #include "cryo_runtime.h"
 #include <ctype.h>
+#include <inttypes.h>   /* PRId64: the portable int64_t format specifier */
+
+/* ---------- Portability: POSIX functions are NOT ISO C ----------
+   The c backend compiles with -std=c11, which defines __STRICT_ANSI__ and makes
+   MinGW hide its POSIX/MSVCRT extensions. A hidden function is then implicitly
+   declared as returning `int`, which TRUNCATES a returned pointer on 64-bit
+   hosts — silent corruption, not a mere warning. `getline`/`ssize_t` are worse
+   still: genuinely absent in some MinGW configurations.
+
+   So: supply our own `strdup`, and read lines with a portable `fgets` loop
+   instead of `getline`. (The same class of bug, and the same remedy, is
+   documented in pyro/vm/pyro_runtime.c.) */
+static char* cryo_strdup(const char* s) {
+    if (!s) s = "";
+    size_t n = strlen(s) + 1;
+    char* p = (char*)malloc(n);
+    if (!p) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    memcpy(p, s, n);
+    return p;
+}
+#define strdup cryo_strdup
+
+/* Reads one line from `f` without the trailing newline, growing as needed.
+   Returns a malloc'd string (never NULL — "" at EOF), so callers can always
+   free() and never have to null-check. */
+static char* cryo_read_line(FILE* f) {
+    size_t cap = 128, len = 0;
+    char* buf = (char*)malloc(cap);
+    if (!buf) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    buf[0] = '\0';
+    for (;;) {
+        if (!fgets(buf + len, (int)(cap - len), f)) break;   /* EOF or error */
+        len += strlen(buf + len);
+        if (len > 0 && buf[len - 1] == '\n') { buf[--len] = '\0'; break; }
+        if (len + 1 < cap) break;                            /* short read: done */
+        cap *= 2;                                            /* line continues */
+        char* bigger = (char*)realloc(buf, cap);
+        if (!bigger) { free(buf); fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+        buf = bigger;
+    }
+    if (len > 0 && buf[len - 1] == '\r') buf[len - 1] = '\0';  /* CRLF input */
+    return buf;
+}
 
 /* Excecao global */
 CryoException _cryo_exc = {.active = false};
@@ -93,7 +136,8 @@ void cryo_array_push(CryoArray* a, uint64_t v) {
 
 uint64_t cryo_array_get(CryoArray* a, int64_t i) {
     if (i < 0 || i >= a->length) {
-        fprintf(stderr, "[Cryo] IndexError: indice %ld fora dos limites (length=%ld)\n", i, a->length);
+        fprintf(stderr, "[Cryo] IndexError: indice %" PRId64
+                        " fora dos limites (length=%" PRId64 ")\n", i, a->length);
         exit(1);
     }
     return a->data[i];
@@ -101,7 +145,7 @@ uint64_t cryo_array_get(CryoArray* a, int64_t i) {
 
 void cryo_array_set(CryoArray* a, int64_t i, uint64_t v) {
     if (i < 0 || i >= a->length) {
-        fprintf(stderr, "[Cryo] IndexError: indice %ld fora dos limites\n", i);
+        fprintf(stderr, "[Cryo] IndexError: indice %" PRId64 " fora dos limites\n", i);
         exit(1);
     }
     a->data[i] = v;
@@ -120,10 +164,107 @@ void cryo_array_free(CryoArray* a) {
     if (a) { free(a->data); free(a); }
 }
 
+/* ── Phase 10.2 collection ops (ISSUES/09) ───────────────────
+   CryoArray stores raw uint64_t, so the ELEMENT TYPE is a compile-time fact
+   only. Anything needing equality, ordering or arithmetic therefore comes in
+   per-type variants, exactly like cryo_push_i64/f64/str. Type-agnostic ops
+   (reverse, concat, slice) need just one.
+
+   All of these are NON-MUTATING: they return a fresh CryoArray and leave the
+   source untouched, matching sort/reverse/slice/concat on the Pyro VM. */
+
+static double _cryo_bits_to_f64(uint64_t u) { double d; memcpy(&d, &u, 8); return d; }
+
+CryoArray* cryo_array_reverse(CryoArray* a) {
+    CryoArray* out = cryo_array_new();
+    for (int64_t i = a->length - 1; i >= 0; i--) cryo_array_push(out, a->data[i]);
+    return out;
+}
+
+CryoArray* cryo_array_concat(CryoArray* a, CryoArray* b) {
+    CryoArray* out = cryo_array_new();
+    for (int64_t i = 0; i < a->length; i++) cryo_array_push(out, a->data[i]);
+    for (int64_t i = 0; i < b->length; i++) cryo_array_push(out, b->data[i]);
+    return out;
+}
+
+int64_t cryo_sum_i(CryoArray* a) {
+    int64_t s = 0;
+    for (int64_t i = 0; i < a->length; i++) s += (int64_t)a->data[i];
+    return s;
+}
+double cryo_sum_f(CryoArray* a) {
+    double s = 0;
+    for (int64_t i = 0; i < a->length; i++) s += _cryo_bits_to_f64(a->data[i]);
+    return s;
+}
+
+int64_t cryo_count_i(CryoArray* a, int64_t v) {
+    int64_t n = 0;
+    for (int64_t i = 0; i < a->length; i++) if ((int64_t)a->data[i] == v) n++;
+    return n;
+}
+int64_t cryo_count_f(CryoArray* a, double v) {
+    int64_t n = 0;
+    for (int64_t i = 0; i < a->length; i++) if (_cryo_bits_to_f64(a->data[i]) == v) n++;
+    return n;
+}
+int64_t cryo_count_s(CryoArray* a, const char* v) {
+    int64_t n = 0;
+    for (int64_t i = 0; i < a->length; i++) {
+        const char* e = (const char*)(uintptr_t)a->data[i];
+        if (e && v && strcmp(e, v) == 0) n++;
+    }
+    return n;
+}
+
+int64_t cryo_index_of_i(CryoArray* a, int64_t v) {
+    for (int64_t i = 0; i < a->length; i++) if ((int64_t)a->data[i] == v) return i;
+    return -1;
+}
+int64_t cryo_index_of_f(CryoArray* a, double v) {
+    for (int64_t i = 0; i < a->length; i++) if (_cryo_bits_to_f64(a->data[i]) == v) return i;
+    return -1;
+}
+int64_t cryo_index_of_s(CryoArray* a, const char* v) {
+    for (int64_t i = 0; i < a->length; i++) {
+        const char* e = (const char*)(uintptr_t)a->data[i];
+        if (e && v && strcmp(e, v) == 0) return i;
+    }
+    return -1;
+}
+
+/* Stable insertion sort, matching the Pyro VM's stable ordering for equal keys
+   (the Go VM uses SliceStable and the Pyro C runtime the same algorithm). */
+#define _CRYO_SORT_BODY(CMP_LT)                                   \
+    CryoArray* out = cryo_array_new();                            \
+    for (int64_t i = 0; i < a->length; i++)                       \
+        cryo_array_push(out, a->data[i]);                         \
+    for (int64_t i = 1; i < out->length; i++) {                   \
+        uint64_t key = out->data[i];                              \
+        int64_t j = i - 1;                                        \
+        while (j >= 0 && (CMP_LT)) { out->data[j+1] = out->data[j]; j--; } \
+        out->data[j+1] = key;                                     \
+    }                                                             \
+    return out;
+
+CryoArray* cryo_sort_i(CryoArray* a) {
+    _CRYO_SORT_BODY((int64_t)key < (int64_t)out->data[j])
+}
+CryoArray* cryo_sort_f(CryoArray* a) {
+    _CRYO_SORT_BODY(_cryo_bits_to_f64(key) < _cryo_bits_to_f64(out->data[j]))
+}
+CryoArray* cryo_sort_s(CryoArray* a) {
+    _CRYO_SORT_BODY(strcmp((const char*)(uintptr_t)key,
+                           (const char*)(uintptr_t)out->data[j]) < 0)
+}
+#undef _CRYO_SORT_BODY
+
 /* ---------- Strings ---------- */
 
 char* cryo_str_concat(const char* a, const char* b) {
-    if (!a) a = ""; if (!b) b = "";
+    if (!a) a = "";
+    if (!b) b = "";
     size_t len = strlen(a) + strlen(b) + 1;
     char* r = malloc(len);
     if (!r) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
@@ -133,7 +274,10 @@ char* cryo_str_concat(const char* a, const char* b) {
 
 char* cryo_i64_to_str(int64_t n) {
     char* buf = malloc(32);
-    snprintf(buf, 32, "%ld", n);
+    /* int64_t is `long long` on Windows, where `long` is 32-bit: %ld would
+       read the wrong width, and this MinGW's printf checker rejects %lld
+       outright. PRId64 expands to whatever the target C library wants. */
+    snprintf(buf, 32, "%" PRId64, n);
     return buf;
 }
 
@@ -182,10 +326,167 @@ char* cryo_str_lower(const char* s) {
     return out;
 }
 
+/* ── Phase 10.4 strings (ISSUES/09) ──────────────────────────
+   Semantics mirror the Pyro runtime (pyro/vm/pyro_runtime.c) so --backend c
+   agrees with the VM.
+
+   OWNERSHIP: every char*-returning helper here returns a freshly malloc'd
+   string that the CALLER DOES NOT FREE — the generated C never frees, matching
+   cryo_str_concat/upper/lower above. Short-lived programs trade the leak for a
+   much simpler code generator; do not "fix" one of these in isolation. */
+
+char* cryo_str_trim(const char* s) {
+    if (!s) return strdup("");
+    while (*s && isspace((unsigned char)*s)) s++;
+    size_t len = strlen(s);
+    while (len > 0 && isspace((unsigned char)s[len - 1])) len--;
+    char* out = malloc(len + 1);
+    if (!out) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    memcpy(out, s, len);
+    out[len] = '\0';
+    return out;
+}
+
+bool cryo_str_contains(const char* s, const char* sub) {
+    if (!s || !sub) return false;
+    return strstr(s, sub) != NULL;
+}
+
+int64_t cryo_str_find(const char* s, const char* sub) {
+    if (!s || !sub) return -1;
+    const char* at = strstr(s, sub);
+    return at ? (int64_t)(at - s) : -1;
+}
+
+bool cryo_str_starts_with(const char* s, const char* p) {
+    if (!s || !p) return false;
+    size_t pl = strlen(p);
+    return strlen(s) >= pl && strncmp(s, p, pl) == 0;
+}
+
+bool cryo_str_ends_with(const char* s, const char* p) {
+    if (!s || !p) return false;
+    size_t sl = strlen(s), pl = strlen(p);
+    return sl >= pl && strcmp(s + sl - pl, p) == 0;
+}
+
+char* cryo_str_repeat(const char* s, int64_t n) {
+    if (!s) s = "";
+    if (n < 0) n = 0;
+    size_t sl = strlen(s), total = sl * (size_t)n;
+    char* out = malloc(total + 1);
+    if (!out) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    for (int64_t i = 0; i < n; i++) memcpy(out + (size_t)i * sl, s, sl);
+    out[total] = '\0';
+    return out;
+}
+
+/* pad_start/pad_end: JS padStart/padEnd — the pad is repeated and TRUNCATED to
+   fill exactly (width - len) bytes. */
+static char* cryo_str_pad(const char* s, int64_t width, const char* pad, bool at_start) {
+    if (!s) s = "";
+    if (!pad) pad = "";
+    size_t sl = strlen(s), pl = strlen(pad);
+    if ((int64_t)sl >= width || pl == 0) return strdup(s);
+    size_t need = (size_t)width - sl;
+    char* out = malloc(need + sl + 1);
+    if (!out) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    if (at_start) {
+        for (size_t i = 0; i < need; i++) out[i] = pad[i % pl];
+        memcpy(out + need, s, sl);
+    } else {
+        memcpy(out, s, sl);
+        for (size_t i = 0; i < need; i++) out[sl + i] = pad[i % pl];
+    }
+    out[need + sl] = '\0';
+    return out;
+}
+char* cryo_str_pad_start(const char* s, int64_t w, const char* p) { return cryo_str_pad(s, w, p, true); }
+char* cryo_str_pad_end  (const char* s, int64_t w, const char* p) { return cryo_str_pad(s, w, p, false); }
+
+/* replace ALL occurrences. Sized exactly up front (count the matches) instead of
+   growing, so there is a single allocation and no realloc dance. An empty `old`
+   would match forever, so it returns the input unchanged — same as the VM. */
+char* cryo_str_replace(const char* s, const char* old, const char* rep) {
+    if (!s) s = "";
+    if (!old) old = "";
+    if (!rep) rep = "";
+    size_t ol = strlen(old);
+    if (ol == 0) return strdup(s);
+    size_t rl = strlen(rep), n = 0;
+    for (const char* p = s; (p = strstr(p, old)) != NULL; p += ol) n++;
+    if (n == 0) return strdup(s);
+    size_t out_len = strlen(s) + n * (rl > ol ? rl - ol : 0) - n * (ol > rl ? ol - rl : 0);
+    char* out = malloc(out_len + 1);
+    if (!out) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    char* w = out;
+    for (const char* p = s;;) {
+        const char* at = strstr(p, old);
+        if (!at) { size_t t = strlen(p); memcpy(w, p, t); w += t; break; }
+        size_t pre = (size_t)(at - p);
+        memcpy(w, p, pre); w += pre;
+        memcpy(w, rep, rl); w += rl;
+        p = at + ol;
+    }
+    *w = '\0';
+    return out;
+}
+
+/* split -> string[] (a CryoArray of char*). An empty separator splits into
+   single characters, matching split_str() in the Pyro runtime. */
+CryoArray* cryo_str_split(const char* s, const char* sep) {
+    if (!s) s = "";
+    if (!sep) sep = "";
+    CryoArray* arr = cryo_array_new();
+    size_t seplen = strlen(sep);
+    if (seplen == 0) {
+        for (const char* p = s; *p; p++) {
+            char* ch = malloc(2);
+            if (!ch) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+            ch[0] = *p; ch[1] = '\0';
+            cryo_push_str(arr, ch);
+        }
+        return arr;
+    }
+    const char* curr = s;
+    const char* next;
+    while ((next = strstr(curr, sep)) != NULL) {
+        size_t n = (size_t)(next - curr);
+        char* part = malloc(n + 1);
+        if (!part) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+        memcpy(part, curr, n); part[n] = '\0';
+        cryo_push_str(arr, part);
+        curr = next + seplen;
+    }
+    cryo_push_str(arr, strdup(curr));      /* trailing piece (may be "") */
+    return arr;
+}
+
+char* cryo_str_join(CryoArray* a, const char* sep) {
+    if (!sep) sep = "";
+    size_t seplen = strlen(sep), total = 0;
+    for (int64_t i = 0; i < a->length; i++) {
+        const char* e = (const char*)(uintptr_t)a->data[i];
+        total += e ? strlen(e) : 0;
+    }
+    if (a->length > 1) total += seplen * (size_t)(a->length - 1);
+    char* out = malloc(total + 1);
+    if (!out) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    char* w = out;
+    for (int64_t i = 0; i < a->length; i++) {
+        if (i > 0) { memcpy(w, sep, seplen); w += seplen; }
+        const char* e = (const char*)(uintptr_t)a->data[i];
+        size_t n = e ? strlen(e) : 0;
+        if (n) { memcpy(w, e, n); w += n; }
+    }
+    *w = '\0';
+    return out;
+}
+
 /* ---------- Print ---------- */
 
 void cryo_print_str(const char* s)  { puts(s ? s : "(null)"); }
-void cryo_print_i64(int64_t n)      { printf("%ld\n", n); }
+void cryo_print_i64(int64_t n)      { printf("%" PRId64 "\n", n); }
 void cryo_print_f64(double n)       { printf("%g\n", n); }
 void cryo_print_bool(bool b)        { puts(b ? "true" : "false"); }
 void cryo_print_newline(void)       { putchar('\n'); }
@@ -194,10 +495,7 @@ void cryo_print_newline(void)       { putchar('\n'); }
 
 char* cryo_input(const char* prompt) {
     if (prompt && *prompt) { printf("%s", prompt); fflush(stdout); }
-    char* buf = NULL; size_t cap = 0;
-    ssize_t len = getline(&buf, &cap, stdin);
-    if (len > 0 && buf[len-1] == '\n') buf[len-1] = '\0';
-    return buf;
+    return cryo_read_line(stdin);   /* never NULL; "" at EOF */
 }
 
 int64_t cryo_input_int(const char* prompt) {

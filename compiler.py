@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 # ==========================================================================
-# Cryo Compiler — Entry Point / CLI (v1.0.0)
+# Cryo Compiler — Entry Point / CLI (v1.1.0)
 # 
 # Usage:
 # python compiler.py app.cryo # C backend (default)
@@ -39,11 +39,15 @@ from foreign     import verify as verify_foreign, ForeignError   # CRYO
 from backends     import select_backend, missing_capabilities   # CRYO
 from modules      import resolve_modules, ModuleError           # CRYO
 from semantic     import check as semantic_check, SemanticError  # CRYO
+from generics     import monomorphize                             # CRYO
+from traits       import lower_traits                             # CRYO
 from codegen_c    import CodeGenC,    CodeGenError       # C backend
 from codegen_go   import CodeGenGo,   CodeGenGoError     # Go backend
 from codegen_asm  import CodeGenAsm,  CodeGenAsmError    # x86-64 backend
 from codegen_pyro import CodeGenPyro, CodeGenPyroError   # Pyro bytecode backend
 from codegen_node import CodeGenNode, CodeGenNodeError   # Node.js/JS backend
+from codegen_wasm import CodeGenWasm, CodeGenWasmError   # WebAssembly backend
+import frontend                                          # front-end pages (10.11/10.13)
 
 
 BANNER = r"""
@@ -52,7 +56,7 @@ BANNER = r"""
 | |   | '__| | | |/ _ \ | |   / _ \ '_ ` _ \| '_ \| | |/ _ \ '__|
 | |___| |  | |_| | (_) || |__|  __/ | | | | | |_) | | |  __/ |
  \____|_|   \__, |\___/  \_____\___|_| |_| |_| .__/|_|_|\___|_|
-            |___/                            |_|   v1.0.0
+            |___/                            |_|   v1.1.0
    .cryo  ->  native C  |  x86-64 assembly   (safe mode)
 """
 
@@ -64,17 +68,26 @@ def default_abi() -> str:
 
 def compile_source(source: str, backend: str, safe: bool,
                    abi: str = 'sysv', base_dir: str | None = None,
-                   optimize: bool = True, sandbox: bool = False):
-    """Returns str (go/c/asm) or bytes (pyro = bytecode)."""
+                   optimize: bool = True, sandbox: bool = False,
+                   emit: str = 'html'):
+    """Returns str (go/c/asm/frontend) or bytes (pyro/wasm = binary)."""
     ast = load_ast(source, base_dir)
+    ast = monomorphize(ast)
+    ast = lower_traits(ast)
     semantic_check(ast)   # variable/function/aridade/break — errors early, with line
     verify_foreign(ast)   # foreign blocks/libraries require `import >Lang<`
+    if backend == 'frontend':
+        # 10.11/10.13 — assembles html/javascript/CSS blocks into a page.
+        # Not a code generator: it emits a document, not a program.
+        return frontend.render(ast, emit)
     if backend == 'asm':
         return CodeGenAsm(safe=safe, abi=abi).generate(ast)
     if backend == 'go':
         return CodeGenGo(safe=safe, sandbox=sandbox).generate(ast)
     if backend == 'node':
         return CodeGenNode(safe=safe).generate(ast)
+    if backend == 'wasm':
+        return CodeGenWasm(safe=safe).generate(ast)   # bytes (.wasm)
     if backend == 'pyro':
         return CodeGenPyro(safe=safe, optimize=optimize,
                            sandbox=sandbox).generate(ast)   # bytes
@@ -122,7 +135,10 @@ def _run_pyro(pyro_path: str, compiler_dir: str, run: bool, verbose: bool):
         if need:
             if verbose:
                 print(f"→ Compiling Pyro VM: go build -o {pyrovm}  (in {vm_dir})")
-            r = subprocess.run(['go', 'build', '-o', pyrovm, '.'],
+            # Build the specific .go file, NOT the package ('.'): pyro/vm also
+            # holds the C VM (main.c, pyro_runtime.c) and `go build .` refuses
+            # with "C source files not allowed when not using cgo or SWIG".
+            r = subprocess.run(['go', 'build', '-o', pyrovm, 'main.go'],
                                cwd=vm_dir, capture_output=True, text=True)
             if r.returncode != 0:
                 print(f"[go] Error compiling Pyro VM:\n{r.stderr}", file=sys.stderr)
@@ -159,6 +175,7 @@ def compile_file(input_path: str,
                  sandbox: bool = False,
                  optimize: bool = True,
                  emit_only: bool = False,
+                 emit: str = 'html',
                  dis: bool = False,
                  run: bool = False) -> str:
 
@@ -232,7 +249,7 @@ def compile_file(input_path: str,
     # ── code generation ──
     try:
         code = compile_source(source, backend, safe, abi, base_dir=base_dir,
-                              optimize=optimize, sandbox=sandbox)
+                              optimize=optimize, sandbox=sandbox, emit=emit)
     except (CodeGenError, CodeGenGoError, CodeGenAsmError,
             CodeGenPyroError, CodeGenNodeError) as e:
         # safety net: if auto chose a backend that failed,
@@ -242,12 +259,13 @@ def compile_file(input_path: str,
                   f"recompiling with go", file=sys.stderr)
             backend = 'go'
             code = compile_source(source, backend, safe, abi, base_dir=base_dir,
-                                  optimize=optimize, sandbox=sandbox)
+                                  optimize=optimize, sandbox=sandbox, emit=emit)
         else:
             raise
 
     ext = {'asm': '.s', 'go': '.go', 'pyro': '.pyro',
-           'node': '.js', 'c': '.c'}.get(backend, '.c')
+           'node': '.js', 'c': '.c', 'wasm': '.wasm',
+           'frontend': '.html'}.get(backend, '.c')
     if output_path is None:
         # separates sources (.cryo) from generated artifacts: output goes to build/
         os.makedirs('build', exist_ok=True)
@@ -268,12 +286,38 @@ def compile_file(input_path: str,
     if verbose:
         alvo = {'asm': f'x86-64 asm/{abi}', 'go': 'native Go',
                 'pyro': 'Pyro bytecode', 'node': 'JavaScript (Node)',
-                'c': 'native C'}.get(backend, 'native C')
+                'wasm': 'WebAssembly', 'c': 'native C',
+                'frontend': f'front-end page ({emit})'}.get(backend, 'native C')
         tam = f"  ({len(code)} bytes)" if isinstance(code, (bytes, bytearray)) else ""
         print(f"✓ [{alvo} / {modo}] generated: {input_path} → {output_path}{tam}")
 
+    # ── 10.13 `--emit pyro`: the .html shell is only half the artifact ──
+    # It fetches a binary, so that binary has to exist next to it or the page
+    # is dead on arrival. The front-end declarations are stripped first: they
+    # describe the document, and handing them to a code generator fails.
+    if backend == 'frontend' and emit == 'pyro':
+        ast = frontend.strip_frontend(parse_ast(source))
+        if not ast.statements:
+            raise frontend.FrontendError(
+                "--emit pyro compiles this program's Cryo functions to a binary "
+                "for the browser, but the file has none — it is only a page. "
+                "Use --emit html for a page with no Cryo logic.")
+        bin_path = os.path.join(os.path.dirname(output_path) or '.', 'app.wasm')
+        try:
+            blob = CodeGenWasm(safe=safe).generate(ast)
+        except CodeGenWasmError as e:
+            raise frontend.FrontendError(
+                f"--emit pyro could not compile this program's logic to a "
+                f"browser binary: {e}\nThe wasm backend covers the numeric "
+                f"subset. Use --emit html and load your own script instead."
+            ) from e
+        with open(bin_path, 'wb') as f:
+            f.write(blob)
+        if verbose:
+            print(f"✓ [browser binary] generated: {bin_path}  ({len(blob)} bytes)")
+
     # ── emit-only: generates source and stops (the build script takes care of the toolchain) ──
-    if emit_only:
+    if emit_only or backend in ('wasm', 'frontend'):   # final artifacts (loaded by a host/browser)
         return output_path
 
     # ── pyro backend: disassembles and/or runs in the Pyro VM ──
@@ -338,14 +382,21 @@ def compile_file(input_path: str,
 def main() -> None:
     ap = argparse.ArgumentParser(
         prog='cryo',
-        description='Cryo compiler v1.0.0 — .cryo → Go (base), native C, x86-64 asm, Pyro bytecode/native',
+        description='Cryo compiler v1.1.0 — .cryo → Go (base), native C, x86-64 asm, Pyro bytecode/native, front-end pages',
     )
     ap.add_argument('input',           help='Input file (.cryo)')
     ap.add_argument('-o', '--output',  help='Output file (.go/.pyro/.s)')
-    ap.add_argument('--backend', choices=('auto', 'go', 'c', 'asm', 'pyro', 'node'),
+    ap.add_argument('--backend',
+                    choices=('auto', 'go', 'c', 'asm', 'pyro', 'node', 'wasm',
+                             'frontend'),
                     default='go',
-                    help='Backend: go (default), c, asm, pyro, node, or auto'
-                         '(choose the best according to the program)')
+                    help='Backend: go (default), c, asm, pyro, node, wasm, '
+                         'frontend (assemble html/javascript/CSS blocks into a '
+                         'page), or auto (choose the best for the program)')
+    ap.add_argument('--emit', choices=('html', 'pyro'), default='html',
+                    help="frontend backend only: 'html' writes one self-contained "
+                         "vanilla file; 'pyro' writes an .html shell plus the "
+                         "program's logic as a binary the browser loads")
     ap.add_argument('--abi', choices=('sysv', 'win64'), default=None,
                     help='asm backend ABI (default: win64 on Windows, else sysv)')
     ap.add_argument('--unsafe', action='store_true',
@@ -390,6 +441,7 @@ def main() -> None:
             sandbox     = args.sandbox,
             optimize    = not args.no_opt,
             emit_only   = args.emit_only,
+            emit        = args.emit,
             dis         = args.dis,
             run         = args.run,
         )
@@ -411,6 +463,8 @@ def main() -> None:
         print(f"\n[CodeGen Pyro Error] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenNodeError as e:
         print(f"\n[CodeGen Node Error] {e}", file=sys.stderr); sys.exit(1)
+    except CodeGenWasmError as e:
+        print(f"\n[CodeGen Wasm Error] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenError   as e:
         print(f"\n[CodeGen Error]   {e}", file=sys.stderr); sys.exit(1)
     except Exception      as e:

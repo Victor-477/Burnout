@@ -58,8 +58,8 @@ check("run --vm <cryo> output", norm(run(["run", cryo, "--vm"]).stdout) == EXPEC
 # pyro run (native if toolchain, else falls back to VM) — must produce correct output either way
 check("run <cryo> output", norm(run(["run", cryo]).stdout) == EXPECT)
 # pyro c  (emits C with a main)
-r = run(["c", cryo]); check("c <cryo> emits C main", "int main(void)" in r.stdout)
-r = run(["c", pyro]); check("c <pyro> emits C main", "int main(void)" in r.stdout)
+r = run(["c", cryo]); check("c <cryo> emits C main", "int main(int argc, char** argv)" in r.stdout)
+r = run(["c", pyro]); check("c <pyro> emits C main", "int main(int argc, char** argv)" in r.stdout)
 
 # pyro build
 out = os.path.join(TMP, "cli_demo_bin" + (".exe" if sys.platform == "win32" else ""))

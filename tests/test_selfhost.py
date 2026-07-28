@@ -426,5 +426,21 @@ check_selfhost('int s = 0; int i = 0; while (i < 10) { i = i + 1; if (i == 3) { 
                'print(u);',                                                          # 1+3+5 = 9
                "breakcont", lines_fn=_out_lines)
 
+# first-class function values (10.6 / ISSUES-01): the self-hosted compiler must
+# emit PUSHFN for a function used as a value and CALL_VALUE for a call through a
+# variable, and must parse the `fn(T)->R` TYPE in declarations, parameters and
+# return positions (at statement level `fn` otherwise reads as a declaration).
+check_selfhost('fn dbl(int x) -> int ={ return x * 2; } '
+               'fn inc(int x) -> int ={ return x + 1; } '
+               'fn apply(fn(int)->int f, int v) -> int ={ return f(v); } '
+               'fn twice(fn(int)->int f, int v) -> int ={ return f(f(v)); } '
+               'fn pick(bool b) -> fn(int)->int ={ if (b) { return dbl; } return inc; } '
+               'print(apply(dbl, 21)); print(apply(inc, 41)); '     # 42 / 42
+               'print(twice(dbl, 3)); '                              # 12
+               'fn(int)->int g = dbl; print(g(50)); '                # 100
+               'g = inc; print(g(50)); '                             # 51
+               'fn(int)->int c = pick(true); print(c(10));',         # 20
+               "funcvalues", lines_fn=_out_lines)
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

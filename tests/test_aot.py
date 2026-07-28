@@ -31,6 +31,8 @@ VMDIR = os.path.join(_root, "Pyro", "vm")
 RUNTIME = os.path.join(VMDIR, "pyro_runtime.c")
 VM_BIN = os.path.join(_root, "build", "pyrovm.exe" if sys.platform == "win32" else "pyrovm")
 TMP = tempfile.gettempdir()
+# pyro_runtime.c uses sockets for http_serve(), so Windows links winsock too.
+SYSLIBS = ["-lm"] + (["-lws2_32"] if sys.platform == "win32" else [])
 
 _passed = 0
 _failed = 0
@@ -51,15 +53,16 @@ def find_c_compiler():
     for cc in ("gcc", "clang", "cc"):
         if shutil.which(cc):
             def build(cfile, exe, _cc=cc):
-                return _run([_cc, "-O2", "-o", exe, cfile, RUNTIME, "-I", VMDIR, "-lm"])
+                return _run([_cc, "-O2", "-o", exe, cfile, RUNTIME, "-I", VMDIR] + SYSLIBS)
             return cc, build
     if shutil.which("zig"):
         def build(cfile, exe):
-            return _run(["zig", "cc", "-O2", "-o", exe, cfile, RUNTIME, "-I", VMDIR, "-lm"])
+            return _run(["zig", "cc", "-O2", "-o", exe, cfile, RUNTIME, "-I", VMDIR] + SYSLIBS)
         return "zig cc", build
     if shutil.which("cl"):   # only if already in a developer environment
         def build(cfile, exe):
-            return _run(["cl", "/O2", "/utf-8", "/I", VMDIR, "/Fe:" + exe, cfile, RUNTIME])
+            return _run(["cl", "/O2", "/utf-8", "/I", VMDIR, "/Fe:" + exe, cfile, RUNTIME,
+                         "ws2_32.lib"])
         return "cl", build
     return None, None
 
@@ -79,8 +82,46 @@ PROGRAMS = [
                 'fn f(int x) -> string ={ Res r = x > 0 ? Ok(x) : Err("neg"); '
                 '  match r { Ok(v) => { return "ok:" + to_string(v); } Err(e) => { return e; } } return "?"; } '
                 'print(f(7)); print(f(-1));'),
+    # float ops must use *variables*: the front-end constant-folds literal-only
+    # expressions, so `1.0 - 1.0` never reaches the runtime's float path.
     ("bitfloat",'print(240 & 15); print(1 << 8); print(255 >> 4); number x = 3.5; print(x * 2.0); '
-                'print(sqrt(16.0));'),
+                'print(sqrt(16.0)); number y = 2.5; number o = 1.0; '
+                'print(y - o); print(y + o); print(y / o); print(y % o); print(0.0 - y); '
+                'print(y > o); print(y - o >= 1.5); '
+                # exercises the exact loop the self-hosted codegen uses to pull
+                # the 52 mantissa bits out of a double
+                'number f = 1.0 - o; int mant = 0; int bit = 0; '
+                'while (bit < 8) { f = f * 2.0; mant = mant << 1; '
+                '  if (f >= 1.0) { mant = mant + 1; f = f - 1.0; } bit = bit + 1; } print(mant);'),
+    # OP_APPEND must pop BOTH operands: a push inside one branch of an if would
+    # otherwise leave the two paths at different stack depths.
+    ("stackdisc",'int[] a = []; int i = 0; '
+                 'while (i < 6) { if (i % 2 == 0) { a.push(i); } else { a.push(i * 10); } i = i + 1; } '
+                 'print(len(a)); print(a[0]); print(a[1]); print(a[5]); '
+                 'string[] s = []; s.push("k"); string first = s[0]; '
+                 'string junk = "xxxxxxxx" + to_string(len(s)); print(first); print(s[0]); '
+                 'int n = 0; for (int v in a) { n += v; } print(n);'),
+    # Phase 10.6: closures — captures are bundled by OP_CLOSURE and arrive as
+    # the callee's leading locals (AOT reorders the stack to match the VM)
+    ("closures",  'fn adder(int base) -> fn(int)->int ={ return (int x) => x + base; } '
+                  'fn(int)->int a10 = adder(10); fn(int)->int a100 = adder(100); '
+                  'print(a10(5)); print(a100(5)); print(adder(7)(3)); '
+                  'fn mk(int m, string t) -> fn(int)->string ={ '
+                  '  return (int v) => t + to_string(v * m); } '
+                  'fn(int)->string f = mk(3, "n="); print(f(4)); print(a10(0));'),
+    # Phase 10.6: function values lower to a function-pointer table in the AOT
+    ("funcvalues",'fn dbl(int x) -> int ={ return x * 2; } '
+                  'fn inc(int x) -> int ={ return x + 1; } '
+                  'fn apply(fn(int)->int f, int v) -> int ={ return f(v); } '
+                  'fn twice(fn(int)->int f, int v) -> int ={ return f(f(v)); } '
+                  'print(apply(dbl, 21)); print(twice(inc, 5)); '
+                  'print(twice((int x) => x * 3, 2)); '
+                  'fn(int)->int g = dbl; print(g(50));'),
+    ("trycatch", 'fn risky(int n) -> int ={ if (n < 0) { throw("neg"); } return n * 2; } '
+                 'int a = 0; try { a = risky(5); } catch (string e) { a = -1; } print(a); '
+                 'try { a = risky(-3); } catch (string e) { print("caught:" + e); a = -99; } print(a); '
+                 'try { throw("boom"); } catch (string e) { print(e); } finally { print("fin"); } '
+                 'try { assert(false, "nope"); } catch (string e) { print(e); }'),
 ]
 
 def compile_pyro(src, tag):
@@ -104,7 +145,7 @@ for tag, src in PROGRAMS:
     cfile = os.path.join(TMP, "aot_" + tag + ".c")
     gen = _run([sys.executable, AOT, pyro, "-o", cfile])
     ok_gen = (gen.returncode == 0 and os.path.exists(cfile)
-              and "int main(void)" in open(cfile, encoding="utf-8").read())
+              and "int main(int argc, char** argv)" in open(cfile, encoding="utf-8").read())
     check(f"[{tag}] AOT generates C", ok_gen)
 
     if ok_gen and build is not None:
