@@ -136,6 +136,12 @@ NATIVES = {
     # An accept LOOP rather than a callback: the Cryo program owns the loop,
     # so no engine needs a re-entrant call back into the interpreter.
     'http_listen':  (52, 1), 'http_accept':  (53, 0), 'http_respond': (54, 3),
+    # ── filesystem & process, roadmap 11.7 ──
+    # All sandbox-gated except the pure queries. `delete_file` is NOT called
+    # `remove`: that name is already the map builtin (id 11).
+    'file_exists':  (55, 1), 'is_dir':       (56, 1), 'list_dir':  (57, 1),
+    'make_dir':     (58, 1), 'delete_file':  (59, 1), 'file_size': (60, 1),
+    'write_file':   (61, 2), 'env':          (62, 1), 'exec':      (63, 1),
 }
 
 def _isize(op: int) -> int:
