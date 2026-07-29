@@ -115,6 +115,12 @@ def _emit_op(op, operand, off, size, consts, funcs, nloc):
     if op == bc.OP_STORE:
         s = struct.unpack('<H', operand)[0]
         return f"{{ release_value(g_locals[base+{s}]); g_locals[base+{s}] = g_stack[--g_sp]; }}"
+    if op == bc.OP_GETGLOBAL:
+        s = struct.unpack('<H', operand)[0]
+        return f"{{ retain_value(g_globals[{s}]); g_stack[g_sp++] = g_globals[{s}]; }}"
+    if op == bc.OP_SETGLOBAL:
+        s = struct.unpack('<H', operand)[0]
+        return f"{{ release_value(g_globals[{s}]); g_globals[{s}] = g_stack[--g_sp]; }}"
     if op in (bc.OP_ADD, bc.OP_SUB, bc.OP_MUL, bc.OP_DIV, bc.OP_MOD,
               bc.OP_BAND, bc.OP_BOR, bc.OP_BXOR, bc.OP_SHL, bc.OP_SHR,
               bc.OP_EQ, bc.OP_NE, bc.OP_LT, bc.OP_GT, bc.OP_LE, bc.OP_GE):
@@ -255,6 +261,10 @@ def compile_to_c(data: bytes) -> str:
     # global machine state (single value stack, single locals stack, frame stack)
     out.append("static Value g_stack[65536]; static int g_sp = 0;")
     out.append("static Value g_locals[65536]; static int g_locsp = 0;")
+    # Roadmap 11.1 — module state. Fixed-size here rather than grown, because
+    # the AOT knows the whole program at build time and the compiler numbers
+    # globals from 0; the VMs grow on demand for the same reason they cannot.
+    out.append("static Value g_globals[65536];")
     out.append("static int g_fbase[8192]; static int g_fnn[8192]; static int g_fp = 0;")
     out.append("typedef struct { jmp_buf env; int saved_sp; int saved_fp; int saved_locsp; int slot; } AotHandler;")
     out.append("static AotHandler g_handlers[1024]; static int g_hp = 0;")

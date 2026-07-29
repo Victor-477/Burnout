@@ -79,6 +79,8 @@ OP_NATIVE = 0x70  # u8 id, u8 argc -> calls VM native builtin (NATIVES table)
 OP_TRYPUSH = 0x71 # i16 rel (catch), u16 slot (catch var; 0xFFFF = none)
 OP_TRYPOP  = 0x72 # removes the exception handler from top (try completed)
 OP_THROW   = 0x73 # pop value -> unwinds to the nearest handler
+OP_GETGLOBAL = 0x76
+OP_SETGLOBAL = 0x77
 OP_COALESCE = 0x74 # pop b, a -> a if a != null, else b  (operator ??)
 OP_UNWRAP  = 0x75 # pop a -> a if a != null, else aborts  (unwrap x!)
 
@@ -90,6 +92,7 @@ _OPERAND = {
     OP_CALL: 3, OP_NEWARR: 2, OP_NEWMAP: 2,
     OP_NATIVE: 2, OP_TRYPUSH: 6,   # i32 rel + u16 slot
     OP_PUSHFN: 2, OP_CALL_VALUE: 1, OP_CLOSURE: 3,
+    OP_GETGLOBAL: 2, OP_SETGLOBAL: 2,   # u16 global index (11.1)
 }
 
 _NO_SLOT = 0xFFFF   # TRYPUSH without catch variable
@@ -195,6 +198,11 @@ class CodeGenPyro:
         self._enum_maps: Dict[str, str] = {}
         self._member_to_enum: Dict[str, str] = {}
         self._global_consts: Dict[str, Literal] = {}  # global const -> inlined literal
+        # Roadmap 11.1 — module state. A top-level `var` gets a slot in the
+        # VM's globals array rather than becoming a local of `main`, which is
+        # what makes it visible inside functions. Locals shadow it.
+        self._globals: Dict[str, int] = {}      # name -> global index
+        self._toplevel_vars: Set[int] = set()   # id() of the top-level VarDecl nodes
         self._ntmp = 0
         self._cur_line = 0            # last marked line (avoids repeated markers)
 
@@ -226,6 +234,22 @@ class CodeGenPyro:
         if name not in f.locals:
             f.locals[name] = len(f.locals)
         return f.locals[name]
+
+    def _store_name(self, name: str):
+        """Emit the store for `name` — module slot or local, whichever applies.
+
+        Every write path goes through here. Declaration, assignment, compound
+        assignment and increment each used to call _get_slot directly, and the
+        two that were missed threw "variable not declared" for module state.
+        """
+        if self._is_global(name):
+            self._emit(OP_SETGLOBAL, self._globals[name])
+        else:
+            self._emit(OP_STORE, self._get_slot(name))
+
+    def _is_global(self, name: str) -> bool:
+        """A module variable is in play only when nothing local shadows it."""
+        return name in self._globals and name not in self._cur.locals
 
     def _get_slot(self, name: str) -> int:
         if name not in self._cur.locals:
@@ -278,6 +302,15 @@ class CodeGenPyro:
                     f"(bytecode: scalars, arrays, maps, structs, enums, functions and flow).")
             else:
                 top.append(n)
+
+        # 11.1 — every top-level `var` becomes module state. Registered before
+        # any body is compiled, so a function defined ABOVE the declaration can
+        # still refer to it (declaration order constrains initialisation, not
+        # visibility — same rule the rest of the top level already follows).
+        for st in top:
+            if isinstance(st, VarDecl) and st.name not in self._globals:
+                self._globals[st.name] = len(self._globals)
+                self._toplevel_vars.add(id(st))
 
         names = [f.name for f in user_fns] + ['main']
         for i, nm in enumerate(names):
@@ -346,7 +379,8 @@ class CodeGenPyro:
         self._walk_names(lam.body, used, declared)
         free = used - bound - declared
         # names resolvable without a closure: globals, enum members, functions, builtins
-        free -= set(self._global_consts) | set(self._enum_consts) | set(self._enum_maps)
+        free -= (set(self._global_consts) | set(self._enum_consts)
+                 | set(self._enum_maps) | set(self._globals))   # 11.1
         free -= set(self._fnindex) | set(NATIVES)
         free -= {'print', 'len', 'has', 'keys', 'assert', 'throw'}
         # only enclosing LOCALS can be captured; anything else is an unknown name
@@ -466,21 +500,24 @@ class CodeGenPyro:
         self._emit(OP_INDEX)                      # top = tmp["val0"]
 
     def _var(self, n: VarDecl):
-        slot = self._slot(n.name)
+        # 11.1 — a top-level declaration initialises module state; the same
+        # syntax inside a function declares an ordinary local, which shadows.
+        is_module = id(n) in self._toplevel_vars
+        slot = self._globals[n.name] if is_module else self._slot(n.name)
         if isinstance(n.value, TryExpr):
             self._try_prop(n.value)
         elif n.value is not None:
             self._expr(n.value)
         else:
             self._emit(OP_NULL)
-        self._emit(OP_STORE, slot)
+        self._emit(OP_SETGLOBAL if is_module else OP_STORE, slot)
 
     def _assign(self, n: Assignment):
         if isinstance(n.value, TryExpr):
             self._try_prop(n.value)
         else:
             self._expr(n.value)
-        self._emit(OP_STORE, self._get_slot(n.name))
+        self._store_name(n.name)
 
     def _index_assign(self, n: IndexAssignment):
         # cont[key] = val
@@ -522,12 +559,12 @@ class CodeGenPyro:
     def _compound(self, n: CompoundAssignment):
         base = n.op[:-1]                       # '+=' -> '+'
         self._expr(BinaryExpr(base, Identifier(n.name), n.value))
-        self._emit(OP_STORE, self._get_slot(n.name))
+        self._store_name(n.name)
 
     def _incr(self, n: Increment):
         op = '+' if n.op == '++' else '-'
         self._expr(BinaryExpr(op, Identifier(n.name), Literal('int', 1)))
-        self._emit(OP_STORE, self._get_slot(n.name))
+        self._store_name(n.name)
 
     def _return(self, n: Return):
         if isinstance(n.value, TryExpr):
@@ -734,6 +771,8 @@ class CodeGenPyro:
             if n.name in self._global_consts and n.name not in self._cur.locals:
                 self._literal(self._global_consts[n.name])
                 return
+            if self._is_global(n.name):
+                self._emit(OP_GETGLOBAL, self._globals[n.name]); return
             self._emit(OP_LOAD, self._get_slot(n.name)); return
         if isinstance(n, UnaryExpr):
             self._expr(n.operand)
@@ -860,6 +899,15 @@ class CodeGenPyro:
         # then CALL_VALUE (a local shadows a top-level function of the same name)
         if n.callee in self._cur.locals:
             self._emit(OP_LOAD, self._get_slot(n.callee))
+            for a in n.args:
+                self._expr(a)
+            self._emit(OP_CALL_VALUE, len(n.args))
+            return
+        # 11.1 — the same, for a function value held in MODULE state. Only when
+        # the name is not also a declared function, which keeps a plain
+        # `fn foo()` call resolving to a direct CALL.
+        if self._is_global(n.callee) and n.callee not in self._fnindex:
+            self._emit(OP_GETGLOBAL, self._globals[n.callee])
             for a in n.args:
                 self._expr(a)
             self._emit(OP_CALL_VALUE, len(n.args))
@@ -1077,7 +1125,8 @@ class CodeGenPyro:
         code = bytearray()
         for (op, arg, off) in flat:
             code.append(op)
-            if op in (OP_CONST, OP_LOAD, OP_STORE, OP_NEWARR, OP_NEWMAP):
+            if op in (OP_CONST, OP_LOAD, OP_STORE, OP_NEWARR, OP_NEWMAP,
+                      OP_GETGLOBAL, OP_SETGLOBAL):
                 code += struct.pack('<H', arg)
             elif op in (OP_JMP, OP_JMPF, OP_JMPT):
                 rel = label_off[arg.id] - (off + 5)   # 1 opcode + 4 (i32)

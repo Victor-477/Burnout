@@ -236,7 +236,13 @@ check("go package main",  "package main" in g)
 check("go import fmt",    '"fmt"' in g)
 check("go func main",     "func main() {" in g)
 check("go print->Println", "fmt.Println(x)" in g)
-check("go suppresses unused", "_ = x" in g)
+# 11.1 — a top-level `var` is MODULE STATE at Go package scope, where an
+# unused variable is not an error and `_ = x` is an illegal statement. The
+# guard belongs to locals, so that is where it is asserted.
+check("go module var at package scope", "var x int64 = " in g)
+check("go no unused-guard at package scope", "_ = x" not in g)
+_loc = gen_go('fn f() ={ int y = 1; } f();')
+check("go suppresses unused (local)", "_ = y" in _loc)
 
 print("[go] types and declaracoes")
 g = gen_go("""

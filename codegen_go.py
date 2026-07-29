@@ -291,6 +291,14 @@ class CodeGenGo:
 
     def generate(self, program: Program) -> str:
         self._pre_scan(program.statements)
+        # Roadmap 11.1 — a top-level `var` is module state, not a local of
+        # main. Types are registered before ANY body is generated, so a
+        # function defined above the declaration still infers it.
+        self._module_vars = {n.name for n in program.statements
+                             if isinstance(n, VarDecl)}
+        for n in program.statements:
+            if isinstance(n, VarDecl):
+                self.te.set(n.name, n.var_type)
         self._imported_langs = collect_imports(program)
         for node in program.statements:
             if isinstance(node, EnumDecl):
@@ -305,6 +313,9 @@ class CodeGenGo:
             elif isinstance(node, ConstDecl):
                 self._cur, self._indent = self._global_defs, 0
                 self._const(node)
+            elif isinstance(node, VarDecl):
+                self._cur, self._indent = self._global_defs, 0
+                self._var(node, module=True)
             elif isinstance(node, SkillDecl):
                 self._skills.append(node)   # registered; emitted in _assemble
             elif isinstance(node, Library):
@@ -971,24 +982,35 @@ class CodeGenGo:
         self._emit(f"if _, __ok := interface{{}}({tmp}).({ok}); !__ok {{ return {tmp} }}")
         return f"{tmp}.({ok}).Val0"
 
-    def _var(self, n: VarDecl):
-        if isinstance(n.value, TryExpr):
-            self.te.set(n.name, n.var_type)
-            okv = self._go_try(n.value.operand)
-            self._emit(f"var {gid(n.name)} {go_type(n.var_type)} = {okv}")
-            self._emit(f"_ = {gid(n.name)}")
-            return
+    def _var(self, n: VarDecl, module: bool = False):
+        """A variable declaration. `module` emits it at Go PACKAGE scope.
+
+        Roadmap 11.1 — module state is the same declaration in a different
+        place, so it shares this method rather than getting its own copy. Only
+        two things differ at package scope, and both are hard Go rules:
+        `name := value` is a statement and illegal there, and the `_ = name`
+        unused-guard is a statement too (package-level vars may go unused).
+        """
         self.te.set(n.name, n.var_type)
         gt = go_type(n.var_type)
         vt = n.var_type
         name = gid(n.name)
+
+        if isinstance(n.value, TryExpr):
+            okv = self._go_try(n.value.operand)
+            self._emit(f"var {name} {gt} = {okv}")
+            if not module:
+                self._emit(f"_ = {name}")
+            return
+
         if isinstance(n.value, ArrayLiteral):
-            self._emit(f"{name} := {self._array_literal(n.value, vt)}")
+            lit = self._array_literal(n.value, vt)
+            self._emit(f"var {name} {gt} = {lit}" if module else f"{name} := {lit}")
         elif isinstance(n.value, MapLiteral):
             self._emit(f"var {name} {gt} = {self._map_literal(n.value, vt)}")
         elif is_map(vt) and n.value is None:
             # map without value: initializes empty and writable
-            self._emit(f"{name} := {gt}{{}}")
+            self._emit(f"var {name} {gt} = {gt}{{}}" if module else f"{name} := {gt}{{}}")
         elif is_optional(vt) and n.value is not None:
             self._emit(f"var {name} {gt} = {self._to_optional(n.value, vt)}")
         elif is_future(vt) and isinstance(n.value, SpawnExpr):
@@ -999,7 +1021,8 @@ class CodeGenGo:
             self._emit(f"var {name} {gt} = {val}")
         else:
             self._emit(f"var {name} {gt}")
-        self._emit(f"_ = {name}")   # Go: unused locals are an error
+        if not module:
+            self._emit(f"_ = {name}")   # Go: unused locals are an error
 
     def _to_optional(self, value: Node, opt_type: str) -> str:
         """Coerces 'value' to optional T?: null->nil; if it's already optional,

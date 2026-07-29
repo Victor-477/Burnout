@@ -134,6 +134,10 @@ def disassemble(data: bytes) -> str:
             text += f" {idx}    ; {_const_str(consts, idx)}"
         elif op in (bc.OP_LOAD, bc.OP_STORE):
             text += f" {struct.unpack('<H', operand)[0]}"
+        elif op in (bc.OP_GETGLOBAL, bc.OP_SETGLOBAL):
+            # 11.1 — module slot, not a frame local; annotate so the two
+            # are not confused when reading a listing.
+            text += f" {struct.unpack('<H', operand)[0]}   ; module slot"
         elif op in (bc.OP_NEWARR, bc.OP_NEWMAP):
             text += f" {struct.unpack('<H', operand)[0]}"
         elif op in (bc.OP_JMP, bc.OP_JMPF, bc.OP_JMPT):

@@ -111,6 +111,26 @@ PROGRAMS = [
      ["5", "0", "4", "4", "10", "3", "4", "0", "0", "6"],
      ("pyro", "go", "node")),
 
+    # Roadmap 11.1 — module state. Before this, a function referring to a
+    # top-level variable failed with "undeclared variable", because top-level
+    # statements were lowered into main. The last three cases are the ones that
+    # actually broke during implementation: `+=` and `++` had their own write
+    # path that bypassed the module-state check, and a local of the same name
+    # must still shadow rather than clobber.
+    ("module_state",
+     'int[] items = [1, 2]; int hits = 0; string tag = "m"; '
+     'fn add(int v) ={ items.push(v); } '
+     'fn count() -> int ={ return len(items); } '
+     'fn bump() ={ hits += 2; hits++; } '
+     'fn shadow() -> int ={ int hits = 100; hits++; return hits; } '
+     'fn later_fn() -> int ={ return later; } '
+     'fn report() -> string ={ return tag + to_string(hits); } '
+     'int later = 42; '
+     'add(3); print(count()); bump(); print(hits); '
+     'print(shadow()); print(hits); print(later_fn()); print(report());',
+     ["3", "3", "101", "3", "42", "m3"],
+     ("pyro", "go", "node")),
+
     ("slices_string",
      'string s = "hello world"; '
      'print(s[0..5]); print(s[0..=4]); print(s[6..]); print(s[..5]); '
