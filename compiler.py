@@ -226,11 +226,16 @@ def compile_file(input_path: str,
         print()
 
     # ── security audit ──
-    if audit or audit_only:
+    # --strict implies the audit: passing it alone used to run no audit at
+    # all, so the gate silently passed everything.
+    if audit or audit_only or strict:
         audit_ast_obj = load_ast(source, base_dir)
         findings = audit_ast(audit_ast_obj)
         print(format_audit(findings, input_path))
-        has_high = any(f.level == 'ALTO' for f in findings)
+        # 11.15 — this compared against 'ALTO'. Finding.level has been
+        # 'HIGH' since the levels were renamed to English, so the CI gate
+        # never fired: --strict reported findings and exited 0.
+        has_high = any(f.level == 'HIGH' for f in findings)
         if has_high:
             print("[Audit] HIGH level findings found.", file=sys.stderr)
         # backend suggestion: if the chosen backend does not cover some
