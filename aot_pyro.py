@@ -306,6 +306,8 @@ def compile_to_c(data: bytes) -> str:
     # sandbox policy mirrors the VM: baked-in flag from the .pyro, plus PYRO_SANDBOX=1.
     if p['flags'] & 0x04:
         out.append("    pyro_sandboxed = true;   // compiled from a sandboxed .pyro")
+    # 11.11 — the capability policy applies to a native binary too
+    out.append('    pyro_policy_init(getenv("PYRO_POLICY"));')
     out.append('    { const char* e = getenv("PYRO_SANDBOX"); '
                'if (e && strcmp(e, "1") == 0) pyro_sandboxed = true; }')
     # 11.9 — assets baked into the binary, so the executable really is one
