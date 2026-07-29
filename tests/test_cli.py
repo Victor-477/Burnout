@@ -171,6 +171,21 @@ PROGRAMS = [
      ["true", "true", "REPLACED", "false", "REPLACED", "false", "true"],
      ("pyro",)),
 
+    # ISSUES/19 — a module with INTERNALS. Every line here failed before the
+    # fix: a pub function calling a pub sibling ("unknown function"), a pub
+    # function reading its own module's private state, and a private helper —
+    # all because an aliased import mangled each declaration's name but kept
+    # only the pub ones and never rewrote the module's own references.
+    #
+    # The library is written inline as a second file by the harness, so the
+    # case also exercises the import path itself.
+    ("module_internals",
+     'import "modlib_counter.cryo" as c; '
+     'print(c::total()); c::bump(); print(c::total()); '
+     'print(c::twice()); print(c::report());',
+     ["0", "1", "3", "hits=3"],
+     ("pyro", "go", "node")),
+
     ("slices_string",
      'string s = "hello world"; '
      'print(s[0..5]); print(s[0..=4]); print(s[6..]); print(s[..5]); '
@@ -277,6 +292,19 @@ print(f"[cli] CLI path   go:{'y' if HAS_GO else 'n'} "
       f"node:{'y' if HAS_NODE else 'n'} cc:{'y' if HAS_CC else 'n'}")
 
 for tag, src, expected, backends in PROGRAMS:
+    # ISSUES/19 — this case imports a library, so write it beside the program.
+    if tag == "module_internals":
+        _lib_src = """int _count = 0;
+string _label = "hits";
+fn _format(int n) -> string ={ return _label + "=" + to_string(n); }
+pub fn bump() ={ _count = _count + 1; }
+pub fn total() -> int ={ return _count; }
+pub fn report() -> string ={ return _format(_count); }
+pub fn twice() -> int ={ bump(); bump(); return total(); }
+"""
+        with open(os.path.join(TMP, "modlib_counter.cryo"), "w",
+                  encoding="utf-8") as _lib:
+            _lib.write(_lib_src)
     cf = os.path.join(TMP, f"cli_{tag}.cryo")
     with open(cf, "w", encoding="utf-8") as fh:
         fh.write(src)
