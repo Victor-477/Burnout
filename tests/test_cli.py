@@ -131,6 +131,46 @@ PROGRAMS = [
      ["3", "3", "101", "3", "42", "m3"],
      ("pyro", "go", "node")),
 
+    # Roadmap 11.7 — filesystem natives. Writes under build/, which is already
+    # a generated directory, and removes the file it creates.
+    #
+    # The delete_file-on-a-directory case is here because it is a parity trap:
+    # Go's os.Remove drops an empty directory, MSVCRT's remove() refuses, and
+    # POSIX's removes it — one call meaning three things. It is now FILES ONLY
+    # everywhere, so this must print false.
+    ("filesystem",
+     'string d = "build/cli_fs_tmp"; '
+     'print(make_dir(d)); print(is_dir(d)); '
+     'print(write_file(d + "/x.txt", "abc")); '
+     'print(file_exists(d + "/x.txt")); print(file_size(d + "/x.txt")); '
+     'print(read_file(d + "/x.txt")); '
+     'print(len(list_dir(d))); '
+     'print(file_size(d + "/missing.txt")); '
+     'print(file_exists(d + "/missing.txt")); '
+     'print(delete_file(d)); '
+     'print(delete_file(d + "/x.txt")); print(file_exists(d + "/x.txt")); '
+     'print(len(env("CRYO_UNSET_VAR_XYZ")));',
+     ["true", "true", "true", "true", "3", "abc", "1", "-1", "false",
+      "false", "true", "false", "0"],
+     ("pyro", "go", "node", "c")),
+
+    # Roadmap 11.8 — durable writes. The point of write_file_atomic is the
+    # FAILURE path: a plain write truncates the target first, so a crash mid-
+    # write destroys the data. Here the second write targets a directory that
+    # does not exist; it must fail, leave the original contents intact, and
+    # leave no .tmp sibling behind.
+    ("atomic_write",
+     'string f = "build/cli_atomic.txt"; '
+     'print(write_file(f, "ORIGINAL")); '
+     'print(write_file_atomic(f, "REPLACED")); '
+     'print(read_file(f)); '
+     'print(write_file_atomic("build/no_such_dir_xyz/x.txt", "data")); '
+     'print(read_file(f)); '
+     'print(file_exists(f + ".tmp")); '
+     'print(delete_file(f));',
+     ["true", "true", "REPLACED", "false", "REPLACED", "false", "true"],
+     ("pyro",)),
+
     ("slices_string",
      'string s = "hello world"; '
      'print(s[0..5]); print(s[0..=4]); print(s[6..]); print(s[..5]); '
@@ -188,6 +228,29 @@ PROGRAMS = [
      'int big = 8000000000000; print(to_string(big)); print(to_string(to_string(big))); print(to_string(big) + "!");',
      ["8000000000000", "8000000000000", "8000000000000!"],
      ("pyro", "go", "node", "c")),
+
+    ("container_null_equality",
+     'map<string,string> m = {"a": "1"}; print(m == null); '
+     'map<string,string> e = {}; print(e == null); '
+     'int[] xs = [1]; print(xs == null); '
+     'print(null == null); '
+     'int? x = null; print(x == null); '
+     'int? y = 5; print(y == null); '
+     'int[] a1 = [1]; int[] a2 = [1]; print(a1 == a2); print(a1 == a1);',
+     ["false", "false", "false", "true", "true", "false", "false", "true"],
+     ("pyro", "go", "node")),
+
+    ("replace_empty_needle",
+     'print(replace("abc", "", "-")); print(replace("", "", "-"));',
+     ["-a-b-c-", "-"],
+     ("pyro", "go", "node", "c")),
+
+    ("struct_methods",
+     'struct Point { int x; int y; } '
+     'impl Point { fn sum() -> int ={ return this.x + this.y; } } '
+     'Point p = Point{ x: 10, y: 20 }; print(p.sum());',
+     ["30"],
+     ("pyro", "go", "node")),
 ]
 
 # backends that can RUN here (generation is always checked)
