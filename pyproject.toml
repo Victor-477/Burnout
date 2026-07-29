@@ -24,7 +24,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "burnout"
 version = "1.1.0"
-description = "Burnout — o compilador da linguagem Cryo (.cryo → Pyro bytecode, Go, C, x86-64)."
+description = "Burnout — o compilador da linguagem Cryo (.cryo → Pyro bytecode, Go, C, x86-64, Node, WebAssembly e páginas front-end)."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
