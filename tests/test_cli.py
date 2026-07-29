@@ -186,6 +186,20 @@ PROGRAMS = [
      ["0", "1", "3", "hits=3"],
      ("pyro", "go", "node")),
 
+    # 11.10 follow-up — url_decode/url_encode, added because the reference
+    # application had no way to read an escaped query value. Malformed escapes
+    # pass through unchanged rather than aborting: a server must not die on a
+    # bad request.
+    ("url_codec",
+     'print(url_decode("hello%20world")); print(url_decode("a+b")); '
+     'print(url_decode("100%25")); print(url_decode("bad%zz")); '
+     'print(url_encode("hello world")); print(url_encode("a&b=c")); '
+     'print(url_encode("safe-_.~")); '
+     'print(url_decode(url_encode("round trip & 100% ok")));',
+     ["hello world", "a b", "100%", "bad%zz",
+      "hello%20world", "a%26b%3Dc", "safe-_.~", "round trip & 100% ok"],
+     ("pyro",)),
+
     ("slices_string",
      'string s = "hello world"; '
      'print(s[0..5]); print(s[0..=4]); print(s[6..]); print(s[..5]); '

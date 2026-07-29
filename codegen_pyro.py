@@ -144,6 +144,7 @@ NATIVES = {
     'write_file':   (61, 2), 'env':          (62, 1), 'exec':      (63, 1),
     # ── persistence, roadmap 11.8 ──
     'write_file_atomic': (64, 2),
+    'url_decode':   (65, 1), 'url_encode':   (66, 1),
 }
 
 def _isize(op: int) -> int:

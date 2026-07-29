@@ -57,13 +57,20 @@ def free_port():
         return s.getsockname()[1]
 
 
-def call(base, path, method='GET', body=None, token=TOKEN):
-    """-> (status, parsed-or-text). Appends the token unless token=None."""
+def call(base, path, method='GET', body=None, token=TOKEN, headers=None):
+    """-> (status, parsed-or-text).
+
+    `token` goes in the query string (the browser-friendly path); pass
+    headers={'Authorization': 'Bearer ...'} to exercise the header path
+    instead, which is what a real client should use.
+    """
     if token is not None:
         path += ('&' if '?' in path else '?') + 'token=' + token
     req = urllib.request.Request(base + path,
                                  data=body.encode() if body is not None else None,
                                  method=method)
+    for hk, hv in (headers or {}).items():
+        req.add_header(hk, hv)
     try:
         with urllib.request.urlopen(req, timeout=10) as r:
             raw, status = r.read().decode(), r.getcode()
@@ -140,6 +147,22 @@ def test_api(app):
     st, body = call(b, '/api/tasks', token='wrong')
     check("rejects a wrong token", st == 401, (st, body))
 
+    # 11.10 follow-up — the application originally had to put the token in the
+    # query string, because http_accept exposed no request headers at all. A
+    # query string lands in server logs and browser history; a header does not.
+    st, body = call(b, '/api/tasks', token=None,
+                    headers={'Authorization': 'Bearer ' + TOKEN})
+    check("accepts an Authorization: Bearer header", st == 200, (st, body))
+    st, body = call(b, '/api/tasks', token=None,
+                    headers={'AUTHORIZATION': 'bearer ' + TOKEN})
+    check("header name and scheme are case-insensitive", st == 200, (st, body))
+    st, body = call(b, '/api/tasks', token=None,
+                    headers={'Authorization': 'Bearer wrong'})
+    check("rejects a wrong bearer token", st == 401, (st, body))
+    st, body = call(b, '/api/tasks', token=None,
+                    headers={'Authorization': 'Basic ' + TOKEN})
+    check("rejects a non-Bearer scheme", st == 401, (st, body))
+
     st, body = call(b, '/api/tasks')
     check("starts empty", st == 200 and body == [], (st, body))
 
@@ -169,13 +192,23 @@ def test_api(app):
     check("completing a missing id -> 404",
           st == 404 and body.get('error') == 'no task with that id', (st, body))
 
+    # 11.10 follow-up — query values are percent-decoded now, so an escaped
+    # id resolves to the same task. Before url_decode this arrived as the
+    # literal text "%32" and to_int gave the wrong task (or none).
+    st, body = call(b, '/api/tasks/complete?id=%32', 'POST')
+    check("a percent-encoded id is decoded (%32 -> 2)",
+          st == 200 and body.get('ok') is True, (st, body))
+    st, tasks = call(b, '/api/tasks')
+    check("the right task was completed via the escaped id",
+          next(t for t in tasks if t['id'] == 2)['done'] is True, tasks)
+
     st, tasks = call(b, '/api/tasks')
     check("the completed task is marked done",
           next(t for t in tasks if t['id'] == 1)['done'] is True, tasks)
 
     st, body = call(b, '/api/stats')
     check("stats count total/done/pending",
-          body == {'total': 2, 'done': 1, 'pending': 1}, body)
+          body == {'total': 2, 'done': 2, 'pending': 0}, body)
 
     st, body = call(b, '/nope')
     check("an unknown route -> 404", st == 404, (st, body))
@@ -196,8 +229,8 @@ def test_persistence(workdir, port):
         st, tasks = call(app.base, '/api/tasks')
         check("the tasks came back off disk",
               st == 200 and [t['id'] for t in tasks] == [1, 2], tasks)
-        check("the completed flag survived",
-              next(t for t in tasks if t['id'] == 1)['done'] is True, tasks)
+        check("the completed flags survived",
+              all(t['done'] is True for t in tasks), tasks)
         check("the trimmed title survived",
               next(t for t in tasks if t['id'] == 2)['title'] == 'ship 11.10', tasks)
 
@@ -213,7 +246,7 @@ def test_persistence(workdir, port):
 
         st, body = call(app.base, '/api/stats')
         check("stats recomputed after the delete",
-              body == {'total': 2, 'done': 0, 'pending': 2}, body)
+              body == {'total': 2, 'done': 1, 'pending': 1}, body)
     finally:
         app.stop()
 
