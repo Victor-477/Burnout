@@ -63,8 +63,87 @@ def run(engine, pyro, workdir, policy=None, sandbox=False):
     return (p.stdout + p.stderr).strip()
 
 
+def compile_src(src, out, workdir):
+    cf = out.replace('.pyro', '.cryo')
+    open(cf, 'w', encoding='utf-8').write(src)
+    return subprocess.run([sys.executable, CRYOC, cf, '--backend', 'pyro',
+                           '-o', out, '--no-banner'],
+                          capture_output=True, text=True, cwd=ROOT)
+
+
+def test_declared(work, engines):
+    """11.12 — permissions declared IN the program, checked twice."""
+    SRC_UNDECLARED = """permissions { read = "./data"; }
+print(write_file("data/y.txt", "z"));
+"""
+    SRC_NOBLOCK = """print(write_file("data/y.txt", "z"));
+"""
+    SRC_TYPO = """permissions { rread = "./data"; }
+print(1);
+"""
+    SRC_DECLARED = """permissions { read = "./data"; }
+print(read_file("data/ok.txt"));
+"""
+    SRC_OUTSIDE = """permissions { read = "./secret"; }
+print(read_file("secret/no.txt"));
+"""
+
+    # (a) compile time — the mistake is caught before the program ever runs
+    r = compile_src(SRC_UNDECLARED, os.path.join(work, 'undeclared.pyro'), work)
+    check("11.12: an undeclared capability fails to COMPILE",
+          r.returncode != 0 and "needs the 'write' permission" in (r.stdout + r.stderr),
+          (r.stdout + r.stderr)[-200:])
+
+    # opt-in: a program with no block is unaffected
+    r = compile_src(SRC_NOBLOCK, os.path.join(work, 'noblock.pyro'), work)
+    check("11.12: no permissions block -> unchanged", r.returncode == 0,
+          (r.stdout + r.stderr)[-200:])
+
+    # a typo is refused rather than silently granting less than intended
+    r = compile_src(SRC_TYPO, os.path.join(work, 'typo.pyro'), work)
+    check("11.12: an unknown permission name is a syntax error",
+          r.returncode != 0 and 'unknown permission' in (r.stdout + r.stderr),
+          (r.stdout + r.stderr)[-200:])
+
+    # (b) runtime — the declaration travels WITH the artifact
+    ok = os.path.join(work, 'declared.pyro')
+    r = compile_src(SRC_DECLARED, ok, work)
+    check("11.12: a declaring program compiles", r.returncode == 0,
+          (r.stdout + r.stderr)[-200:])
+    if r.returncode != 0:
+        return
+    blob = open(ok, 'rb').read()
+    check("11.12: the artifact records its permissions (flag bit4)",
+          blob[5] & 0x10 != 0, "flags=0x%02x" % blob[5])
+
+    outside = os.path.join(work, 'outside.pyro')
+    compile_src(SRC_OUTSIDE, outside, work)
+
+    for engine, name in engines:
+        # enforced with NO operator policy at all: the artifact is self-describing
+        o = run(engine, ok, work)
+        check(f"11.12 {name}: the declaration alone grants the read",
+              o == 'public', o)
+
+        # the operator may NARROW what the program asked for
+        o = run(engine, ok, work, policy='fs.read=./nowhere')
+        check(f"11.12 {name}: the operator can narrow the declaration",
+              'denied for' in o, o)
+
+        # ...but must never WIDEN it. This is the property that makes the
+        # declaration worth anything: fs.read=* from the operator must not
+        # unlock a path the program never declared.
+        o = run(engine, outside, work, policy='fs.read=./data')
+        check(f"11.12 {name}: a path granted only by the operator stays refused",
+              'denied for' in o, o)
+        o = run(engine, ok, work, policy='fs.read=*')
+        check(f"11.12 {name}: fs.read=* cannot exceed the declaration",
+              o == 'public', o)
+
+
+
 def main():
-    print("-- capability sandbox (11.11) --")
+    print("-- capability sandbox (11.11) and declared permissions (11.12) --")
     engines = [(e, n) for e, n in ((GOVM, 'Go VM'), (CVM, 'C VM')) if os.path.isfile(e)]
     if not engines:
         print("  SKIP  no VM built")
@@ -141,6 +220,8 @@ def main():
             o = out('read', policy='bogus=1')
             check(f"{name}: an unknown capability is an error",
                   'unknown capability' in o, o)
+
+        test_declared(work, engines)
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

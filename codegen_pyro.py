@@ -167,6 +167,12 @@ _FLAG_ENCODED = 0x01
 _FLAG_DEBUG   = 0x02
 _FLAG_SANDBOX = 0x04
 _FLAG_ASSETS  = 0x08   # 11.9: embedded asset section follows the debug one
+_FLAG_PERMS   = 0x10   # 11.12: declared permissions follow the assets
+
+# 11.12 — the source spelling (short, for the programmer) mapped to the
+# runtime capability name (explicit, for the operator reading a policy).
+_PERM_CAP = {'read': 'fs.read', 'write': 'fs.write',
+             'net': 'net', 'exec': 'exec', 'env': 'env'}
 
 
 class _Label:
@@ -222,6 +228,8 @@ class CodeGenPyro:
         # what makes it visible inside functions. Locals shadow it.
         self._globals: Dict[str, int] = {}      # name -> global index
         self._toplevel_vars: Set[int] = set()   # id() of the top-level VarDecl nodes
+        # 11.12 — declared permissions, serialised into the artifact
+        self._perms: Dict[str, list] = {}
         self._ntmp = 0
         self._cur_line = 0            # last marked line (avoids repeated markers)
 
@@ -313,6 +321,11 @@ class CodeGenPyro:
                 # global const with literal value: inlined in all uses
                 # (visible inside functions, without needing globals in the VM)
                 self._global_consts[n.name] = n.value
+            elif isinstance(n, PermissionsDecl):
+                # 11.12 — collected here, written as a section below. The
+                # compiler has already refused any undeclared capability.
+                for k, vals in n.grants.items():
+                    self._perms.setdefault(k, []).extend(vals)
             elif isinstance(n, (Import, Library)):
                 pass
             elif isinstance(n, (SkillDecl, ForeignBlock)):
@@ -1183,6 +1196,8 @@ class CodeGenPyro:
             flags |= _FLAG_SANDBOX
         if self.assets:
             flags |= _FLAG_ASSETS
+        if self._perms:
+            flags |= _FLAG_PERMS
 
         out = bytearray()
         out += _MAGIC
@@ -1236,6 +1251,15 @@ class CodeGenPyro:
                 data = self.assets[name]
                 out += struct.pack('<I', len(nb)); out += nb
                 out += struct.pack('<I', len(data)); out += data
+        # 11.12 — declared permissions, in the same syntax PYRO_POLICY uses so
+        # there is one format to learn and one parser to trust. Sorted, for a
+        # reproducible container.
+        if self._perms:
+            spec = ';'.join(
+                f"{_PERM_CAP[k]}={','.join(sorted(set(v)))}"
+                for k, v in sorted(self._perms.items()) if v)
+            pb = spec.encode('utf-8')
+            out += struct.pack('<I', len(pb)); out += pb
         return bytes(out)
 
     @staticmethod
