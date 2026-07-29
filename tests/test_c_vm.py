@@ -276,7 +276,8 @@ def test_parity():
                           'print(ends_with("hello world", "world")); '
                           'print(starts_with("abc", "xyz")); print(ends_with("abc", "")); '
                           'print(repeat("ab", 3)); print(repeat("x", 0)); '
-                          'print(repeat("-", 5));'),
+                          'print(repeat("-", 5)); '
+                          'print(replace("abc", "", "-")); print(replace("", "", "-"));'),
         # Phase 10.2 stateless collection ops — sort/reverse/slice/index_of
         # Phase 10.6 closures: OP_CLOSURE captures by value into leading locals
         ("closures", 'fn adder(int base) -> fn(int)->int ={ return (int x) => x + base; } '

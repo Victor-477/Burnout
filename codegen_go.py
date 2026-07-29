@@ -543,11 +543,27 @@ class CodeGenGo:
             H += ["func cryoUnwrap[T any](p *T) T {",
                   "\tif p == nil {", '\t\tpanic("[Cryo Security] NullPointer: unwrap of null optional")', "\t}",
                   "\treturn *p", "}", ""]
+        if 'sameptr' in self._helpers:
+            self._imports.add('reflect')
+            H += ["func cryoSamePtr(a, b any) bool {",
+                  "\tif a == nil && b == nil { return true }",
+                  "\tif a == nil || b == nil { return false }",
+                  "\treturn reflect.ValueOf(a).Pointer() == reflect.ValueOf(b).Pointer()",
+                  "}", ""]
         if 'keys' in self._helpers:
             H += ["func cryoKeys[K comparable, V any](m map[K]V) []K {",
                   "\tks := make([]K, 0, len(m))",
                   "\tfor k := range m {", "\t\tks = append(ks, k)", "\t}",
                   "\treturn ks", "}", ""]
+        if 'listdir' in self._helpers:
+            self._imports.update(('os', 'sort'))
+            H += ["func cryoListDir(path string) []string {",
+                  "\tents, err := os.ReadDir(path)",
+                  "\tif err != nil { return []string{} }",
+                  "\tnames := make([]string, 0, len(ents))",
+                  "\tfor _, e := range ents { names = append(names, e.Name()) }",
+                  "\tsort.Strings(names)",
+                  "\treturn names", "}", ""]
         if 'parseint' in self._helpers:
             self._imports.update(('strconv', 'strings'))
             H += ["func cryoParseInt(s string) int64 {",
@@ -1505,6 +1521,19 @@ class CodeGenGo:
         if op in ('&', '|', '^', '<<', '>>'):
             return f"({l} {op} {r})"
 
+        # container equality (slice / map identity)
+        is_cont = lambda t, n: (t.endswith('[]') or t.startswith('map<') or t in ('array', 'map') or
+                                isinstance(n, (ArrayLiteral, MapLiteral)))
+        if op in ('==', '!=') and (lt == 'null' or isinstance(node.left, Literal) and node.left.kind == 'null') and (rt == 'null' or isinstance(node.right, Literal) and node.right.kind == 'null'):
+            return 'true' if op == '==' else 'false'
+        if op in ('==', '!=') and (is_cont(lt, node.left) or is_cont(rt, node.right)):
+            if lt == 'null' or rt == 'null' or (isinstance(node.left, Literal) and node.left.kind == 'null') or (isinstance(node.right, Literal) and node.right.kind == 'null'):
+                return f"({l} {op} nil)"
+            self._helpers.add('sameptr')
+            if op == '==':
+                return f"cryoSamePtr({l}, {r})"
+            return f"(!cryoSamePtr({l}, {r}))"
+
         # int<->number coercion: Go does not mix int64 and float64. If one side is
         # 'number' and the other 'int', converts the integer to float64.
         if op in ('+', '-', '*', '/', '%', '<', '>', '<=', '>=', '==', '!=') \
@@ -1748,6 +1777,48 @@ class CodeGenGo:
         if c == 'pyro_open' and len(a) == 1:
             self._helpers.update(('open', 'sandbox'))
             return f"cryoOpen({self._expr(a[0])})"
+        # ── Filesystem & process natives (Roadmap 11.7) ──
+        if c == 'file_exists' and len(a) == 1:
+            self._imports.add('os')
+            return f"func() bool {{ _, err := os.Stat({self._expr(a[0])}); return err == nil }}()"
+        if c == 'is_dir' and len(a) == 1:
+            self._imports.add('os')
+            return f"func() bool {{ st, err := os.Stat({self._expr(a[0])}); return err == nil && st.IsDir() }}()"
+        if c == 'list_dir' and len(a) == 1:
+            self._helpers.add('listdir')
+            return f"cryoListDir({self._expr(a[0])})"
+        if c == 'make_dir' and len(a) == 1:
+            self._imports.add('os')
+            self._helpers.add('sandbox')
+            return f"func() bool {{ cryoSandboxGuard(\"make_dir\"); return os.MkdirAll({self._expr(a[0])}, 0755) == nil }}()"
+        if c == 'delete_file' and len(a) == 1:
+            self._imports.add('os')
+            self._helpers.add('sandbox')
+            return (f"func() bool {{ cryoSandboxGuard(\"delete_file\"); "
+                    f"st, err := os.Stat({self._expr(a[0])}); "
+                    f"if err == nil && st.IsDir() {{ return false }}; "
+                    f"return os.Remove({self._expr(a[0])}) == nil }}()")
+        if c == 'file_size' and len(a) == 1:
+            self._imports.add('os')
+            return f"func() int64 {{ st, err := os.Stat({self._expr(a[0])}); if err != nil {{ return -1 }}; return st.Size() }}()"
+        if c == 'write_file' and len(a) == 2:
+            self._imports.add('os')
+            self._helpers.add('sandbox')
+            return (f"func() bool {{ cryoSandboxGuard(\"write_file\"); "
+                    f"return os.WriteFile({self._expr(a[0])}, []byte({self._expr(a[1])}), 0644) == nil }}()")
+        if c == 'read_file' and len(a) == 1:
+            self._imports.add('os')
+            return f"func() string {{ b, err := os.ReadFile({self._expr(a[0])}); if err != nil {{ return \"\" }}; return string(b) }}()"
+        if c == 'env' and len(a) == 1:
+            self._imports.add('os')
+            self._helpers.add('sandbox')
+            return f"func() string {{ cryoSandboxGuard(\"env\"); return os.Getenv({self._expr(a[0])}) }}()"
+        if c == 'exec' and len(a) == 1:
+            self._helpers.update(('exec', 'sandbox'))
+            return f"cryoExec({self._expr(a[0])})"
+        if c == 'args' and len(a) == 0:
+            self._imports.add('os')
+            return "os.Args[1:]"
         # ── Phase 2: concurrency / HTTP ──
         if c == 'sleep' and len(a) == 1:
             self._imports.add('time')
