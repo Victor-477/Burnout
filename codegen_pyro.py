@@ -132,6 +132,10 @@ NATIVES = {
     # ── time and random natives (Phase 10.4) ──
     'now_ms':       (47, 0), 'monotonic_ms': (48, 0),
     'random':       (49, 0), 'random_int':   (50, 2), 'seed': (51, 1),
+    # ── HTTP server, roadmap 11.6 ──
+    # An accept LOOP rather than a callback: the Cryo program owns the loop,
+    # so no engine needs a re-entrant call back into the interpreter.
+    'http_listen':  (52, 1), 'http_accept':  (53, 0), 'http_respond': (54, 3),
 }
 
 def _isize(op: int) -> int:
