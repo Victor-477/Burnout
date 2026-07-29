@@ -79,8 +79,16 @@ def load(data: bytes) -> dict:
         for _ in range(ndbg):
             off = rd('<I'); line = rd('<I')
             dbg[off] = line
+    # 11.9 — embedded assets, last section, behind flag 0x08
+    assets = {}
+    if flags & 0x08:
+        n = rd('<I')
+        for _ in range(n):
+            nl = rd('<I'); name = data[pos:pos+nl].decode('utf-8'); pos += nl
+            dl = rd('<I'); assets[name] = data[pos:pos+dl]; pos += dl
     return {'version': version, 'flags': flags, 'consts': consts,
-            'funcs': funcs, 'entryfn': entryfn, 'code': code, 'dbg': dbg}
+            'funcs': funcs, 'entryfn': entryfn, 'code': code, 'dbg': dbg,
+            'assets': assets}
 
 
 def _const_str(consts, idx):

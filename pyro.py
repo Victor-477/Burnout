@@ -71,7 +71,7 @@ def find_vm():
     return None
 
 
-def to_pyro(inp, safe=True, sandbox=False):
+def to_pyro(inp, safe=True, sandbox=False, assets=None):
     """Return a path to a .pyro for `inp` (front-end compiles .cryo; passes .pyro through)."""
     if inp.endswith(".pyro"):
         return inp, None
@@ -79,7 +79,8 @@ def to_pyro(inp, safe=True, sandbox=False):
         src = f.read()
     data = compiler.compile_source(src, "pyro", safe=safe,
                                    base_dir=os.path.dirname(os.path.abspath(inp)),
-                                   sandbox=sandbox)
+                                   sandbox=sandbox,
+                                   assets=compiler.collect_assets(assets) if assets else None)
     if not isinstance(data, (bytes, bytearray)):
         _err("front-end did not produce bytecode")
     tmp = tempfile.NamedTemporaryFile(suffix=".pyro", delete=False)
@@ -92,12 +93,12 @@ def emit_c(pyro_path):
         return aot_pyro.compile_to_c(f.read())
 
 
-def build_native(inp, out, safe=True, sandbox=False, verbose=False):
+def build_native(inp, out, safe=True, sandbox=False, verbose=False, assets=None):
     cc_name, build = find_cc()
     if build is None:
         _err("no C toolchain found (need gcc/clang/cc/zig/cl) — "
              "use `pyro vm` or `pyro c` instead")
-    pyro_path, tmp = to_pyro(inp, safe, sandbox)
+    pyro_path, tmp = to_pyro(inp, safe, sandbox, assets)
     try:
         c_src = emit_c(pyro_path)
     finally:
@@ -122,7 +123,7 @@ def cmd_build(a):
     base = os.path.splitext(os.path.basename(a.input))[0]
     out = a.output or (base + EXE)
     build_native(a.input, os.path.abspath(out), safe=not a.unsafe,
-                 sandbox=a.sandbox, verbose=True)
+                 sandbox=a.sandbox, verbose=True, assets=getattr(a, 'assets', None))
     print(f"[pyro] built {out}")
 
 
@@ -184,6 +185,10 @@ def main():
 
     pb = sub.add_parser("build", help="compile to a native binary")
     common(pb); pb.add_argument("-o", "--output", help="output binary path")
+    # 11.9 — one executable with its assets inside it
+    pb.add_argument("--assets", metavar="DIR",
+                    help="embed every file under DIR into the binary; read them "
+                         "at runtime with asset(\"name\")")
     pb.set_defaults(fn=cmd_build)
 
     pr = sub.add_parser("run", help="compile and run (native, else VM)")

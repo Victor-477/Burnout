@@ -145,6 +145,8 @@ NATIVES = {
     # ── persistence, roadmap 11.8 ──
     'write_file_atomic': (64, 2),
     'url_decode':   (65, 1), 'url_encode':   (66, 1),
+    # ── embedded assets, roadmap 11.9 ──
+    'asset':        (67, 1), 'asset_names':  (68, 0),
 }
 
 def _isize(op: int) -> int:
@@ -164,6 +166,7 @@ _VERSION = 3         # v3: string constants use a u32 length (v2 was u16)
 _FLAG_ENCODED = 0x01
 _FLAG_DEBUG   = 0x02
 _FLAG_SANDBOX = 0x04
+_FLAG_ASSETS  = 0x08   # 11.9: embedded asset section follows the debug one
 
 
 class _Label:
@@ -192,11 +195,14 @@ _I64_MIN, _I64_MAX = -(1 << 63), (1 << 63) - 1
 class CodeGenPyro:
     def __init__(self, safe: bool = True, encode: bool = True,
                  optimize: bool = True, sandbox: bool = False,
-                 extra_natives: Optional[Set[str]] = None):
+                 extra_natives: Optional[Set[str]] = None,
+                 assets: Optional[Dict[str, bytes]] = None):
         self.safe = safe
         self.encode = encode
         self.optimize = optimize
         self.sandbox = sandbox
+        # 11.9 — name -> bytes, embedded in the container
+        self.assets: Dict[str, bytes] = dict(assets or {})
         self.extra_natives = set(extra_natives) if extra_natives else set()
         self._consts: List = []            # [(tag, value)]
         self._const_idx: Dict = {}
@@ -1175,6 +1181,8 @@ class CodeGenPyro:
             flags |= _FLAG_DEBUG
         if self.sandbox:
             flags |= _FLAG_SANDBOX
+        if self.assets:
+            flags |= _FLAG_ASSETS
 
         out = bytearray()
         out += _MAGIC
@@ -1218,6 +1226,16 @@ class CodeGenPyro:
             for pc, line in debug:
                 out += struct.pack('<I', pc)
                 out += struct.pack('<I', line)
+        # 11.9 — embedded assets, LAST so a reader that does not know the flag
+        # never reaches them. Names are sorted: the container must be
+        # reproducible, and the bootstrap fixed point depends on it.
+        if self.assets:
+            out += struct.pack('<I', len(self.assets))
+            for name in sorted(self.assets):
+                nb = name.encode('utf-8')
+                data = self.assets[name]
+                out += struct.pack('<I', len(nb)); out += nb
+                out += struct.pack('<I', len(data)); out += data
         return bytes(out)
 
     @staticmethod

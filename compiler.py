@@ -61,6 +61,28 @@ BANNER = r"""
 """
 
 
+def collect_assets(directory: str) -> dict:
+    """Roadmap 11.9 — every file under `directory`, keyed by its path
+    RELATIVE to it, with forward slashes.
+
+    Relative and slash-normalised so the same tree embeds identically on
+    Windows and POSIX; the container has to be reproducible or the bootstrap
+    fixed point stops holding.
+    """
+    out = {}
+    if not directory:
+        return out
+    if not os.path.isdir(directory):
+        raise FileNotFoundError(f"--assets: not a directory: {directory}")
+    for root, _dirs, files in os.walk(directory):
+        for f in sorted(files):
+            full = os.path.join(root, f)
+            rel = os.path.relpath(full, directory).replace(os.sep, '/')
+            with open(full, 'rb') as fh:
+                out[rel] = fh.read()
+    return out
+
+
 def default_abi() -> str:
     """Default ABI of the asm backend depending on the platform."""
     return 'win64' if sys.platform == 'win32' else 'sysv'
@@ -69,7 +91,7 @@ def default_abi() -> str:
 def compile_source(source: str, backend: str, safe: bool,
                    abi: str = 'sysv', base_dir: str | None = None,
                    optimize: bool = True, sandbox: bool = False,
-                   emit: str = 'html'):
+                   emit: str = 'html', assets: dict | None = None):
     """Returns str (go/c/asm/frontend) or bytes (pyro/wasm = binary)."""
     ast = load_ast(source, base_dir)
     ast = monomorphize(ast)
@@ -89,8 +111,8 @@ def compile_source(source: str, backend: str, safe: bool,
     if backend == 'wasm':
         return CodeGenWasm(safe=safe).generate(ast)   # bytes (.wasm)
     if backend == 'pyro':
-        return CodeGenPyro(safe=safe, optimize=optimize,
-                           sandbox=sandbox).generate(ast)   # bytes
+        return CodeGenPyro(safe=safe, optimize=optimize, sandbox=sandbox,
+                           assets=assets).generate(ast)   # bytes
     return CodeGenC(safe=safe).generate(ast)
 
 
@@ -176,6 +198,7 @@ def compile_file(input_path: str,
                  optimize: bool = True,
                  emit_only: bool = False,
                  emit: str = 'html',
+                 assets: dict | None = None,
                  dis: bool = False,
                  run: bool = False) -> str:
 
@@ -249,7 +272,8 @@ def compile_file(input_path: str,
     # ── code generation ──
     try:
         code = compile_source(source, backend, safe, abi, base_dir=base_dir,
-                              optimize=optimize, sandbox=sandbox, emit=emit)
+                              optimize=optimize, sandbox=sandbox, emit=emit,
+                              assets=assets)
     except (CodeGenError, CodeGenGoError, CodeGenAsmError,
             CodeGenPyroError, CodeGenNodeError) as e:
         # safety net: if auto chose a backend that failed,
@@ -259,7 +283,8 @@ def compile_file(input_path: str,
                   f"recompiling with go", file=sys.stderr)
             backend = 'go'
             code = compile_source(source, backend, safe, abi, base_dir=base_dir,
-                                  optimize=optimize, sandbox=sandbox, emit=emit)
+                                  optimize=optimize, sandbox=sandbox, emit=emit,
+                              assets=assets)
         else:
             raise
 
@@ -393,6 +418,9 @@ def main() -> None:
                     help='Backend: go (default), c, asm, pyro, node, wasm, '
                          'frontend (assemble html/javascript/CSS blocks into a '
                          'page), or auto (choose the best for the program)')
+    ap.add_argument('--assets', metavar='DIR', default=None,
+                    help='embed every file under DIR into the .pyro, readable '
+                         'at runtime with asset("name") (roadmap 11.9)')
     ap.add_argument('--emit', choices=('html', 'pyro'), default='html',
                     help="frontend backend only: 'html' writes one self-contained "
                          "vanilla file; 'pyro' writes an .html shell plus the "
@@ -442,6 +470,7 @@ def main() -> None:
             optimize    = not args.no_opt,
             emit_only   = args.emit_only,
             emit        = args.emit,
+            assets      = collect_assets(args.assets) if args.assets else None,
             dis         = args.dis,
             run         = args.run,
         )

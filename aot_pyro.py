@@ -308,12 +308,30 @@ def compile_to_c(data: bytes) -> str:
         out.append("    pyro_sandboxed = true;   // compiled from a sandboxed .pyro")
     out.append('    { const char* e = getenv("PYRO_SANDBOX"); '
                'if (e && strcmp(e, "1") == 0) pyro_sandboxed = true; }')
+    # 11.9 — assets baked into the binary, so the executable really is one
+    # file. Emitted as byte arrays rather than C strings: an asset may hold a
+    # NUL, and a string literal would silently truncate there.
+    for i, (name, blob) in enumerate(sorted(p.get('assets', {}).items())):
+        arr = ", ".join(str(b) for b in blob) or "0"
+        out.append(f"    {{ static const unsigned char A{i}[] = {{ {arr} }};")
+        out.append(f"      char* n = (char*)malloc({len(name.encode())} + 1);")
+        out.append(f'      memcpy(n, {_c_bytes(name.encode())}, {len(name.encode())}); '
+                   f'n[{len(name.encode())}] = 0;')
+        out.append(f"      char* d = (char*)malloc({len(blob)} + 1);")
+        out.append(f"      memcpy(d, A{i}, {len(blob)}); d[{len(blob)}] = 0;")
+        out.append(f"      pyro_asset_add(n, d, {len(blob)}); }}")
     out.append("    setup_consts();")
     out.append(f"    fn_{p['entryfn']}();")
     out.append("    if (g_sp > 0) release_value(g_stack[--g_sp]);   // discard entry return")
     out.append("    return 0;")
     out.append("}")
     return "\n".join(out) + "\n"
+
+
+def _c_bytes(bs: bytes) -> str:
+    """A byte array literal — never a C string, because a name or an asset may
+    contain a NUL and a string literal would truncate at it."""
+    return "(const char[]){" + ", ".join(str(b) for b in bs) + "}"
 
 
 def main():
