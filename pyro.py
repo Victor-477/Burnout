@@ -32,6 +32,11 @@ for _p in (_here, os.path.join(_root, "Cryo")):
 import compiler          # front-end (.cryo -> .pyro)
 import aot_pyro          # AOT (.pyro -> C)
 
+try:
+    from disasm_pyro import disassemble, disassemble_file
+except Exception:
+    pass
+
 VMDIR = os.path.join(_root, "Pyro", "vm")
 RUNTIME = os.path.join(VMDIR, "pyro_runtime.c")
 EXE = ".exe" if sys.platform == "win32" else ""
@@ -207,6 +212,7 @@ def main():
         a.args = []
     a.fn(a)
 
+cli_main = main
 
 if __name__ == "__main__":
     main()

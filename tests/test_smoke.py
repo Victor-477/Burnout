@@ -235,7 +235,15 @@ g = gen_go('int x = 40 + 2; print(x);')
 check("go package main",  "package main" in g)
 check("go import fmt",    '"fmt"' in g)
 check("go func main",     "func main() {" in g)
-check("go print->Println", "fmt.Println(x)" in g)
+check("go print->Println", "fmt.Println(cryoStr(x))" in g)
+# print goes through cryoStr, never Println's own formatting: Println renders a
+# slice as "[0 1 2]" and a struct as "{1 ana}", so `print(a)` disagreed with
+# to_string(a) and with the VM (invariant 1, PYRO_RUNTIME.md §3.1).
+_gc = gen_go('int[] a = [1, 2]; print(a); print(to_string(a));')
+check("go print/to_string share cryoStr", _gc.count("cryoStr(") >= 2
+      and "fmt.Sprint(v)" not in _gc.split("func cryoStr")[0])
+check("go cryoStr renders arrays as [a, b]", '"[" + strings.Join(parts, ", ") + "]"' in _gc)
+check("go cryoStr orders map pairs by key text", "cryoStrPairs" in _gc)
 # 11.1 — a top-level `var` is MODULE STATE at Go package scope, where an
 # unused variable is not an error and `_ = x` is an illegal statement. The
 # guard belongs to locals, so that is where it is asserted.
@@ -577,7 +585,17 @@ check("pyro for-each generates", isinstance(
 # ── backend Node.js / JavaScript ────────────────────────────
 print("[node] backend JavaScript (CommonJS)")
 check("node use strict + console.log", gen_node('print("oi");').startswith('"use strict"')
-      and 'console.log("oi")' in gen_node('print("oi");'))
+      and 'console.log(cryoStr("oi"))' in gen_node('print("oi");'))
+# Same canonical form as go/pyro. JS offers three native renderings of a
+# container and none is the canonical one — String([0,1,2]) is "0,1,2",
+# console.log's is "[ 0, 1, 2 ]", String({}) is "[object Object]" — so print,
+# to_string and `+` each had a different answer (invariant 1).
+_nc = gen_node('int[] a = [1, 2]; print(a); print(to_string(a)); print("A" + a);')
+check("node print/to_string/concat share cryoStr", _nc.count("cryoStr(") >= 3)
+check("node cryoStr renders arrays as [a, b]",
+      'return "[" + v.map(cryoStr).join(", ") + "]"' in _nc)
+check("node cryoStr orders map pairs by key text", "Object.keys(v).sort()" in _nc)
+check("node to_string no longer bare String()", "String(a)" not in _nc)
 check("node function + return",
       "function quad(n)" in gen_node("fn quad(int n)->int ={ return n*n; }"))
 check("node for-each -> of",

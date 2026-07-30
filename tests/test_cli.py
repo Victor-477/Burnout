@@ -85,10 +85,12 @@ PROGRAMS = [
      ("pyro", "go", "node")),
 
     # Roadmap 10.9. Array slices are asserted through len/index/sum rather than
-    # by printing the slice, because each backend formats arrays differently
-    # (`[20, 30]` vs `[20 30]` vs `[ 20, 30 ]`) and this table holds ONE
-    # expected output for all of them. The printed forms are covered per-engine
-    # by Cryo/examples/example_slices.cryo via test_c_vm.
+    # by printing the slice. That was originally because each backend formatted
+    # arrays differently (`[20, 30]` vs `[20 30]` vs `[ 20, 30 ]`) while this
+    # table holds ONE expected output for all of them; printing is now
+    # canonical everywhere (see container_rendering below), so the indirection
+    # is no longer forced — it is kept because len/index/sum test the slice's
+    # contents and aliasing, which its rendering would not.
     ("slices_array",
      'int[] xs = [10, 20, 30, 40, 50]; '
      'print(len(xs[1..3])); print(len(xs[1..=3])); print(len(xs[2..])); '
@@ -280,7 +282,60 @@ PROGRAMS = [
      'Point p = Point{ x: 10, y: 20 }; print(p.sum());',
      ["30"],
      ("pyro", "go", "node")),
+
+    # Invariant 1 — the canonical textual form of a container
+    # (PYRO_RUNTIME.md §3.1). This had FOUR renderings: the VM's "[0, 1, 2]",
+    # Go's fmt.Sprint "[0 1 2]", console.log's "[ 0, 1, 2 ]" and JS
+    # String()'s "0,1,2" — so print and to_string disagreed with each other
+    # on node and with the VM on both non-VM backends.
+    #
+    # Every line is a distinct way the old code went wrong: to_string vs print
+    # (they used different paths on node), string elements (must be UNQUOTED,
+    # unlike json_encode), a map (key order must come from the key's text, not
+    # from hash order), int keys (so "10" sorts before "9" — lexicographic on
+    # the rendered key, not numeric), a nested container (the helper has to
+    # recurse rather than delegate to the host's notation), a struct
+    # ("{1 ana}" in Go, "[object Object]" via JS String), and concatenation.
+    ("container_rendering",
+     'int[] a = [0, 1, 2]; print(a); print("${a}"); print(to_string(a)); '
+     'string[] s = ["x", "y"]; print(s); print("${s}"); '
+     'number[] f = [1.5, 2.0]; print(f); '
+     'bool[] b = [true, false]; print(b); '
+     'int[] e = []; print(e); '
+     'map<string,int> m = {"b": 2, "a": 1}; print(m); print("${m}"); '
+     'map<int,string> ik = {10: "ten", 9: "nine"}; print(ik); '
+     'map<string,int> inner = {"k": 1}; map<string,int>[] rows = [inner]; '
+     'print(rows); print("${rows}"); '
+     'struct P { int x; string name; } P p = P { x: 1, name: "ana" }; print(p); '
+     'print("A" + a); print("M" + m); '
+     'print(keys(m)); print(keys(ik));',
+     ["[0, 1, 2]", "[0, 1, 2]", "[0, 1, 2]",
+      "[x, y]", "[x, y]",
+      "[1.5, 2]",
+      "[true, false]",
+      "[]",
+      "{a: 1, b: 2}", "{a: 1, b: 2}",
+      "{10: ten, 9: nine}",
+      "[{k: 1}]", "[{k: 1}]",
+      "{name: ana, x: 1}",
+      "A[0, 1, 2]", "M{a: 1, b: 2}",
+      # keys() is "sorted by textual form" per PYRO_RUNTIME.md §4, so this is
+      # insertion-independent AND lexicographic on the rendered key ("10" then
+      # "9"). Go returned raw map order, which it RANDOMIZES per run; node
+      # returned insertion order.
+      "[a, b]", "[10, 9]"],
+     ("pyro", "go", "node")),
 ]
+
+# Programs whose OUTPUT MUST BE IDENTICAL on every backend that can run them.
+#
+# The matrix above holds one expected list per program, so it already pins the
+# rendering — but only to whatever the list says. If a future change moved all
+# three backends together, or if the expected list were written to match a
+# single backend, the matrix would stay green. These cases assert the backends
+# against EACH OTHER, which is the invariant itself rather than a proxy for it:
+# whatever the form is, there must be exactly one of it.
+CROSS_BACKEND = ["container_rendering"]
 
 # backends that can RUN here (generation is always checked)
 _RUNNABLE = {"go": HAS_GO, "node": HAS_NODE, "c": HAS_CC, "pyro": HAS_GO or HAS_CC}
@@ -302,8 +357,22 @@ def norm(s):
     return [l for l in s.replace("\r\n", "\n").strip().split("\n") if l.strip()]
 
 
+# Progress noise the runners print around the program's own output. The bracket
+# form is a TOOL TAG ("[pyro] built ...", "[gcc] Error:"), matched by tag rather
+# than by a bare "[" prefix — a container now prints as "[0, 1, 2]", and the
+# looser filter silently ate exactly the lines container_rendering asserts.
+_RUNNER_TAG = re.compile(r"^\[(?:pyro|go|node|c|cc|gcc|clang|asm|wasm|frontend)\]")
+
+
+def program_output(stdout):
+    return [l for l in norm(stdout)
+            if not l.startswith(("→", "✓", "──")) and not _RUNNER_TAG.match(l)]
+
+
 print(f"[cli] CLI path   go:{'y' if HAS_GO else 'n'} "
       f"node:{'y' if HAS_NODE else 'n'} cc:{'y' if HAS_CC else 'n'}")
+
+CROSS_OUT = {}   # tag -> {backend: output lines}, filled by the matrix below
 
 for tag, src, expected, backends in PROGRAMS:
     # ISSUES/19 — this case imports a library, so write it beside the program.
@@ -333,9 +402,9 @@ pub fn twice() -> int ={ bump(); bump(); return total(); }
 
         if ok and _RUNNABLE.get(be):
             r2 = cryoc([cf, "--backend", be, "--run", "--no-banner"])
-            got = norm(r2.stdout)
-            # the runners print progress lines around the program output
-            got = [l for l in got if not l.startswith(("→", "✓", "──", "["))]
+            got = program_output(r2.stdout)
+            if tag in CROSS_BACKEND:
+                CROSS_OUT.setdefault(tag, {})[be] = got
             hit = all(e in got for e in expected)
             known = KNOWN_FAIL.get((tag, be))
             if known and not hit:
@@ -348,6 +417,35 @@ pub fn twice() -> int ={ bump(); bump(); return total(); }
                 if not hit:
                     print(f"    {tag}/{be} expected {expected} got {got[:8]}")
                 check(f"[{tag}/{be}] runs with expected output", hit)
+
+
+# ── 1b. cross-backend identity (invariant 1) ─────────────────
+#
+# Compares the CROSS_BACKEND programs' output between backends rather than
+# against a written expectation, so the assertion is the invariant itself:
+# whatever the rendering is, there must be exactly one of it.
+for tag in CROSS_BACKEND:
+    per_be = CROSS_OUT.get(tag, {})
+    if len(per_be) < 2:
+        print(f"  skip [{tag}] cross-backend identity "
+              f"(needs 2+ runnable backends, have {sorted(per_be) or 'none'})")
+        continue
+    # pyro is the reference: its VM defines the canonical form (PYRO_RUNTIME §3.1)
+    ref_be = "pyro" if "pyro" in per_be else sorted(per_be)[0]
+    ref = per_be[ref_be]
+    for be in sorted(per_be):
+        if be == ref_be:
+            continue
+        got = per_be[be]
+        same = got == ref
+        if not same:
+            if len(got) != len(ref):
+                print(f"    {tag}: {ref_be} printed {len(ref)} lines, "
+                      f"{be} printed {len(got)}")
+            for i, (a, b) in enumerate(zip(ref, got)):
+                if a != b:
+                    print(f"    {tag} line {i + 1}: {ref_be}={a!r}  {be}={b!r}")
+        check(f"[{tag}] {be} renders identically to {ref_be}", same)
 
 
 # ── 2. static audit: isinstance(n, X) implies X is imported ──

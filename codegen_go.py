@@ -218,6 +218,9 @@ class TypeEnv:
                        'http_get': 'string',
                        'http_post': 'string', 'schema_of': 'string',
                        'llm': 'string', 'tools': 'string[]',
+                       # 11.17 — a stream handle is an int, its token a string
+                       'llm_stream': 'int', 'llm_next': 'bool',
+                       'llm_token': 'string', 'llm_close': 'bool',
                        'tools_json': 'string', 'tool_get': 'Tool',
                        'agent': 'string', 'index_of': 'int', 'count': 'int',
                        'pad_start': 'string', 'pad_end': 'string'}.get(node.callee)
@@ -410,8 +413,81 @@ class CodeGenGo:
                   ' " blocked by sandbox policy")',
                   "\t\tos.Exit(1)", "\t}", "}", ""]
         if 'str' in self._helpers:
-            self._imports.add('fmt')
-            H += ["func cryoStr(v any) string { return fmt.Sprint(v) }", ""]
+            self._imports.update(('fmt', 'reflect', 'sort', 'strconv', 'strings'))
+            # value_to_string (PYRO_RUNTIME.md §3.1). This used to be
+            # `fmt.Sprint(v)`, which renders a slice in Go's OWN notation —
+            # "[0 1 2]", space-separated — so `print(a)` and `to_string(a)` read
+            # differently on every backend (invariant 1). The canonical form is
+            # the VM's: "[a, b, c]" for arrays, "{k: v, ...}" for maps ordered by
+            # the key's own text, strings never quoted, nil as "null".
+            H += ["func cryoStrPairs(keys, vals []string) string {",
+                  "\tidx := make([]int, len(keys))",
+                  "\tfor i := range idx { idx[i] = i }",
+                  "\tsort.SliceStable(idx, func(a, b int) bool "
+                  "{ return keys[idx[a]] < keys[idx[b]] })",
+                  "\tparts := make([]string, len(idx))",
+                  "\tfor i, j := range idx { parts[i] = keys[j] + \": \" + vals[j] }",
+                  '\treturn "{" + strings.Join(parts, ", ") + "}"', "}", "",
+                  "func cryoStr(v any) string {",
+                  '\tif v == nil { return "null" }',
+                  "\tswitch x := v.(type) {",
+                  "\tcase string:",
+                  "\t\treturn x",
+                  "\tcase bool:",
+                  '\t\tif x { return "true" }',
+                  '\t\treturn "false"',
+                  "\tcase int64:",
+                  "\t\treturn strconv.FormatInt(x, 10)",
+                  "\tcase float64:",
+                  "\t\treturn strconv.FormatFloat(x, 'g', -1, 64)",
+                  "\t}",
+                  "\trv := reflect.ValueOf(v)",
+                  "\tswitch rv.Kind() {",
+                  "\tcase reflect.Pointer, reflect.Interface:",
+                  "\t\t// an optional (T?) is a *T; an unset one prints as null",
+                  '\t\tif rv.IsNil() { return "null" }',
+                  "\t\treturn cryoStr(rv.Elem().Interface())",
+                  "\tcase reflect.Slice, reflect.Array:",
+                  "\t\tparts := make([]string, rv.Len())",
+                  "\t\tfor i := range parts { parts[i] = cryoStr(rv.Index(i).Interface()) }",
+                  '\t\treturn "[" + strings.Join(parts, ", ") + "]"',
+                  "\tcase reflect.Map:",
+                  "\t\tks := rv.MapKeys()",
+                  "\t\tkeys := make([]string, len(ks))",
+                  "\t\tvals := make([]string, len(ks))",
+                  "\t\tfor i, k := range ks {",
+                  "\t\t\tkeys[i] = cryoStr(k.Interface())",
+                  "\t\t\tvals[i] = cryoStr(rv.MapIndex(k).Interface())",
+                  "\t\t}",
+                  "\t\treturn cryoStrPairs(keys, vals)",
+                  "\tcase reflect.Struct:",
+                  "\t\t// structs are maps in the VM, so they render as maps here;",
+                  "\t\t// the json tag carries the field's original Cryo name.",
+                  "\t\tt := rv.Type()",
+                  "\t\tkeys := make([]string, 0, t.NumField())",
+                  "\t\tvals := make([]string, 0, t.NumField())",
+                  "\t\tfor i := 0; i < t.NumField(); i++ {",
+                  "\t\t\tf := t.Field(i)",
+                  '\t\t\tif f.PkgPath != "" { continue }',
+                  '\t\t\tname := f.Tag.Get("json")',
+                  '\t\t\tif name == "" { name = strings.ToLower(f.Name[:1]) + f.Name[1:] }',
+                  "\t\t\tkeys = append(keys, name)",
+                  "\t\t\tvals = append(vals, cryoStr(rv.Field(i).Interface()))",
+                  "\t\t}",
+                  "\t\treturn cryoStrPairs(keys, vals)",
+                  "\tcase reflect.Bool:",
+                  '\t\tif rv.Bool() { return "true" }',
+                  '\t\treturn "false"',
+                  "\tcase reflect.String:",
+                  "\t\treturn rv.String()",
+                  "\tcase reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64:",
+                  "\t\treturn strconv.FormatInt(rv.Int(), 10)",
+                  "\tcase reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:",
+                  "\t\treturn strconv.FormatUint(rv.Uint(), 10)",
+                  "\tcase reflect.Float32, reflect.Float64:",
+                  "\t\treturn strconv.FormatFloat(rv.Float(), 'g', -1, 64)",
+                  "\t}",
+                  "\treturn fmt.Sprint(v)", "}", ""]
         if 'or' in self._helpers:
             H += ["func cryoOr[T comparable](a, b T) T {",
                   "\tvar zero T",
@@ -551,9 +627,16 @@ class CodeGenGo:
                   "\treturn reflect.ValueOf(a).Pointer() == reflect.ValueOf(b).Pointer()",
                   "}", ""]
         if 'keys' in self._helpers:
+            self._imports.add('sort')
+            # Sorted by textual form (PYRO_RUNTIME.md §4). Returning Go's map
+            # iteration order raw made keys() NONDETERMINISTIC — Go randomizes
+            # it per run — so the same program could print two different orders
+            # on the same binary, let alone agree with pyro/node.
             H += ["func cryoKeys[K comparable, V any](m map[K]V) []K {",
                   "\tks := make([]K, 0, len(m))",
                   "\tfor k := range m {", "\t\tks = append(ks, k)", "\t}",
+                  "\tsort.SliceStable(ks, func(i, j int) bool "
+                  "{ return cryoStr(ks[i]) < cryoStr(ks[j]) })",
                   "\treturn ks", "}", ""]
         if 'listdir' in self._helpers:
             self._imports.update(('os', 'sort'))
@@ -688,6 +771,138 @@ class CodeGenGo:
                   "\t\t\tcontinue", "\t\t}",
                   "\t\tpayload[k] = v", "\t}",
                   "\treturn cryoLLMPost(payload, timeoutMs)", "}", ""]
+        if 'llmstream' in self._helpers:
+            self._imports.update(('bufio', 'strings', 'sync'))
+            H += ["// ── LLM streaming (roadmap 11.17) ──",
+                  "// The request runs in a goroutine feeding a channel, so the",
+                  "// program sees each token as it lands instead of waiting for",
+                  "// the whole completion. Handles are ints, not opaque values:",
+                  "// an `any` cannot be passed to a typed parameter here.",
+                  "type cryoStream struct {",
+                  "\tch   chan string",
+                  "\tcur  string",
+                  "\tdone chan struct{}",
+                  "\tonce sync.Once",
+                  "}",
+                  "var cryoStreams = map[int64]*cryoStream{}",
+                  "var cryoStreamMu sync.Mutex",
+                  "var cryoStreamSeq int64",
+                  "",
+                  "func cryoLLMStream(model, prompt string, opts map[string]any) int64 {",
+                  '\tcryoSandboxGuard("llm/agent")',
+                  "\tst := &cryoStream{ch: make(chan string, 64), done: make(chan struct{})}",
+                  "\tcryoStreamMu.Lock()",
+                  "\tcryoStreamSeq++",
+                  "\tid := cryoStreamSeq",
+                  "\tcryoStreams[id] = st",
+                  "\tcryoStreamMu.Unlock()",
+                  '\turl := os.Getenv("CRYO_LLM_URL")',
+                  '\tif url == "" {',
+                  '\t\tfmt.Fprintln(os.Stderr, "[Cryo LLM] CRYO_LLM_URL undefined; empty stream")',
+                  "\t\tclose(st.ch)",
+                  "\t\treturn id", "\t}",
+                  '\tpayload := map[string]any{"model": model, "prompt": prompt, "stream": true}',
+                  "\tvar timeoutMs int64",
+                  "\tfor k, v := range opts {",
+                  '\t\tif k == "timeout" {',
+                  "\t\t\tswitch n := v.(type) {",
+                  "\t\t\tcase int64: timeoutMs = n",
+                  "\t\t\tcase int: timeoutMs = int64(n)",
+                  "\t\t\tcase float64: timeoutMs = int64(n)",
+                  "\t\t\t}",
+                  "\t\t\tcontinue", "\t\t}",
+                  "\t\tpayload[k] = v", "\t}",
+                  "\tbody, _ := json.Marshal(payload)",
+                  "\tgo func() {",
+                  "\t\tdefer close(st.ch)",
+                  '\t\treq, err := http.NewRequest("POST", url, bytes.NewReader(body))',
+                  "\t\tif err != nil { return }",
+                  '\t\treq.Header.Set("Content-Type", "application/json")',
+                  '\t\treq.Header.Set("Accept", "text/event-stream")',
+                  '\t\tif key := os.Getenv("CRYO_LLM_KEY"); key != "" {',
+                  '\t\t\treq.Header.Set("Authorization", "Bearer "+key)', "\t\t}",
+                  "\t\tclient := http.DefaultClient",
+                  "\t\tif timeoutMs > 0 {",
+                  "\t\t\tclient = &http.Client{Timeout: time.Duration(timeoutMs) * time.Millisecond}",
+                  "\t\t}",
+                  "\t\tresp, err := client.Do(req)",
+                  "\t\tif err != nil { return }",
+                  "\t\tdefer resp.Body.Close()",
+                  "\t\t// Server-Sent Events: `data: {json}` per line, `data: [DONE]`",
+                  "\t\t// to finish. A non-SSE body is read as one chunk per line,",
+                  "\t\t// so a plain provider still streams something usable.",
+                  "\t\tsc := bufio.NewScanner(resp.Body)",
+                  "\t\tsc.Buffer(make([]byte, 0, 64*1024), 4*1024*1024)",
+                  "\t\tfor sc.Scan() {",
+                  "\t\t\t// `raw` keeps the token's own spacing — providers",
+                  "\t\t\t// stream \"word \" with the trailing space, and",
+                  "\t\t\t// trimming it would silently reflow the text.",
+                  '\t\t\traw := strings.TrimRight(sc.Text(), "\\r")',
+                  "\t\t\tline := strings.TrimSpace(raw)",
+                  '\t\t\tif line == "" { continue }',
+                  "\t\t\tpayload := line",
+                  '\t\t\tif strings.HasPrefix(line, "data:") {',
+                  '\t\t\t\tpayload = strings.TrimSpace(line[5:])',
+                  "\t\t\t}",
+                  '\t\t\tif payload == "[DONE]" { return }',
+                  "\t\t\tvar chunk struct {",
+                  '\t\t\t\tContent string `json:"content"`',
+                  '\t\t\t\tDelta   string `json:"delta"`',
+                  "\t\t\t}",
+                  "\t\t\tif json.Unmarshal([]byte(payload), &chunk) == nil {",
+                  '\t\t\t\ttok := chunk.Content',
+                  '\t\t\t\tif tok == "" { tok = chunk.Delta }',
+                  '\t\t\t\tif tok != "" {',
+                  "\t\t\t\t\tselect {",
+                  "\t\t\t\t\tcase st.ch <- tok:",
+                  "\t\t\t\t\tcase <-st.done: return",
+                  "\t\t\t\t\t}",
+                  "\t\t\t\t}",
+                  "\t\t\t\tcontinue", "\t\t\t}",
+                  "\t\t\tselect {",
+                  "\t\t\tcase st.ch <- raw:",
+                  "\t\t\tcase <-st.done: return",
+                  "\t\t\t}",
+                  "\t\t}",
+                  "\t}()",
+                  "\treturn id", "}",
+                  "",
+                  "// cryoLLMNext: blocks until the next token or the end of the",
+                  "// stream. false means finished — the token is read separately",
+                  "// so both calls stay concretely typed.",
+                  "func cryoLLMNext(id int64) bool {",
+                  "\tcryoStreamMu.Lock()",
+                  "\tst := cryoStreams[id]",
+                  "\tcryoStreamMu.Unlock()",
+                  "\tif st == nil { return false }",
+                  "\ttok, ok := <-st.ch",
+                  "\tif !ok {",
+                  "\t\tcryoStreamMu.Lock()",
+                  "\t\tdelete(cryoStreams, id)",
+                  "\t\tcryoStreamMu.Unlock()",
+                  "\t\treturn false", "\t}",
+                  "\tst.cur = tok",
+                  "\treturn true", "}",
+                  "",
+                  "// cryoLLMClose: release a stream abandoned early. Without",
+                  "// it a `break` mid-stream leaves the producer goroutine",
+                  "// blocked on a full channel for the life of the process —",
+                  "// harmless in a script, a leak per request in a server.",
+                  "func cryoLLMClose(id int64) bool {",
+                  "\tcryoStreamMu.Lock()",
+                  "\tst := cryoStreams[id]",
+                  "\tdelete(cryoStreams, id)",
+                  "\tcryoStreamMu.Unlock()",
+                  "\tif st == nil { return false }",
+                  "\tst.once.Do(func() { close(st.done) })",
+                  "\treturn true", "}",
+                  "",
+                  "func cryoLLMToken(id int64) string {",
+                  "\tcryoStreamMu.Lock()",
+                  "\tst := cryoStreams[id]",
+                  "\tcryoStreamMu.Unlock()",
+                  '\tif st == nil { return "" }',
+                  "\treturn st.cur", "}", ""]
         if 'agent' in self._helpers:
             # agent loop: LLM requests tool -> runtime executes -> returns -> repeats
             # 'only' filters the exposed tools; maxSteps limits iterations.
@@ -1615,7 +1830,11 @@ class CodeGenGo:
         if c == 'print':
             self._imports.add('fmt')
             if not a: return "fmt.Println()"
-            return f"fmt.Println({self._expr(a[0])})"
+            # via cryoStr, not fmt.Println's own formatting: Println would
+            # render a slice as "[0 1 2]" and a struct as "{1 ana}", neither of
+            # which is the canonical form (PYRO_RUNTIME.md §3.1).
+            self._helpers.add('str')
+            return f"fmt.Println(cryoStr({self._expr(a[0])}))"
         if c == 'sqrt':
             self._imports.add('math'); return f"math.Sqrt({self._expr(a[0])})"
         if c == 'pow':
@@ -1684,6 +1903,7 @@ class CodeGenGo:
             return f"delete({self._expr(a[0])}, {self._expr(a[1])})"
         if c == 'keys' and len(a) == 1:
             self._helpers.add('keys')
+            self._helpers.add('str')     # cryoKeys sorts by the key's text
             return f"cryoKeys({self._expr(a[0])})"
         # ── stateless collection ops (Phase 10.2) ──
         if c == 'sort' and len(a) == 1:
@@ -1878,6 +2098,26 @@ class CodeGenGo:
             prompt = self._expr(a[1]) if len(a) > 1 else '""'
             opts   = self._llm_opts(a[2] if len(a) > 2 else None)
             return f'cryoLLM({model}, {prompt}, "", {opts})'   # no schema (raw completion)
+        # ── 11.17: streaming ──
+        if c == 'llm_stream':
+            self._helpers.update(('llmstream', 'sandbox'))
+            # not 'io': the streaming reader is bufio, and Go rejects an
+            # unused import — the non-streaming helper adds 'io' itself
+            self._imports.update(('os', 'net/http', 'encoding/json',
+                                  'bytes', 'fmt', 'time'))
+            model  = self._expr(a[0]) if a else '""'
+            prompt = self._expr(a[1]) if len(a) > 1 else '""'
+            opts   = self._llm_opts(a[2] if len(a) > 2 else None)
+            return f'cryoLLMStream({model}, {prompt}, {opts})'
+        if c == 'llm_next' and len(a) == 1:
+            self._helpers.update(('llmstream', 'sandbox'))
+            return f'cryoLLMNext({self._expr(a[0])})'
+        if c == 'llm_token' and len(a) == 1:
+            self._helpers.update(('llmstream', 'sandbox'))
+            return f'cryoLLMToken({self._expr(a[0])})'
+        if c == 'llm_close' and len(a) == 1:
+            self._helpers.update(('llmstream', 'sandbox'))
+            return f'cryoLLMClose({self._expr(a[0])})'
         if c == 'tools':
             self._use_tools = True
             return "cryoToolNames()"

@@ -44,6 +44,7 @@ def jsid(name: str) -> str:
 # Cryo builtins not supported in Node backend (route: --backend go)
 _UNSUPPORTED = {
     'llm', 'agent', 'tools', 'tools_json', 'tool_get', 'schema_of',
+    'llm_stream', 'llm_next', 'llm_token', 'llm_close',   # 11.17 — go-only
     'http_get', 'http_post', 'sleep', 'skills', 'skill_get', 'skill_has',
     'skills_json', 'pyro_exec', 'pyro_env', 'pyro_args', 'pyro_time',
     'pyro_read', 'pyro_write', 'pyro_write_file', 'pyro_open', 'pyro_exit',
@@ -244,6 +245,33 @@ class CodeGenNode:
 
     def _helper_defs(self) -> List[str]:
         H: List[str] = []
+        if 'str' in self._helpers:
+            # value_to_string (PYRO_RUNTIME.md §3.1). JS has three different
+            # native renderings for a container and none of them is the
+            # canonical one: String([0,1,2]) is "0,1,2", console.log's is
+            # "[ 0, 1, 2 ]", and String({}) is "[object Object]". That made
+            # print, to_string and concatenation disagree with each other AND
+            # with the other backends (invariant 1).
+            H += ["function cryoStr(v) {",
+                  '  if (v === null || v === undefined) return "null";',
+                  '  if (typeof v === "string") return v;',
+                  '  if (typeof v === "boolean") return v ? "true" : "false";',
+                  '  if (typeof v === "bigint") return v.toString();',
+                  '  if (typeof v === "number") {',
+                  "    // the VM spells the non-finite values this way",
+                  '    if (v === Infinity) return "+Inf";',
+                  '    if (v === -Infinity) return "-Inf";',
+                  '    if (Number.isNaN(v)) return "NaN";',
+                  "    return String(v);",
+                  "  }",
+                  '  if (Array.isArray(v)) return "[" + v.map(cryoStr).join(", ") + "]";',
+                  '  if (typeof v === "object") {',
+                  "    // maps and structs alike: pairs ordered by the key's own text",
+                  "    const ks = Object.keys(v).sort();",
+                  '    return "{" + ks.map(k => k + ": " + cryoStr(v[k])).join(", ") + "}";',
+                  "  }",
+                  "  return String(v);",
+                  "}", ""]
         if 'len' in self._helpers:
             H += ["function cryoLen(x) {",
                   "  if (x == null) return 0;",
@@ -525,11 +553,15 @@ class CodeGenNode:
         self._emit("}")
 
     def _foreign(self, n: ForeignBlock):
-        if n.lang.lower() in _JS_LANGS:
+        lang = n.lang.lower()
+        if lang in _JS_LANGS:
             self._emit(f"// -- [bloco {n.lang}] --")
             for line in n.code.strip().split('\n'):
                 self._emit(line.strip())
             self._emit(f"// -- [/bloco {n.lang}] --")
+        elif lang in ('html', 'css'):
+            clean_code = n.code.strip().replace('`', '\\`').replace('${', '\\${')
+            self._emit(f"return `{clean_code}`;")
         else:
             self._emit(f"// [Cryo] >{n.lang}< block omitted in Node backend "
                        f"(use >Node( ... ))")
@@ -655,6 +687,19 @@ class CodeGenNode:
         if op == '%' and self.safe:
             self._helpers.add('mod')
             return f"cryoMod({l}, {r})"
+        # string concatenation converts the non-string operand via cryoStr.
+        # Leaving it to JS `+` gave "A" + [0,1,2] === "A0,1,2" and
+        # "M" + {a:1} === "M[object Object]"; the Go backend already routes
+        # this through its own cryoStr, so node was the odd one out.
+        if op == '+':
+            lt, rt = self._t.infer(n.left), self._t.infer(n.right)
+            if (lt == 'string') != (rt == 'string'):
+                self._helpers.add('str')
+                if lt == 'string':
+                    r = f"cryoStr({r})"
+                else:
+                    l = f"cryoStr({l})"
+                return f"({l} + {r})"
         return f"({l} {op} {r})"
 
     def _call(self, n: CallExpr) -> str:
@@ -673,12 +718,18 @@ class CodeGenNode:
             return f"{jsid(c)}({args})"
 
         if c == 'print':
-            return f"console.log({args})"
+            # via cryoStr, not console.log's own formatting: console.log renders
+            # an array as "[ 0, 1, 2 ]" and an object with quoted string values,
+            # neither of which is canonical (PYRO_RUNTIME.md §3.1).
+            self._helpers.add('str')
+            return "console.log(" + ', '.join(f"cryoStr({self._expr(x)})"
+                                              for x in a) + ")"
         if c == 'len':
             self._helpers.add('len')
             return f"cryoLen({A(0)})"
         if c == 'to_string':
-            return f"String({A(0)})"
+            self._helpers.add('str')
+            return f"cryoStr({A(0)})"
         if c == 'to_int':
             return f"Math.trunc(Number({A(0)}))"
         if c == 'to_number':
@@ -736,7 +787,11 @@ class CodeGenNode:
         if c == 'has':
             return f"Object.prototype.hasOwnProperty.call({A(0)}, {A(1)})"
         if c == 'keys':
-            return f"Object.keys({A(0)})"
+            # sorted by textual form, as PYRO_RUNTIME.md §4 requires — bare
+            # Object.keys is INSERTION order, so keys({"b":2,"a":1}) gave
+            # [b, a] here and [a, b] on pyro/go. Same determinism rule the map
+            # rendering in cryoStr follows.
+            return f"Object.keys({A(0)}).sort()"
         # ── stateless collection ops (Phase 10.2) ──
         if c == 'sort':
             # numbers sort numerically, everything else by string form (matches the VM)
