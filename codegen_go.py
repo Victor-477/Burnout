@@ -1702,6 +1702,11 @@ class CodeGenGo:
             self.te.push()
             for idx, var_name in enumerate(case.pattern_vars):
                 self._emit(f"{gid(var_name)} := __m.Val{idx}")
+                # Go makes an unused variable an error, so an arm that ignores
+                # part of a payload — `Err(a, b) => print(a)` — failed to
+                # compile here while running fine on pyro and node. A pattern
+                # binding is a name the author chose to READ, not to use.
+                self._emit(f"_ = {gid(var_name)}")
                 self.te.set(var_name, "any")
             for s in case.body:
                 self._gen(s)
