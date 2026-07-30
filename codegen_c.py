@@ -96,12 +96,15 @@ class TypeEnv:
             return t if t != 'unknown' else self.infer(node.else_value)
         if isinstance(node, CallExpr):
             if node.callee in ('to_string', 'input', 'upper', 'lower', 'trim', 'substr',
-                               'concat', 'repeat', 'pad_start', 'pad_end', 'replace', 'join'):
+                               'concat', 'repeat', 'pad_start', 'pad_end', 'replace', 'join',
+                               'read_file', 'env', 'exec'):
                 return 'string'
             if node.callee in ('to_int', 'len', 'sign', 'gcd', 'find',
-                               'count', 'index_of'):
+                               'count', 'index_of', 'file_size'):
                 return 'int'
-            if node.callee == 'split':
+            if node.callee in ('file_exists', 'is_dir', 'make_dir', 'delete_file', 'write_file'):
+                return 'bool'
+            if node.callee in ('list_dir', 'split'):
                 return 'string[]'
             # these return a NEW array of the same type as their first argument
             if node.callee in ('sort', 'reverse', 'slice', 'concat') and node.args:
@@ -841,10 +844,24 @@ class CodeGenC:
         if callee == 'to_string':
             a = args[0]
             return self._to_str(self._expr(a), self.te.infer(a))
-        if callee == 'to_int':
-            return f"cryo_to_int({self._expr(args[0])})"
-        if callee == 'to_number':
-            return f"cryo_to_num({self._expr(args[0])})"
+        # to_int/to_number are typed conversions here, not one runtime call.
+        # cryo_to_num takes int64_t and cryo_to_int takes double, so passing an
+        # argument of the other kind used to convert SILENTLY through the
+        # parameter type: to_number(3.14159) truncated to 3.0, losing the
+        # fraction with nothing to indicate it. A string argument was worse —
+        # the pointer itself was read as a number — and the C runtime has no
+        # parse helper to call instead, so that one is refused rather than
+        # emitted wrong. (go emits float64()/int64() and never had this.)
+        if callee in ('to_int', 'to_number'):
+            at = self.te.infer(args[0])
+            inner = self._expr(args[0])
+            if at == 'string':
+                raise CodeGenError(
+                    f"'{callee}()' on a string is not supported in the C "
+                    f"backend; use --backend go, node or pyro.")
+            if callee == 'to_int':
+                return inner if at == 'int' else f"cryo_to_int({inner})"
+            return f"((double)({inner}))" if at == 'number' else f"cryo_to_num({inner})"
         if callee == 'len':
             a = args[0]
             t = self.te.infer(a)
@@ -856,6 +873,27 @@ class CodeGenC:
             return f"cryo_input({prompt})"
         if callee == 'throw':
             return f"CRYO_THROW({self._expr(args[0])})"
+        # ── Filesystem & process natives (Roadmap 11.7) ──
+        if callee == 'file_exists' and len(args) == 1:
+            return f"cryo_file_exists({self._expr(args[0])})"
+        if callee == 'is_dir' and len(args) == 1:
+            return f"cryo_is_dir({self._expr(args[0])})"
+        if callee == 'list_dir' and len(args) == 1:
+            return f"cryo_list_dir({self._expr(args[0])})"
+        if callee == 'make_dir' and len(args) == 1:
+            return f"cryo_make_dir({self._expr(args[0])})"
+        if callee == 'delete_file' and len(args) == 1:
+            return f"cryo_delete_file({self._expr(args[0])})"
+        if callee == 'file_size' and len(args) == 1:
+            return f"cryo_file_size({self._expr(args[0])})"
+        if callee == 'write_file' and len(args) == 2:
+            return f"cryo_write_file({self._expr(args[0])}, {self._expr(args[1])})"
+        if callee == 'read_file' and len(args) == 1:
+            return f"cryo_read_file({self._expr(args[0])})"
+        if callee == 'env' and len(args) == 1:
+            return f"cryo_env({self._expr(args[0])})"
+        if callee == 'exec' and len(args) == 1:
+            return f"cryo_exec({self._expr(args[0])})"
 
         # User-defined function
         args_str = ', '.join(self._expr(a) for a in args)

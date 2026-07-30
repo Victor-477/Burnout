@@ -281,6 +281,16 @@ class CodeGenNode:
                   "  if (n < 0 || end > s.length) end = s.length;",
                   "  return s.slice(i, end);",
                   "}", ""]
+        if 'replace' in self._helpers:
+            H += ["function cryoReplace(s, old, rep) {",
+                  "  s = String(s); old = String(old); rep = String(rep);",
+                  "  if (old === '') {",
+                  "    let out = '';",
+                  "    for (let i = 0; i < s.length; i++) out += rep + s[i];",
+                  "    return out + rep;",
+                  "  }",
+                  "  return s.split(old).join(rep);",
+                  "}", ""]
         if 'mod' in self._helpers:
             H += ["function cryoMod(a, b) {",
                   "  if (b === 0) throw new Error('[Cryo Security] DivisaoPorZero');",
@@ -708,7 +718,8 @@ class CodeGenNode:
         if c == 'seed' and len(a) == 1:
             self._helpers.add('prng'); return f"cryoSeed({A(0)})"
         if c == 'replace':
-            return f"String({A(0)}).split({A(1)}).join({A(2)})"
+            self._helpers.add('replace')
+            return f"cryoReplace({A(0)}, {A(1)}, {A(2)})"
         if c == 'substr':
             self._helpers.add('substr')
             return f"cryoSubstr({A(0)}, {A(1)}, {A(2)})"
@@ -756,5 +767,36 @@ class CodeGenNode:
             return f"JSON.stringify({A(0)})"
         if c == 'json_decode':
             return f"JSON.parse({A(0)})"
+        # ── Filesystem & process natives (Roadmap 11.7) ──
+        if c == 'file_exists' and len(a) == 1:
+            self._require('fs')
+            return f"fs.existsSync({A(0)})"
+        if c == 'is_dir' and len(a) == 1:
+            self._require('fs')
+            return f"(fs.existsSync({A(0)}) && fs.statSync({A(0)}).isDirectory())"
+        if c == 'list_dir' and len(a) == 1:
+            self._require('fs')
+            return f"(fs.existsSync({A(0)}) ? fs.readdirSync({A(0)}).sort() : [])"
+        if c == 'make_dir' and len(a) == 1:
+            self._require('fs')
+            return f"((function(){{ try {{ fs.mkdirSync({A(0)}, {{ recursive: true }}); return true; }} catch(e) {{ return false; }} }})())"
+        if c == 'delete_file' and len(a) == 1:
+            self._require('fs')
+            return f"((function(){{ try {{ if (fs.statSync({A(0)}).isDirectory()) return false; fs.unlinkSync({A(0)}); return true; }} catch(e) {{ return false; }} }})())"
+        if c == 'file_size' and len(a) == 1:
+            self._require('fs')
+            return f"((function(){{ try {{ return fs.statSync({A(0)}).size; }} catch(e) {{ return -1; }} }})())"
+        if c == 'write_file' and len(a) == 2:
+            self._require('fs')
+            return f"((function(){{ try {{ fs.writeFileSync({A(0)}, {A(1)}); return true; }} catch(e) {{ return false; }} }})())"
+        if c == 'read_file' and len(a) == 1:
+            self._require('fs')
+            return f"((function(){{ try {{ return fs.readFileSync({A(0)}, 'utf8'); }} catch(e) {{ return \"\"; }} }})())"
+        if c == 'env' and len(a) == 1:
+            return f"(process.env[{A(0)}] || \"\")"
+        if c == 'exec' and len(a) == 1:
+            return f"((function(){{ try {{ return require('child_process').execSync({A(0)}, {{ encoding: 'utf8' }}); }} catch(e) {{ return e.stdout || \"\"; }} }})())"
+        if c == 'args' and len(a) == 0:
+            return "process.argv.slice(2)"
         # user function call
         return f"{jsid(c)}({args})"

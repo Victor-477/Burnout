@@ -406,13 +406,26 @@ char* cryo_str_pad_end  (const char* s, int64_t w, const char* p) { return cryo_
 
 /* replace ALL occurrences. Sized exactly up front (count the matches) instead of
    growing, so there is a single allocation and no realloc dance. An empty `old`
-   would match forever, so it returns the input unchanged — same as the VM. */
+   inserts `rep` at all character boundaries — matching the Pyro runtime and Go. */
 char* cryo_str_replace(const char* s, const char* old, const char* rep) {
     if (!s) s = "";
     if (!old) old = "";
     if (!rep) rep = "";
     size_t ol = strlen(old);
-    if (ol == 0) return strdup(s);
+    if (ol == 0) {
+        size_t sl = strlen(s), rl = strlen(rep);
+        size_t total = (sl + 1) * rl + sl;
+        char* out = malloc(total + 1);
+        if (!out) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+        char* w = out;
+        for (size_t i = 0; i < sl; i++) {
+            memcpy(w, rep, rl); w += rl;
+            *w++ = s[i];
+        }
+        memcpy(w, rep, rl); w += rl;
+        *w = '\0';
+        return out;
+    }
     size_t rl = strlen(rep), n = 0;
     for (const char* p = s; (p = strstr(p, old)) != NULL; p += ol) n++;
     if (n == 0) return strdup(s);
@@ -510,4 +523,160 @@ double cryo_input_num(const char* prompt) {
     double v = strtod(s, NULL);
     free(s);
     return v;
+}
+
+/* ---------- Filesystem & Process ---------- */
+#include <sys/stat.h>
+#if defined(_WIN32)
+#include <direct.h>
+#include <windows.h>
+#else
+#include <unistd.h>
+#include <dirent.h>
+#endif
+
+bool cryo_file_exists(const char* path) {
+    if (!path) return false;
+    struct stat st;
+    return stat(path, &st) == 0;
+}
+
+bool cryo_is_dir(const char* path) {
+    if (!path) return false;
+    struct stat st;
+    if (stat(path, &st) != 0) return false;
+#if defined(_WIN32)
+    return (st.st_mode & _S_IFDIR) != 0;
+#else
+    return S_ISDIR(st.st_mode);
+#endif
+}
+
+static int _cryo_name_cmp(const void* a, const void* b) {
+    return strcmp(*(const char**)a, *(const char**)b);
+}
+
+CryoArray* cryo_list_dir(const char* path) {
+    CryoArray* out = cryo_array_new();
+    if (!path) return out;
+#if defined(_WIN32)
+    char pattern[MAX_PATH];
+    snprintf(pattern, sizeof(pattern), "%s\\*", path);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) return out;
+    char** names = NULL;
+    int n = 0, cap = 0;
+    do {
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+        if (n == cap) {
+            cap = cap ? cap * 2 : 16;
+            names = (char**)realloc(names, (size_t)cap * sizeof(char*));
+        }
+        names[n++] = cryo_strdup(fd.cFileName);
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+    if (names) {
+        qsort(names, (size_t)n, sizeof(char*), _cryo_name_cmp);
+        for (int i = 0; i < n; i++) {
+            cryo_push_str(out, names[i]);
+        }
+        free(names);
+    }
+#else
+    DIR* d = opendir(path);
+    if (!d) return out;
+    char** names = NULL;
+    int n = 0, cap = 0;
+    struct dirent* e;
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+        if (n == cap) {
+            cap = cap ? cap * 2 : 16;
+            names = (char**)realloc(names, (size_t)cap * sizeof(char*));
+        }
+        names[n++] = cryo_strdup(e->d_name);
+    }
+    closedir(d);
+    if (names) {
+        qsort(names, (size_t)n, sizeof(char*), _cryo_name_cmp);
+        for (int i = 0; i < n; i++) {
+            cryo_push_str(out, names[i]);
+        }
+        free(names);
+    }
+#endif
+    return out;
+}
+
+bool cryo_make_dir(const char* path) {
+    if (!path) return false;
+#if defined(_WIN32)
+    return _mkdir(path) == 0 || cryo_is_dir(path);
+#else
+    return mkdir(path, 0755) == 0 || cryo_is_dir(path);
+#endif
+}
+
+bool cryo_delete_file(const char* path) {
+    if (!path || cryo_is_dir(path)) return false;
+    return remove(path) == 0;
+}
+
+int64_t cryo_file_size(const char* path) {
+    if (!path) return -1;
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;
+    return (int64_t)st.st_size;
+}
+
+bool cryo_write_file(const char* path, const char* content) {
+    if (!path) return false;
+    if (!content) content = "";
+    FILE* fp = fopen(path, "wb");
+    if (!fp) return false;
+    size_t len = strlen(content);
+    size_t wrote = fwrite(content, 1, len, fp);
+    fclose(fp);
+    return wrote == len;
+}
+
+char* cryo_read_file(const char* path) {
+    if (!path) return cryo_strdup("");
+    FILE* fp = fopen(path, "rb");
+    if (!fp) return cryo_strdup("");
+    fseek(fp, 0, SEEK_END);
+    long n = ftell(fp);
+    fseek(fp, 0, SEEK_SET);
+    if (n < 0) { fclose(fp); return cryo_strdup(""); }
+    char* buf = (char*)malloc((size_t)n + 1);
+    if (!buf) { fclose(fp); return cryo_strdup(""); }
+    size_t got = fread(buf, 1, (size_t)n, fp);
+    fclose(fp);
+    buf[got] = '\0';
+    return buf;
+}
+
+char* cryo_env(const char* name) {
+    if (!name) return cryo_strdup("");
+    char* val = getenv(name);
+    return cryo_strdup(val ? val : "");
+}
+
+char* cryo_exec(const char* cmd) {
+    if (!cmd || !*cmd) return cryo_strdup("");
+    FILE* fp = NULL;
+#if defined(_WIN32)
+    fp = _popen(cmd, "r");
+#else
+    fp = popen(cmd, "r");
+#endif
+    if (!fp) return cryo_strdup("");
+    char* res = cryo_read_line(fp);
+#if defined(_WIN32)
+    _pclose(fp);
+#else
+    pclose(fp);
+#endif
+    return res;
 }

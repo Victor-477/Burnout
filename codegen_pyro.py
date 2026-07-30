@@ -79,6 +79,8 @@ OP_NATIVE = 0x70  # u8 id, u8 argc -> calls VM native builtin (NATIVES table)
 OP_TRYPUSH = 0x71 # i16 rel (catch), u16 slot (catch var; 0xFFFF = none)
 OP_TRYPOP  = 0x72 # removes the exception handler from top (try completed)
 OP_THROW   = 0x73 # pop value -> unwinds to the nearest handler
+OP_GETGLOBAL = 0x76
+OP_SETGLOBAL = 0x77
 OP_COALESCE = 0x74 # pop b, a -> a if a != null, else b  (operator ??)
 OP_UNWRAP  = 0x75 # pop a -> a if a != null, else aborts  (unwrap x!)
 
@@ -90,6 +92,7 @@ _OPERAND = {
     OP_CALL: 3, OP_NEWARR: 2, OP_NEWMAP: 2,
     OP_NATIVE: 2, OP_TRYPUSH: 6,   # i32 rel + u16 slot
     OP_PUSHFN: 2, OP_CALL_VALUE: 1, OP_CLOSURE: 3,
+    OP_GETGLOBAL: 2, OP_SETGLOBAL: 2,   # u16 global index (11.1)
 }
 
 _NO_SLOT = 0xFFFF   # TRYPUSH without catch variable
@@ -129,6 +132,21 @@ NATIVES = {
     # ── time and random natives (Phase 10.4) ──
     'now_ms':       (47, 0), 'monotonic_ms': (48, 0),
     'random':       (49, 0), 'random_int':   (50, 2), 'seed': (51, 1),
+    # ── HTTP server, roadmap 11.6 ──
+    # An accept LOOP rather than a callback: the Cryo program owns the loop,
+    # so no engine needs a re-entrant call back into the interpreter.
+    'http_listen':  (52, 1), 'http_accept':  (53, 0), 'http_respond': (54, 3),
+    # ── filesystem & process, roadmap 11.7 ──
+    # All sandbox-gated except the pure queries. `delete_file` is NOT called
+    # `remove`: that name is already the map builtin (id 11).
+    'file_exists':  (55, 1), 'is_dir':       (56, 1), 'list_dir':  (57, 1),
+    'make_dir':     (58, 1), 'delete_file':  (59, 1), 'file_size': (60, 1),
+    'write_file':   (61, 2), 'env':          (62, 1), 'exec':      (63, 1),
+    # ── persistence, roadmap 11.8 ──
+    'write_file_atomic': (64, 2),
+    'url_decode':   (65, 1), 'url_encode':   (66, 1),
+    # ── embedded assets, roadmap 11.9 ──
+    'asset':        (67, 1), 'asset_names':  (68, 0),
 }
 
 def _isize(op: int) -> int:
@@ -148,6 +166,13 @@ _VERSION = 3         # v3: string constants use a u32 length (v2 was u16)
 _FLAG_ENCODED = 0x01
 _FLAG_DEBUG   = 0x02
 _FLAG_SANDBOX = 0x04
+_FLAG_ASSETS  = 0x08   # 11.9: embedded asset section follows the debug one
+_FLAG_PERMS   = 0x10   # 11.12: declared permissions follow the assets
+
+# 11.12 — the source spelling (short, for the programmer) mapped to the
+# runtime capability name (explicit, for the operator reading a policy).
+_PERM_CAP = {'read': 'fs.read', 'write': 'fs.write',
+             'net': 'net', 'exec': 'exec', 'env': 'env'}
 
 
 class _Label:
@@ -176,11 +201,14 @@ _I64_MIN, _I64_MAX = -(1 << 63), (1 << 63) - 1
 class CodeGenPyro:
     def __init__(self, safe: bool = True, encode: bool = True,
                  optimize: bool = True, sandbox: bool = False,
-                 extra_natives: Optional[Set[str]] = None):
+                 extra_natives: Optional[Set[str]] = None,
+                 assets: Optional[Dict[str, bytes]] = None):
         self.safe = safe
         self.encode = encode
         self.optimize = optimize
         self.sandbox = sandbox
+        # 11.9 — name -> bytes, embedded in the container
+        self.assets: Dict[str, bytes] = dict(assets or {})
         self.extra_natives = set(extra_natives) if extra_natives else set()
         self._consts: List = []            # [(tag, value)]
         self._const_idx: Dict = {}
@@ -195,6 +223,13 @@ class CodeGenPyro:
         self._enum_maps: Dict[str, str] = {}
         self._member_to_enum: Dict[str, str] = {}
         self._global_consts: Dict[str, Literal] = {}  # global const -> inlined literal
+        # Roadmap 11.1 — module state. A top-level `var` gets a slot in the
+        # VM's globals array rather than becoming a local of `main`, which is
+        # what makes it visible inside functions. Locals shadow it.
+        self._globals: Dict[str, int] = {}      # name -> global index
+        self._toplevel_vars: Set[int] = set()   # id() of the top-level VarDecl nodes
+        # 11.12 — declared permissions, serialised into the artifact
+        self._perms: Dict[str, list] = {}
         self._ntmp = 0
         self._cur_line = 0            # last marked line (avoids repeated markers)
 
@@ -226,6 +261,22 @@ class CodeGenPyro:
         if name not in f.locals:
             f.locals[name] = len(f.locals)
         return f.locals[name]
+
+    def _store_name(self, name: str):
+        """Emit the store for `name` — module slot or local, whichever applies.
+
+        Every write path goes through here. Declaration, assignment, compound
+        assignment and increment each used to call _get_slot directly, and the
+        two that were missed threw "variable not declared" for module state.
+        """
+        if self._is_global(name):
+            self._emit(OP_SETGLOBAL, self._globals[name])
+        else:
+            self._emit(OP_STORE, self._get_slot(name))
+
+    def _is_global(self, name: str) -> bool:
+        """A module variable is in play only when nothing local shadows it."""
+        return name in self._globals and name not in self._cur.locals
 
     def _get_slot(self, name: str) -> int:
         if name not in self._cur.locals:
@@ -270,6 +321,11 @@ class CodeGenPyro:
                 # global const with literal value: inlined in all uses
                 # (visible inside functions, without needing globals in the VM)
                 self._global_consts[n.name] = n.value
+            elif isinstance(n, PermissionsDecl):
+                # 11.12 — collected here, written as a section below. The
+                # compiler has already refused any undeclared capability.
+                for k, vals in n.grants.items():
+                    self._perms.setdefault(k, []).extend(vals)
             elif isinstance(n, (Import, Library)):
                 pass
             elif isinstance(n, (SkillDecl, ForeignBlock)):
@@ -278,6 +334,15 @@ class CodeGenPyro:
                     f"(bytecode: scalars, arrays, maps, structs, enums, functions and flow).")
             else:
                 top.append(n)
+
+        # 11.1 — every top-level `var` becomes module state. Registered before
+        # any body is compiled, so a function defined ABOVE the declaration can
+        # still refer to it (declaration order constrains initialisation, not
+        # visibility — same rule the rest of the top level already follows).
+        for st in top:
+            if isinstance(st, VarDecl) and st.name not in self._globals:
+                self._globals[st.name] = len(self._globals)
+                self._toplevel_vars.add(id(st))
 
         names = [f.name for f in user_fns] + ['main']
         for i, nm in enumerate(names):
@@ -346,7 +411,8 @@ class CodeGenPyro:
         self._walk_names(lam.body, used, declared)
         free = used - bound - declared
         # names resolvable without a closure: globals, enum members, functions, builtins
-        free -= set(self._global_consts) | set(self._enum_consts) | set(self._enum_maps)
+        free -= (set(self._global_consts) | set(self._enum_consts)
+                 | set(self._enum_maps) | set(self._globals))   # 11.1
         free -= set(self._fnindex) | set(NATIVES)
         free -= {'print', 'len', 'has', 'keys', 'assert', 'throw'}
         # only enclosing LOCALS can be captured; anything else is an unknown name
@@ -466,21 +532,24 @@ class CodeGenPyro:
         self._emit(OP_INDEX)                      # top = tmp["val0"]
 
     def _var(self, n: VarDecl):
-        slot = self._slot(n.name)
+        # 11.1 — a top-level declaration initialises module state; the same
+        # syntax inside a function declares an ordinary local, which shadows.
+        is_module = id(n) in self._toplevel_vars
+        slot = self._globals[n.name] if is_module else self._slot(n.name)
         if isinstance(n.value, TryExpr):
             self._try_prop(n.value)
         elif n.value is not None:
             self._expr(n.value)
         else:
             self._emit(OP_NULL)
-        self._emit(OP_STORE, slot)
+        self._emit(OP_SETGLOBAL if is_module else OP_STORE, slot)
 
     def _assign(self, n: Assignment):
         if isinstance(n.value, TryExpr):
             self._try_prop(n.value)
         else:
             self._expr(n.value)
-        self._emit(OP_STORE, self._get_slot(n.name))
+        self._store_name(n.name)
 
     def _index_assign(self, n: IndexAssignment):
         # cont[key] = val
@@ -522,12 +591,12 @@ class CodeGenPyro:
     def _compound(self, n: CompoundAssignment):
         base = n.op[:-1]                       # '+=' -> '+'
         self._expr(BinaryExpr(base, Identifier(n.name), n.value))
-        self._emit(OP_STORE, self._get_slot(n.name))
+        self._store_name(n.name)
 
     def _incr(self, n: Increment):
         op = '+' if n.op == '++' else '-'
         self._expr(BinaryExpr(op, Identifier(n.name), Literal('int', 1)))
-        self._emit(OP_STORE, self._get_slot(n.name))
+        self._store_name(n.name)
 
     def _return(self, n: Return):
         if isinstance(n.value, TryExpr):
@@ -734,6 +803,8 @@ class CodeGenPyro:
             if n.name in self._global_consts and n.name not in self._cur.locals:
                 self._literal(self._global_consts[n.name])
                 return
+            if self._is_global(n.name):
+                self._emit(OP_GETGLOBAL, self._globals[n.name]); return
             self._emit(OP_LOAD, self._get_slot(n.name)); return
         if isinstance(n, UnaryExpr):
             self._expr(n.operand)
@@ -860,6 +931,15 @@ class CodeGenPyro:
         # then CALL_VALUE (a local shadows a top-level function of the same name)
         if n.callee in self._cur.locals:
             self._emit(OP_LOAD, self._get_slot(n.callee))
+            for a in n.args:
+                self._expr(a)
+            self._emit(OP_CALL_VALUE, len(n.args))
+            return
+        # 11.1 — the same, for a function value held in MODULE state. Only when
+        # the name is not also a declared function, which keeps a plain
+        # `fn foo()` call resolving to a direct CALL.
+        if self._is_global(n.callee) and n.callee not in self._fnindex:
+            self._emit(OP_GETGLOBAL, self._globals[n.callee])
             for a in n.args:
                 self._expr(a)
             self._emit(OP_CALL_VALUE, len(n.args))
@@ -1077,7 +1157,8 @@ class CodeGenPyro:
         code = bytearray()
         for (op, arg, off) in flat:
             code.append(op)
-            if op in (OP_CONST, OP_LOAD, OP_STORE, OP_NEWARR, OP_NEWMAP):
+            if op in (OP_CONST, OP_LOAD, OP_STORE, OP_NEWARR, OP_NEWMAP,
+                      OP_GETGLOBAL, OP_SETGLOBAL):
                 code += struct.pack('<H', arg)
             elif op in (OP_JMP, OP_JMPF, OP_JMPT):
                 rel = label_off[arg.id] - (off + 5)   # 1 opcode + 4 (i32)
@@ -1113,6 +1194,10 @@ class CodeGenPyro:
             flags |= _FLAG_DEBUG
         if self.sandbox:
             flags |= _FLAG_SANDBOX
+        if self.assets:
+            flags |= _FLAG_ASSETS
+        if self._perms:
+            flags |= _FLAG_PERMS
 
         out = bytearray()
         out += _MAGIC
@@ -1156,6 +1241,25 @@ class CodeGenPyro:
             for pc, line in debug:
                 out += struct.pack('<I', pc)
                 out += struct.pack('<I', line)
+        # 11.9 — embedded assets, LAST so a reader that does not know the flag
+        # never reaches them. Names are sorted: the container must be
+        # reproducible, and the bootstrap fixed point depends on it.
+        if self.assets:
+            out += struct.pack('<I', len(self.assets))
+            for name in sorted(self.assets):
+                nb = name.encode('utf-8')
+                data = self.assets[name]
+                out += struct.pack('<I', len(nb)); out += nb
+                out += struct.pack('<I', len(data)); out += data
+        # 11.12 — declared permissions, in the same syntax PYRO_POLICY uses so
+        # there is one format to learn and one parser to trust. Sorted, for a
+        # reproducible container.
+        if self._perms:
+            spec = ';'.join(
+                f"{_PERM_CAP[k]}={','.join(sorted(set(v)))}"
+                for k, v in sorted(self._perms.items()) if v)
+            pb = spec.encode('utf-8')
+            out += struct.pack('<I', len(pb)); out += pb
         return bytes(out)
 
     @staticmethod

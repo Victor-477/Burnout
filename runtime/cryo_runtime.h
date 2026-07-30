@@ -94,6 +94,18 @@ char*   cryo_input(const char* prompt);
 int64_t cryo_input_int(const char* prompt);
 double  cryo_input_num(const char* prompt);
 
+/* ---------- Filesystem & Process ---------- */
+bool       cryo_file_exists(const char* path);
+bool       cryo_is_dir(const char* path);
+CryoArray* cryo_list_dir(const char* path);
+bool       cryo_make_dir(const char* path);
+bool       cryo_delete_file(const char* path);
+int64_t    cryo_file_size(const char* path);
+bool       cryo_write_file(const char* path, const char* content);
+char*      cryo_read_file(const char* path);
+char*      cryo_env(const char* name);
+char*      cryo_exec(const char* cmd);
+
 /* ---------- Conversoes ---------- */
 static inline int64_t cryo_to_int(double v)  { return (int64_t)v; }
 static inline double  cryo_to_num(int64_t v) { return (double)v; }

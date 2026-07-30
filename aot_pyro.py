@@ -115,6 +115,12 @@ def _emit_op(op, operand, off, size, consts, funcs, nloc):
     if op == bc.OP_STORE:
         s = struct.unpack('<H', operand)[0]
         return f"{{ release_value(g_locals[base+{s}]); g_locals[base+{s}] = g_stack[--g_sp]; }}"
+    if op == bc.OP_GETGLOBAL:
+        s = struct.unpack('<H', operand)[0]
+        return f"{{ retain_value(g_globals[{s}]); g_stack[g_sp++] = g_globals[{s}]; }}"
+    if op == bc.OP_SETGLOBAL:
+        s = struct.unpack('<H', operand)[0]
+        return f"{{ release_value(g_globals[{s}]); g_globals[{s}] = g_stack[--g_sp]; }}"
     if op in (bc.OP_ADD, bc.OP_SUB, bc.OP_MUL, bc.OP_DIV, bc.OP_MOD,
               bc.OP_BAND, bc.OP_BOR, bc.OP_BXOR, bc.OP_SHL, bc.OP_SHR,
               bc.OP_EQ, bc.OP_NE, bc.OP_LT, bc.OP_GT, bc.OP_LE, bc.OP_GE):
@@ -255,6 +261,10 @@ def compile_to_c(data: bytes) -> str:
     # global machine state (single value stack, single locals stack, frame stack)
     out.append("static Value g_stack[65536]; static int g_sp = 0;")
     out.append("static Value g_locals[65536]; static int g_locsp = 0;")
+    # Roadmap 11.1 — module state. Fixed-size here rather than grown, because
+    # the AOT knows the whole program at build time and the compiler numbers
+    # globals from 0; the VMs grow on demand for the same reason they cannot.
+    out.append("static Value g_globals[65536];")
     out.append("static int g_fbase[8192]; static int g_fnn[8192]; static int g_fp = 0;")
     out.append("typedef struct { jmp_buf env; int saved_sp; int saved_fp; int saved_locsp; int slot; } AotHandler;")
     out.append("static AotHandler g_handlers[1024]; static int g_hp = 0;")
@@ -296,14 +306,34 @@ def compile_to_c(data: bytes) -> str:
     # sandbox policy mirrors the VM: baked-in flag from the .pyro, plus PYRO_SANDBOX=1.
     if p['flags'] & 0x04:
         out.append("    pyro_sandboxed = true;   // compiled from a sandboxed .pyro")
+    # 11.11 — the capability policy applies to a native binary too
+    out.append('    pyro_policy_init(getenv("PYRO_POLICY"));')
     out.append('    { const char* e = getenv("PYRO_SANDBOX"); '
                'if (e && strcmp(e, "1") == 0) pyro_sandboxed = true; }')
+    # 11.9 — assets baked into the binary, so the executable really is one
+    # file. Emitted as byte arrays rather than C strings: an asset may hold a
+    # NUL, and a string literal would silently truncate there.
+    for i, (name, blob) in enumerate(sorted(p.get('assets', {}).items())):
+        arr = ", ".join(str(b) for b in blob) or "0"
+        out.append(f"    {{ static const unsigned char A{i}[] = {{ {arr} }};")
+        out.append(f"      char* n = (char*)malloc({len(name.encode())} + 1);")
+        out.append(f'      memcpy(n, {_c_bytes(name.encode())}, {len(name.encode())}); '
+                   f'n[{len(name.encode())}] = 0;')
+        out.append(f"      char* d = (char*)malloc({len(blob)} + 1);")
+        out.append(f"      memcpy(d, A{i}, {len(blob)}); d[{len(blob)}] = 0;")
+        out.append(f"      pyro_asset_add(n, d, {len(blob)}); }}")
     out.append("    setup_consts();")
     out.append(f"    fn_{p['entryfn']}();")
     out.append("    if (g_sp > 0) release_value(g_stack[--g_sp]);   // discard entry return")
     out.append("    return 0;")
     out.append("}")
     return "\n".join(out) + "\n"
+
+
+def _c_bytes(bs: bytes) -> str:
+    """A byte array literal — never a C string, because a name or an asset may
+    contain a NUL and a string literal would truncate at it."""
+    return "(const char[]){" + ", ".join(str(b) for b in bs) + "}"
 
 
 def main():

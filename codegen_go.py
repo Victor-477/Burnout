@@ -291,6 +291,14 @@ class CodeGenGo:
 
     def generate(self, program: Program) -> str:
         self._pre_scan(program.statements)
+        # Roadmap 11.1 — a top-level `var` is module state, not a local of
+        # main. Types are registered before ANY body is generated, so a
+        # function defined above the declaration still infers it.
+        self._module_vars = {n.name for n in program.statements
+                             if isinstance(n, VarDecl)}
+        for n in program.statements:
+            if isinstance(n, VarDecl):
+                self.te.set(n.name, n.var_type)
         self._imported_langs = collect_imports(program)
         for node in program.statements:
             if isinstance(node, EnumDecl):
@@ -305,6 +313,9 @@ class CodeGenGo:
             elif isinstance(node, ConstDecl):
                 self._cur, self._indent = self._global_defs, 0
                 self._const(node)
+            elif isinstance(node, VarDecl):
+                self._cur, self._indent = self._global_defs, 0
+                self._var(node, module=True)
             elif isinstance(node, SkillDecl):
                 self._skills.append(node)   # registered; emitted in _assemble
             elif isinstance(node, Library):
@@ -532,11 +543,27 @@ class CodeGenGo:
             H += ["func cryoUnwrap[T any](p *T) T {",
                   "\tif p == nil {", '\t\tpanic("[Cryo Security] NullPointer: unwrap of null optional")', "\t}",
                   "\treturn *p", "}", ""]
+        if 'sameptr' in self._helpers:
+            self._imports.add('reflect')
+            H += ["func cryoSamePtr(a, b any) bool {",
+                  "\tif a == nil && b == nil { return true }",
+                  "\tif a == nil || b == nil { return false }",
+                  "\treturn reflect.ValueOf(a).Pointer() == reflect.ValueOf(b).Pointer()",
+                  "}", ""]
         if 'keys' in self._helpers:
             H += ["func cryoKeys[K comparable, V any](m map[K]V) []K {",
                   "\tks := make([]K, 0, len(m))",
                   "\tfor k := range m {", "\t\tks = append(ks, k)", "\t}",
                   "\treturn ks", "}", ""]
+        if 'listdir' in self._helpers:
+            self._imports.update(('os', 'sort'))
+            H += ["func cryoListDir(path string) []string {",
+                  "\tents, err := os.ReadDir(path)",
+                  "\tif err != nil { return []string{} }",
+                  "\tnames := make([]string, 0, len(ents))",
+                  "\tfor _, e := range ents { names = append(names, e.Name()) }",
+                  "\tsort.Strings(names)",
+                  "\treturn names", "}", ""]
         if 'parseint' in self._helpers:
             self._imports.update(('strconv', 'strings'))
             H += ["func cryoParseInt(s string) int64 {",
@@ -615,9 +642,10 @@ class CodeGenGo:
                   "\tfor i, v := range data { buf[i] = byte(v & 0xFF) }",
                   "\treturn os.WriteFile(path, buf, 0644) == nil", "}", ""]
         if 'llm' in self._helpers:
-            self._imports.update(('os', 'net/http', 'io', 'encoding/json', 'bytes', 'fmt'))
+            self._imports.update(('os', 'net/http', 'io', 'encoding/json', 'bytes', 'fmt', 'time'))
             H += ["// cryoLLMPost: POST of payload to CRYO_LLM_URL with 3 retries.",
-                  "func cryoLLMPost(payload map[string]any) string {",
+                  "// timeoutMs > 0 bounds each attempt (roadmap 11.16).",
+                  "func cryoLLMPost(payload map[string]any, timeoutMs int64) string {",
                   '\tcryoSandboxGuard("llm/agent")',
                   '\turl := os.Getenv("CRYO_LLM_URL")',
                   '\tif url == "" {',
@@ -629,7 +657,11 @@ class CodeGenGo:
                   '\t\treq.Header.Set("Content-Type", "application/json")',
                   '\t\tif key := os.Getenv("CRYO_LLM_KEY"); key != "" {',
                   '\t\t\treq.Header.Set("Authorization", "Bearer "+key)', "\t\t}",
-                  "\t\tresp, err := http.DefaultClient.Do(req)",
+                  "\t\tclient := http.DefaultClient",
+                  "\t\tif timeoutMs > 0 {",
+                  "\t\t\tclient = &http.Client{Timeout: time.Duration(timeoutMs) * time.Millisecond}",
+                  "\t\t}",
+                  "\t\tresp, err := client.Do(req)",
                   "\t\tif err != nil { continue }",
                   "\t\tout, _ := io.ReadAll(resp.Body)",
                   "\t\tresp.Body.Close()",
@@ -637,13 +669,25 @@ class CodeGenGo:
                   "\t}",
                   '\treturn ""', "}", "",
                   "// cryoLLM: contrato POST {model, prompt, schema?} -> corpo JSON.",
-                  "func cryoLLM(model, prompt, schema string) string {",
+                  "func cryoLLM(model, prompt, schema string, opts map[string]any) string {",
                   '\tpayload := map[string]any{"model": model, "prompt": prompt}',
                   '\tif schema != "" {',
                   "\t\tvar sc any",
                   '\t\tif json.Unmarshal([]byte(schema), &sc) == nil { payload["schema"] = sc }',
                   "\t}",
-                  "\treturn cryoLLMPost(payload)", "}", ""]
+                  "\t// 11.16 — generation controls ride in the same payload;",
+                  "\t// timeout is ours, not the provider's, so it is removed.",
+                  "\tvar timeoutMs int64",
+                  "\tfor k, v := range opts {",
+                  '\t\tif k == "timeout" {',
+                  "\t\t\tswitch n := v.(type) {",
+                  "\t\t\tcase int64: timeoutMs = n",
+                  "\t\t\tcase int: timeoutMs = int64(n)",
+                  "\t\t\tcase float64: timeoutMs = int64(n)",
+                  "\t\t\t}",
+                  "\t\t\tcontinue", "\t\t}",
+                  "\t\tpayload[k] = v", "\t}",
+                  "\treturn cryoLLMPost(payload, timeoutMs)", "}", ""]
         if 'agent' in self._helpers:
             # agent loop: LLM requests tool -> runtime executes -> returns -> repeats
             # 'only' filters the exposed tools; maxSteps limits iterations.
@@ -660,7 +704,7 @@ class CodeGenGo:
                   "\tif maxSteps <= 0 { maxSteps = 8 }",
                   '\tmessages := []map[string]any{{"role": "user", "content": prompt}}',
                   "\tfor step := 0; step < maxSteps; step++ {",
-                  '\t\tresp := cryoLLMPost(map[string]any{"model": model, "messages": messages, "tools": tools})',
+                  '\t\tresp := cryoLLMPost(map[string]any{"model": model, "messages": messages, "tools": tools}, 0)',
                   "\t\tvar dec struct {",
                   "\t\t\tToolCall *struct {",
                   '\t\t\t\tName      string          `json:"name"`',
@@ -971,24 +1015,35 @@ class CodeGenGo:
         self._emit(f"if _, __ok := interface{{}}({tmp}).({ok}); !__ok {{ return {tmp} }}")
         return f"{tmp}.({ok}).Val0"
 
-    def _var(self, n: VarDecl):
-        if isinstance(n.value, TryExpr):
-            self.te.set(n.name, n.var_type)
-            okv = self._go_try(n.value.operand)
-            self._emit(f"var {gid(n.name)} {go_type(n.var_type)} = {okv}")
-            self._emit(f"_ = {gid(n.name)}")
-            return
+    def _var(self, n: VarDecl, module: bool = False):
+        """A variable declaration. `module` emits it at Go PACKAGE scope.
+
+        Roadmap 11.1 — module state is the same declaration in a different
+        place, so it shares this method rather than getting its own copy. Only
+        two things differ at package scope, and both are hard Go rules:
+        `name := value` is a statement and illegal there, and the `_ = name`
+        unused-guard is a statement too (package-level vars may go unused).
+        """
         self.te.set(n.name, n.var_type)
         gt = go_type(n.var_type)
         vt = n.var_type
         name = gid(n.name)
+
+        if isinstance(n.value, TryExpr):
+            okv = self._go_try(n.value.operand)
+            self._emit(f"var {name} {gt} = {okv}")
+            if not module:
+                self._emit(f"_ = {name}")
+            return
+
         if isinstance(n.value, ArrayLiteral):
-            self._emit(f"{name} := {self._array_literal(n.value, vt)}")
+            lit = self._array_literal(n.value, vt)
+            self._emit(f"var {name} {gt} = {lit}" if module else f"{name} := {lit}")
         elif isinstance(n.value, MapLiteral):
             self._emit(f"var {name} {gt} = {self._map_literal(n.value, vt)}")
         elif is_map(vt) and n.value is None:
             # map without value: initializes empty and writable
-            self._emit(f"{name} := {gt}{{}}")
+            self._emit(f"var {name} {gt} = {gt}{{}}" if module else f"{name} := {gt}{{}}")
         elif is_optional(vt) and n.value is not None:
             self._emit(f"var {name} {gt} = {self._to_optional(n.value, vt)}")
         elif is_future(vt) and isinstance(n.value, SpawnExpr):
@@ -999,7 +1054,8 @@ class CodeGenGo:
             self._emit(f"var {name} {gt} = {val}")
         else:
             self._emit(f"var {name} {gt}")
-        self._emit(f"_ = {name}")   # Go: unused locals are an error
+        if not module:
+            self._emit(f"_ = {name}")   # Go: unused locals are an error
 
     def _to_optional(self, value: Node, opt_type: str) -> str:
         """Coerces 'value' to optional T?: null->nil; if it's already optional,
@@ -1447,8 +1503,9 @@ class CodeGenGo:
             model = self._expr(inner.args[0]) if inner.args else '""'
             prompt = self._expr(inner.args[1]) if len(inner.args) > 1 else '""'
             schema = self._json_schema(target)
+            opts = self._llm_opts(inner.args[2] if len(inner.args) > 2 else None)
             return (f"func() {gt} {{ var _v {gt}; "
-                    f"_ = json.Unmarshal([]byte(cryoLLM({model}, {prompt}, {schema})), &_v); "
+                    f"_ = json.Unmarshal([]byte(cryoLLM({model}, {prompt}, {schema}, {opts})), &_v); "
                     f"return _v }}()")
         # numeric conversions
         if target in ('int', 'number'):
@@ -1482,6 +1539,19 @@ class CodeGenGo:
         if op in ('&', '|', '^', '<<', '>>'):
             return f"({l} {op} {r})"
 
+        # container equality (slice / map identity)
+        is_cont = lambda t, n: (t.endswith('[]') or t.startswith('map<') or t in ('array', 'map') or
+                                isinstance(n, (ArrayLiteral, MapLiteral)))
+        if op in ('==', '!=') and (lt == 'null' or isinstance(node.left, Literal) and node.left.kind == 'null') and (rt == 'null' or isinstance(node.right, Literal) and node.right.kind == 'null'):
+            return 'true' if op == '==' else 'false'
+        if op in ('==', '!=') and (is_cont(lt, node.left) or is_cont(rt, node.right)):
+            if lt == 'null' or rt == 'null' or (isinstance(node.left, Literal) and node.left.kind == 'null') or (isinstance(node.right, Literal) and node.right.kind == 'null'):
+                return f"({l} {op} nil)"
+            self._helpers.add('sameptr')
+            if op == '==':
+                return f"cryoSamePtr({l}, {r})"
+            return f"(!cryoSamePtr({l}, {r}))"
+
         # int<->number coercion: Go does not mix int64 and float64. If one side is
         # 'number' and the other 'int', converts the integer to float64.
         if op in ('+', '-', '*', '/', '%', '<', '>', '<=', '>=', '==', '!=') \
@@ -1502,6 +1572,25 @@ class CodeGenGo:
             self._helpers.add('imod'); return f"cryoIModChk({l}, {r})"
 
         return f"({l} {op} {r})"
+
+    def _llm_opts(self, node) -> str:
+        """The generation-options argument of llm() as a Go map (11.16).
+
+        Built here rather than by _expr on the map literal, because that infers
+        one element type from the first value — and these options are a mix of
+        float, int and string by nature, so `map[string]any` is the only shape
+        that holds them. The parser has already checked the names and the
+        literal kinds; values may be arbitrary expressions.
+        """
+        if node is None:
+            return "nil"
+        if not isinstance(node, MapLiteral):
+            return "nil"
+        parts = []
+        for k, v in node.pairs:
+            key = k.value if isinstance(k, Literal) else getattr(k, 'name', '')
+            parts.append(f'"{key}": {self._expr(v)}')
+        return "map[string]any{" + ", ".join(parts) + "}"
 
     def _ternary(self, node: TernaryExpr) -> str:
         # Go has no ?:; uses IIFE with inferred type (lazy evaluation)
@@ -1725,6 +1814,48 @@ class CodeGenGo:
         if c == 'pyro_open' and len(a) == 1:
             self._helpers.update(('open', 'sandbox'))
             return f"cryoOpen({self._expr(a[0])})"
+        # ── Filesystem & process natives (Roadmap 11.7) ──
+        if c == 'file_exists' and len(a) == 1:
+            self._imports.add('os')
+            return f"func() bool {{ _, err := os.Stat({self._expr(a[0])}); return err == nil }}()"
+        if c == 'is_dir' and len(a) == 1:
+            self._imports.add('os')
+            return f"func() bool {{ st, err := os.Stat({self._expr(a[0])}); return err == nil && st.IsDir() }}()"
+        if c == 'list_dir' and len(a) == 1:
+            self._helpers.add('listdir')
+            return f"cryoListDir({self._expr(a[0])})"
+        if c == 'make_dir' and len(a) == 1:
+            self._imports.add('os')
+            self._helpers.add('sandbox')
+            return f"func() bool {{ cryoSandboxGuard(\"make_dir\"); return os.MkdirAll({self._expr(a[0])}, 0755) == nil }}()"
+        if c == 'delete_file' and len(a) == 1:
+            self._imports.add('os')
+            self._helpers.add('sandbox')
+            return (f"func() bool {{ cryoSandboxGuard(\"delete_file\"); "
+                    f"st, err := os.Stat({self._expr(a[0])}); "
+                    f"if err == nil && st.IsDir() {{ return false }}; "
+                    f"return os.Remove({self._expr(a[0])}) == nil }}()")
+        if c == 'file_size' and len(a) == 1:
+            self._imports.add('os')
+            return f"func() int64 {{ st, err := os.Stat({self._expr(a[0])}); if err != nil {{ return -1 }}; return st.Size() }}()"
+        if c == 'write_file' and len(a) == 2:
+            self._imports.add('os')
+            self._helpers.add('sandbox')
+            return (f"func() bool {{ cryoSandboxGuard(\"write_file\"); "
+                    f"return os.WriteFile({self._expr(a[0])}, []byte({self._expr(a[1])}), 0644) == nil }}()")
+        if c == 'read_file' and len(a) == 1:
+            self._imports.add('os')
+            return f"func() string {{ b, err := os.ReadFile({self._expr(a[0])}); if err != nil {{ return \"\" }}; return string(b) }}()"
+        if c == 'env' and len(a) == 1:
+            self._imports.add('os')
+            self._helpers.add('sandbox')
+            return f"func() string {{ cryoSandboxGuard(\"env\"); return os.Getenv({self._expr(a[0])}) }}()"
+        if c == 'exec' and len(a) == 1:
+            self._helpers.update(('exec', 'sandbox'))
+            return f"cryoExec({self._expr(a[0])})"
+        if c == 'args' and len(a) == 0:
+            self._imports.add('os')
+            return "os.Args[1:]"
         # ── Phase 2: concurrency / HTTP ──
         if c == 'sleep' and len(a) == 1:
             self._imports.add('time')
@@ -1745,10 +1876,12 @@ class CodeGenGo:
             self._helpers.update(('llm', 'sandbox'))
             model  = self._expr(a[0]) if a else '""'
             prompt = self._expr(a[1]) if len(a) > 1 else '""'
-            return f'cryoLLM({model}, {prompt}, "")'   # without schema (raw completion)
+            opts   = self._llm_opts(a[2] if len(a) > 2 else None)
+            return f'cryoLLM({model}, {prompt}, "", {opts})'   # no schema (raw completion)
         if c == 'tools':
             self._use_tools = True
             return "cryoToolNames()"
+        # (see _llm_opts below for the generation-controls argument)
         if c == 'tool_get' and len(a) == 1:
             self._use_tools = True
             return f"cryoTools[{self._expr(a[0])}]"

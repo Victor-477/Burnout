@@ -111,6 +111,95 @@ PROGRAMS = [
      ["5", "0", "4", "4", "10", "3", "4", "0", "0", "6"],
      ("pyro", "go", "node")),
 
+    # Roadmap 11.1 — module state. Before this, a function referring to a
+    # top-level variable failed with "undeclared variable", because top-level
+    # statements were lowered into main. The last three cases are the ones that
+    # actually broke during implementation: `+=` and `++` had their own write
+    # path that bypassed the module-state check, and a local of the same name
+    # must still shadow rather than clobber.
+    ("module_state",
+     'int[] items = [1, 2]; int hits = 0; string tag = "m"; '
+     'fn add(int v) ={ items.push(v); } '
+     'fn count() -> int ={ return len(items); } '
+     'fn bump() ={ hits += 2; hits++; } '
+     'fn shadow() -> int ={ int hits = 100; hits++; return hits; } '
+     'fn later_fn() -> int ={ return later; } '
+     'fn report() -> string ={ return tag + to_string(hits); } '
+     'int later = 42; '
+     'add(3); print(count()); bump(); print(hits); '
+     'print(shadow()); print(hits); print(later_fn()); print(report());',
+     ["3", "3", "101", "3", "42", "m3"],
+     ("pyro", "go", "node")),
+
+    # Roadmap 11.7 — filesystem natives. Writes under build/, which is already
+    # a generated directory, and removes the file it creates.
+    #
+    # The delete_file-on-a-directory case is here because it is a parity trap:
+    # Go's os.Remove drops an empty directory, MSVCRT's remove() refuses, and
+    # POSIX's removes it — one call meaning three things. It is now FILES ONLY
+    # everywhere, so this must print false.
+    ("filesystem",
+     'string d = "build/cli_fs_tmp"; '
+     'print(make_dir(d)); print(is_dir(d)); '
+     'print(write_file(d + "/x.txt", "abc")); '
+     'print(file_exists(d + "/x.txt")); print(file_size(d + "/x.txt")); '
+     'print(read_file(d + "/x.txt")); '
+     'print(len(list_dir(d))); '
+     'print(file_size(d + "/missing.txt")); '
+     'print(file_exists(d + "/missing.txt")); '
+     'print(delete_file(d)); '
+     'print(delete_file(d + "/x.txt")); print(file_exists(d + "/x.txt")); '
+     'print(len(env("CRYO_UNSET_VAR_XYZ")));',
+     ["true", "true", "true", "true", "3", "abc", "1", "-1", "false",
+      "false", "true", "false", "0"],
+     ("pyro", "go", "node", "c")),
+
+    # Roadmap 11.8 — durable writes. The point of write_file_atomic is the
+    # FAILURE path: a plain write truncates the target first, so a crash mid-
+    # write destroys the data. Here the second write targets a directory that
+    # does not exist; it must fail, leave the original contents intact, and
+    # leave no .tmp sibling behind.
+    ("atomic_write",
+     'string f = "build/cli_atomic.txt"; '
+     'print(write_file(f, "ORIGINAL")); '
+     'print(write_file_atomic(f, "REPLACED")); '
+     'print(read_file(f)); '
+     'print(write_file_atomic("build/no_such_dir_xyz/x.txt", "data")); '
+     'print(read_file(f)); '
+     'print(file_exists(f + ".tmp")); '
+     'print(delete_file(f));',
+     ["true", "true", "REPLACED", "false", "REPLACED", "false", "true"],
+     ("pyro",)),
+
+    # ISSUES/19 — a module with INTERNALS. Every line here failed before the
+    # fix: a pub function calling a pub sibling ("unknown function"), a pub
+    # function reading its own module's private state, and a private helper —
+    # all because an aliased import mangled each declaration's name but kept
+    # only the pub ones and never rewrote the module's own references.
+    #
+    # The library is written inline as a second file by the harness, so the
+    # case also exercises the import path itself.
+    ("module_internals",
+     'import "modlib_counter.cryo" as c; '
+     'print(c::total()); c::bump(); print(c::total()); '
+     'print(c::twice()); print(c::report());',
+     ["0", "1", "3", "hits=3"],
+     ("pyro", "go", "node")),
+
+    # 11.10 follow-up — url_decode/url_encode, added because the reference
+    # application had no way to read an escaped query value. Malformed escapes
+    # pass through unchanged rather than aborting: a server must not die on a
+    # bad request.
+    ("url_codec",
+     'print(url_decode("hello%20world")); print(url_decode("a+b")); '
+     'print(url_decode("100%25")); print(url_decode("bad%zz")); '
+     'print(url_encode("hello world")); print(url_encode("a&b=c")); '
+     'print(url_encode("safe-_.~")); '
+     'print(url_decode(url_encode("round trip & 100% ok")));',
+     ["hello world", "a b", "100%", "bad%zz",
+      "hello%20world", "a%26b%3Dc", "safe-_.~", "round trip & 100% ok"],
+     ("pyro",)),
+
     ("slices_string",
      'string s = "hello world"; '
      'print(s[0..5]); print(s[0..=4]); print(s[6..]); print(s[..5]); '
@@ -168,6 +257,29 @@ PROGRAMS = [
      'int big = 8000000000000; print(to_string(big)); print(to_string(to_string(big))); print(to_string(big) + "!");',
      ["8000000000000", "8000000000000", "8000000000000!"],
      ("pyro", "go", "node", "c")),
+
+    ("container_null_equality",
+     'map<string,string> m = {"a": "1"}; print(m == null); '
+     'map<string,string> e = {}; print(e == null); '
+     'int[] xs = [1]; print(xs == null); '
+     'print(null == null); '
+     'int? x = null; print(x == null); '
+     'int? y = 5; print(y == null); '
+     'int[] a1 = [1]; int[] a2 = [1]; print(a1 == a2); print(a1 == a1);',
+     ["false", "false", "false", "true", "true", "false", "false", "true"],
+     ("pyro", "go", "node")),
+
+    ("replace_empty_needle",
+     'print(replace("abc", "", "-")); print(replace("", "", "-"));',
+     ["-a-b-c-", "-"],
+     ("pyro", "go", "node", "c")),
+
+    ("struct_methods",
+     'struct Point { int x; int y; } '
+     'impl Point { fn sum() -> int ={ return this.x + this.y; } } '
+     'Point p = Point{ x: 10, y: 20 }; print(p.sum());',
+     ["30"],
+     ("pyro", "go", "node")),
 ]
 
 # backends that can RUN here (generation is always checked)
@@ -194,6 +306,19 @@ print(f"[cli] CLI path   go:{'y' if HAS_GO else 'n'} "
       f"node:{'y' if HAS_NODE else 'n'} cc:{'y' if HAS_CC else 'n'}")
 
 for tag, src, expected, backends in PROGRAMS:
+    # ISSUES/19 — this case imports a library, so write it beside the program.
+    if tag == "module_internals":
+        _lib_src = """int _count = 0;
+string _label = "hits";
+fn _format(int n) -> string ={ return _label + "=" + to_string(n); }
+pub fn bump() ={ _count = _count + 1; }
+pub fn total() -> int ={ return _count; }
+pub fn report() -> string ={ return _format(_count); }
+pub fn twice() -> int ={ bump(); bump(); return total(); }
+"""
+        with open(os.path.join(TMP, "modlib_counter.cryo"), "w",
+                  encoding="utf-8") as _lib:
+            _lib.write(_lib_src)
     cf = os.path.join(TMP, f"cli_{tag}.cryo")
     with open(cf, "w", encoding="utf-8") as fh:
         fh.write(src)
