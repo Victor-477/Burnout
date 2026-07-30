@@ -221,6 +221,7 @@ class TypeEnv:
                        # 11.17 — a stream handle is an int, its token a string
                        'llm_stream': 'int', 'llm_next': 'bool',
                        'llm_token': 'string', 'llm_close': 'bool',
+                       'llm_call': 'string[]',   # 11.19 [kind, text|detail]
                        'tools_json': 'string', 'tool_get': 'Tool',
                        'agent': 'string', 'index_of': 'int', 'count': 'int',
                        'pad_start': 'string', 'pad_end': 'string'}.get(node.callee)
@@ -727,16 +728,36 @@ class CodeGenGo:
                   "\treturn os.WriteFile(path, buf, 0644) == nil", "}", ""]
         if 'llm' in self._helpers:
             self._imports.update(('os', 'net/http', 'io', 'encoding/json', 'bytes', 'fmt', 'time'))
-            H += ["// cryoLLMPost: POST of payload to CRYO_LLM_URL with 3 retries.",
-                  "// timeoutMs > 0 bounds each attempt (roadmap 11.16).",
-                  "func cryoLLMPost(payload map[string]any, timeoutMs int64) string {",
+            self._imports.add('strconv')
+            H += ["// cryoLLMPost: POST to CRYO_LLM_URL. Returns (text, kind,",
+                  "// detail); kind is \"\" on success (roadmap 11.19).",
+                  "//",
+                  "// It used to retry three times with no pause and no",
+                  "// discrimination — including on 400 and 401, which cannot",
+                  "// improve by being asked again — and returned \"\" for every",
+                  "// failure, indistinguishable from an empty completion.",
+                  "func cryoLLMPost(payload map[string]any, timeoutMs int64, retries int) (string, string, string) {",
                   '\tcryoSandboxGuard("llm/agent")',
                   '\turl := os.Getenv("CRYO_LLM_URL")',
                   '\tif url == "" {',
                   '\t\tfmt.Fprintln(os.Stderr, "[Cryo LLM] CRYO_LLM_URL undefined; returning empty")',
-                  '\t\treturn ""', "\t}",
+                  '\t\treturn "", "no_endpoint", "CRYO_LLM_URL is not set"', "\t}",
                   "\tbody, _ := json.Marshal(payload)",
-                  "\tfor attempt := 0; attempt < 3; attempt++ {",
+                  "\tif retries < 0 { retries = 0 }",
+                  '\tkind, detail := "transport", "no attempt was made"',
+                  "\tfor attempt := 0; attempt <= retries; attempt++ {",
+                  "\t\tif attempt > 0 {",
+                  "\t\t\t// Exponential: 200ms, 400ms, 800ms… capped at 8s. A",
+                  "\t\t\t// rate limit answered immediately is just a second",
+                  "\t\t\t// rate limit.",
+                  "\t\t\twait := time.Duration(200<<uint(attempt-1)) * time.Millisecond",
+                  "\t\t\tif wait > 8*time.Second { wait = 8 * time.Second }",
+                  "\t\t\tif cryoRetryAfter > 0 {",
+                  "\t\t\t\twait = time.Duration(cryoRetryAfter) * time.Second",
+                  "\t\t\t\tcryoRetryAfter = 0",
+                  "\t\t\t}",
+                  "\t\t\ttime.Sleep(wait)",
+                  "\t\t}",
                   '\t\treq, _ := http.NewRequest("POST", url, bytes.NewReader(body))',
                   '\t\treq.Header.Set("Content-Type", "application/json")',
                   '\t\tif key := os.Getenv("CRYO_LLM_KEY"); key != "" {',
@@ -746,12 +767,42 @@ class CodeGenGo:
                   "\t\t\tclient = &http.Client{Timeout: time.Duration(timeoutMs) * time.Millisecond}",
                   "\t\t}",
                   "\t\tresp, err := client.Do(req)",
-                  "\t\tif err != nil { continue }",
+                  "\t\tif err != nil {",
+                  '\t\t\tkind, detail = "transport", err.Error()',
+                  '\t\t\tif strings.Contains(strings.ToLower(err.Error()), "timeout") ||',
+                  '\t\t\t\tstrings.Contains(strings.ToLower(err.Error()), "deadline") {',
+                  '\t\t\t\tkind = "timeout"', "\t\t\t}",
+                  "\t\t\tcontinue", "\t\t}",
                   "\t\tout, _ := io.ReadAll(resp.Body)",
+                  '\t\tra := resp.Header.Get("Retry-After")',
                   "\t\tresp.Body.Close()",
-                  "\t\tif resp.StatusCode < 300 { return string(out) }",
+                  '\t\tif resp.StatusCode < 300 { return string(out), "", "" }',
+                  "\t\tdetail = fmt.Sprintf(\"HTTP %d: %s\", resp.StatusCode,",
+                  "\t\t\tstrings.TrimSpace(cryoClip(string(out), 200)))",
+                  "\t\tswitch {",
+                  "\t\tcase resp.StatusCode == 429:",
+                  '\t\t\tkind = "rate_limited"',
+                  "\t\t\tif n, e := strconv.Atoi(strings.TrimSpace(ra)); e == nil && n > 0 {",
+                  "\t\t\t\tcryoRetryAfter = n", "\t\t\t}",
+                  "\t\tcase resp.StatusCode == 408:",
+                  '\t\t\tkind = "timeout"',
+                  "\t\tcase resp.StatusCode >= 500:",
+                  '\t\t\tkind = "server_error"',
+                  "\t\tdefault:",
+                  "\t\t\t// 400, 401, 403, 404 … asking again changes nothing,",
+                  "\t\t\t// and each retry costs the caller real time.",
+                  '\t\t\tkind = "refused"',
+                  "\t\t\treturn string(out), kind, detail",
+                  "\t\t}",
                   "\t}",
-                  '\treturn ""', "}", "",
+                  '\treturn "", kind, detail', "}",
+                  "",
+                  "// Honoured once, on the next attempt, when a 429 supplies it.",
+                  "var cryoRetryAfter int",
+                  "",
+                  "func cryoClip(s string, n int) string {",
+                  '\tif len(s) <= n { return s }',
+                  '\treturn s[:n] + "…"', "}", "",
                   "// cryoLLM: contrato POST {model, prompt, schema?} -> corpo JSON.",
                   "func cryoLLM(model, prompt, schema string, opts map[string]any) string {",
                   '\tpayload := map[string]any{"model": model, "prompt": prompt}',
@@ -760,10 +811,13 @@ class CodeGenGo:
                   '\t\tif json.Unmarshal([]byte(schema), &sc) == nil { payload["schema"] = sc }',
                   "\t}",
                   "\t// 11.16 — generation controls ride in the same payload;",
-                  "\t// timeout is ours, not the provider's, so it is removed.",
+                  "\t// timeout, repair and retries are ours, not the",
+                  "\t// provider's, so they are consumed here.",
                   "\tvar timeoutMs int64",
+                  "\tretries := 2",
                   "\tfor k, v := range opts {",
-                  '\t\tif k == "repair" { continue }',
+                  '		if k == "repair" { continue }',
+                  '\t\tif k == "retries" { retries = cryoOptInt(v); continue }',
                   '\t\tif k == "timeout" {',
                   "\t\t\tswitch n := v.(type) {",
                   "\t\t\tcase int64: timeoutMs = n",
@@ -772,7 +826,45 @@ class CodeGenGo:
                   "\t\t\t}",
                   "\t\t\tcontinue", "\t\t}",
                   "\t\tpayload[k] = v", "\t}",
-                  "\treturn cryoLLMPost(payload, timeoutMs)", "}", ""]
+                  "\ttext, _, _ := cryoLLMPost(payload, timeoutMs, retries)",
+                  "\treturn text", "}",
+                  "",
+                  "// Options arrive as any; accept whichever numeric shape.",
+                  "func cryoOptInt(v any) int {",
+                  "\tswitch n := v.(type) {",
+                  "\tcase int64: return int(n)",
+                  "\tcase int: return n",
+                  "\tcase float64: return int(n)",
+                  "\t}",
+                  "\treturn 0", "}",
+                  "",
+                  "// cryoLLMCall: the same request, but the outcome is a VALUE.",
+                  "// [0] is the failure kind (empty on success), [1] the text or",
+                  "// the detail. Returning it lets `llm_try` build a match-able",
+                  "// result with no global error state — which would race the",
+                  "// moment two calls ran under spawn (roadmap 11.19).",
+                  "func cryoLLMCall(model, prompt, schema string, opts map[string]any) []string {",
+                  '\tpayload := map[string]any{"model": model, "prompt": prompt}',
+                  '\tif schema != "" {',
+                  "\t\tvar sc any",
+                  '\t\tif json.Unmarshal([]byte(schema), &sc) == nil { payload["schema"] = sc }',
+                  "\t}",
+                  "\tvar timeoutMs int64",
+                  "\tretries := 2",
+                  "\tfor k, v := range opts {",
+                  '\t\tif k == "repair" { continue }',
+                  '\t\tif k == "retries" { retries = cryoOptInt(v); continue }',
+                  '\t\tif k == "timeout" {',
+                  "\t\t\tswitch n := v.(type) {",
+                  "\t\t\tcase int64: timeoutMs = n",
+                  "\t\t\tcase int: timeoutMs = int64(n)",
+                  "\t\t\tcase float64: timeoutMs = int64(n)",
+                  "\t\t\t}",
+                  "\t\t\tcontinue", "\t\t}",
+                  "\t\tpayload[k] = v", "\t}",
+                  "\ttext, kind, detail := cryoLLMPost(payload, timeoutMs, retries)",
+                  '\tif kind == "" { return []string{"", text} }',
+                  "\treturn []string{kind, detail}", "}", ""]
         if 'llmtyped' in self._helpers:
             self._imports.update(('strings', 'math', 'fmt', 'os',
                                   'encoding/json'))
@@ -878,15 +970,7 @@ class CodeGenGo:
                   '\t\task = prompt + "\\n\\nYour previous reply could not be used: " +',
                   '\t\t\tproblem + ".\\nReply with JSON only — no prose, no code fences — " +',
                   '\t\t\t"matching this schema exactly:\\n" + schema',
-                  "\t}", "}",
-                  "",
-                  "func cryoOptInt(v any) int {",
-                  "\tswitch n := v.(type) {",
-                  "\tcase int64: return int(n)",
-                  "\tcase int: return n",
-                  "\tcase float64: return int(n)",
-                  "\t}",
-                  "\treturn 0", "}", ""]
+                  "\t}", "}", ""]
         if 'llmstream' in self._helpers:
             self._imports.update(('bufio', 'strings', 'sync'))
             H += ["// ── LLM streaming (roadmap 11.17) ──",
@@ -920,7 +1004,7 @@ class CodeGenGo:
                   '\tpayload := map[string]any{"model": model, "prompt": prompt, "stream": true}',
                   "\tvar timeoutMs int64",
                   "\tfor k, v := range opts {",
-                  '\t\tif k == "repair" { continue }',
+                  '		if k == "repair" { continue }',
                   '\t\tif k == "timeout" {',
                   "\t\t\tswitch n := v.(type) {",
                   "\t\t\tcase int64: timeoutMs = n",
@@ -1036,7 +1120,7 @@ class CodeGenGo:
                   "\tif maxSteps <= 0 { maxSteps = 8 }",
                   '\tmessages := []map[string]any{{"role": "user", "content": prompt}}',
                   "\tfor step := 0; step < maxSteps; step++ {",
-                  '\t\tresp := cryoLLMPost(map[string]any{"model": model, "messages": messages, "tools": tools}, 0)',
+                  '\t\tresp, _, _ := cryoLLMPost(map[string]any{"model": model, "messages": messages, "tools": tools}, 0, 2)',
                   "\t\tvar dec struct {",
                   "\t\t\tToolCall *struct {",
                   '\t\t\t\tName      string          `json:"name"`',
@@ -1762,9 +1846,17 @@ class CodeGenGo:
             return self._map_literal(node, None)
 
         if isinstance(node, StructInit):
-            fields = ', '.join(
-                f"{go_field(k)}: {self._expr(v)}" for k, v in node.fields)
-            return f"{gid(node.struct_name)}{{{fields}}}"
+            fields_code = []
+            for k, v in node.fields:
+                f_type = self.te.struct_field(node.struct_name, k)
+                if isinstance(v, ArrayLiteral):
+                    v_code = self._array_literal(v, f_type)
+                elif isinstance(v, MapLiteral):
+                    v_code = self._map_literal(v, f_type)
+                else:
+                    v_code = self._expr(v)
+                fields_code.append(f"{go_field(k)}: {v_code}")
+            return f"{gid(node.struct_name)}{{{', '.join(fields_code)}}}"
 
         if isinstance(node, CastExpr):
             return self._cast(node)
@@ -2238,6 +2330,13 @@ class CodeGenGo:
             prompt = self._expr(a[1]) if len(a) > 1 else '""'
             opts   = self._llm_opts(a[2] if len(a) > 2 else None)
             return f'cryoLLM({model}, {prompt}, "", {opts})'   # no schema (raw completion)
+        # ── 11.19: the outcome as a value ──
+        if c == 'llm_call':
+            self._helpers.update(('llm', 'sandbox'))
+            model  = self._expr(a[0]) if a else '""'
+            prompt = self._expr(a[1]) if len(a) > 1 else '""'
+            opts   = self._llm_opts(a[2] if len(a) > 2 else None)
+            return f'cryoLLMCall({model}, {prompt}, "", {opts})'
         # ── 11.17: streaming ──
         if c == 'llm_stream':
             self._helpers.update(('llmstream', 'sandbox'))

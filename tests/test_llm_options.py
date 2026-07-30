@@ -197,22 +197,31 @@ def test_structured(work, url):
 
 def test_timeout(work, url):
     print("\n── timeout bounds the request ──")
-    src = ('string r = llm("m", "hi", { "timeout": 300 });\n'
+    # retries: 0 keeps this about the timeout alone. 11.19 added retries with
+    # backoff, and a wall-clock bound over three attempts measures those plus
+    # process start-up plus the stub's own serialised sleeps — none of which
+    # is what this test is for.
+    src = ('string r = llm("m", "hi", { "timeout": 300, "retries": 0 });\n'
            'print("[" + r + "]");\n')
     rc, log, exe = build(src, work, 'to')
+    slow = ('string r = llm("m", "hi", { "retries": 0 });\n'
+            'print("[" + r + "]");\n')
+    rc2, log2, exe2 = build(slow, work, 'noto')
     check("a program with a timeout compiles", rc == 0, log[-250:])
-    if rc != 0:
+    if rc != 0 or rc2 != 0:
         return
     received.clear()
     delay_s[0] = 1.5                     # provider stalls past the 300ms budget
     started = time.time()
     out = run(exe, url, timeout=120)
-    elapsed = time.time() - started
+    bounded = time.time() - started
+    started = time.time()
+    run(exe2, url, timeout=120)
+    unbounded = time.time() - started
     delay_s[0] = 0.0
-    # Three retries are built in, so the wall clock is bounded by 3 x timeout
-    # plus process start-up — the point is that it does NOT wait 3 x 1.5s.
     check("the call gives up rather than waiting for the stalled provider",
-          elapsed < 4.0, f"took {elapsed:.1f}s, output {out!r}")
+          unbounded - bounded > 0.8,
+          f"bounded {bounded:.1f}s vs unbounded {unbounded:.1f}s")
     check("a timed-out call yields the empty string, not a crash",
           out == '[]', f"output {out!r}")
 

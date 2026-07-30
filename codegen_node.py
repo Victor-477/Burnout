@@ -45,6 +45,7 @@ def jsid(name: str) -> str:
 _UNSUPPORTED = {
     'llm', 'agent', 'tools', 'tools_json', 'tool_get', 'schema_of',
     'llm_stream', 'llm_next', 'llm_token', 'llm_close',   # 11.17 — go-only
+    'llm_call', 'llm_try',                                # 11.19 — go-only
     'http_get', 'http_post', 'sleep', 'skills', 'skill_get', 'skill_has',
     'skills_json', 'pyro_exec', 'pyro_env', 'pyro_args', 'pyro_time',
     'pyro_read', 'pyro_write', 'pyro_write_file', 'pyro_open', 'pyro_exit',
