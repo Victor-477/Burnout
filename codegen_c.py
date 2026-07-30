@@ -844,10 +844,24 @@ class CodeGenC:
         if callee == 'to_string':
             a = args[0]
             return self._to_str(self._expr(a), self.te.infer(a))
-        if callee == 'to_int':
-            return f"cryo_to_int({self._expr(args[0])})"
-        if callee == 'to_number':
-            return f"cryo_to_num({self._expr(args[0])})"
+        # to_int/to_number are typed conversions here, not one runtime call.
+        # cryo_to_num takes int64_t and cryo_to_int takes double, so passing an
+        # argument of the other kind used to convert SILENTLY through the
+        # parameter type: to_number(3.14159) truncated to 3.0, losing the
+        # fraction with nothing to indicate it. A string argument was worse —
+        # the pointer itself was read as a number — and the C runtime has no
+        # parse helper to call instead, so that one is refused rather than
+        # emitted wrong. (go emits float64()/int64() and never had this.)
+        if callee in ('to_int', 'to_number'):
+            at = self.te.infer(args[0])
+            inner = self._expr(args[0])
+            if at == 'string':
+                raise CodeGenError(
+                    f"'{callee}()' on a string is not supported in the C "
+                    f"backend; use --backend go, node or pyro.")
+            if callee == 'to_int':
+                return inner if at == 'int' else f"cryo_to_int({inner})"
+            return f"((double)({inner}))" if at == 'number' else f"cryo_to_num({inner})"
         if callee == 'len':
             a = args[0]
             t = self.te.infer(a)
