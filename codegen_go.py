@@ -273,6 +273,7 @@ class CodeGenGo:
         self._loop_depth = 0
         self._ntmp = 0                 # fresh temporaries (e.g.: '?' propagation)
         self._cur_fn_ret = 'void'
+        self._cur_fn_name = ''        # named in foreign-block diagnostics
         # ── Pyro layer: native skills and machine access ──
         self._skills: List[SkillDecl] = []
         self._use_skills = False
@@ -1162,6 +1163,8 @@ class CodeGenGo:
         ret_s = f" {ret}" if ret else ""
         prev_ret = self._cur_fn_ret
         self._cur_fn_ret = n.return_type or 'void'
+        prev_name = self._cur_fn_name
+        self._cur_fn_name = n.name
         self._emit(f"func {gid(n.name)}({params}){ret_s} {{")
         self.te.push()
         for pt, pn in n.params:
@@ -1174,6 +1177,7 @@ class CodeGenGo:
         self._emit("}")
         self._emit()
         self._cur_fn_ret = prev_ret
+        self._cur_fn_name = prev_name
 
     def _const(self, n: ConstDecl):
         self.te.set(n.name, n.var_type)
@@ -1557,11 +1561,25 @@ class CodeGenGo:
         self._emit("}()")
 
     def _foreign(self, n: ForeignBlock):
-        if n.lang.lower() == 'go':
+        lang = n.lang.lower()
+        if lang == 'go':
             self._emit("// -- [bloco Go] --")
             for line in n.code.strip().split('\n'):
                 self._emit(line.strip())
             self._emit("// -- [/bloco Go] --")
+        elif lang in ('html', 'css'):
+            # These used to become a lone comment, so a function whose entire
+            # body was a page fragment compiled to an empty function and the
+            # program silently produced nothing. Refusing and naming the
+            # backend that renders pages is the honest answer — go cannot
+            # return the text either, since the enclosing function is
+            # typically declared void.
+            raise CodeGenGoError(
+                f"'>{n.lang}(' blocks build a page and the Go backend does "
+                f"not render one — it would drop the block and leave "
+                f"'{self._cur_fn_name or 'this function'}' empty. Use "
+                f"--backend frontend (or --backend auto, which now picks it), "
+                f"adding --emit pyro if the page calls Cryo functions.")
         else:
             self._emit(f"// [Cryo] >{n.lang}< block omitted in Go backend "
                        f"(use print(...) or >Go( ... ))")
