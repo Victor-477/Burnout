@@ -424,7 +424,13 @@ _po = gen_go('bool ok = pyro_open("build/x.html");')
 check("go pyro_open chama helper", "cryoOpen(" in _po)
 check("go pyro_open emits cryoOpen + start", "func cryoOpen(target string) bool {" in _po
       and 'exec.Command("cmd", "/c", "start"' in _po and 'exec.Command("xdg-open"' in _po)
-check("go dispatcher cryoToolCall", "func cryoToolCall(name, args string) string {" in g)
+# 11.20 — the dispatcher takes the raw arguments (they may arrive as a
+# JSON-encoded string) and returns via a named result so a panicking tool can
+# be recovered into an error value.
+check("go dispatcher cryoToolCall",
+      "func cryoToolCall(name, rawArgs string) (out string) {" in g)
+check("go dispatcher unwraps string-encoded arguments", "cryoToolArgs(" in g)
+check("go dispatcher reports a failing tool as a value", "cryoToolErr(" in g)
 check("go dispatcher chama a tool real", "buscar(_a.Sku)" in g)
 check("go dispatcher desempacota args", 'Sku string `json:"sku"`' in g)
 check("go dispatcher with retorno struct", "json.Marshal(_r)" in gen_go(

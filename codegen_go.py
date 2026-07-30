@@ -222,6 +222,7 @@ class TypeEnv:
                        'llm_stream': 'int', 'llm_next': 'bool',
                        'llm_token': 'string', 'llm_close': 'bool',
                        'llm_call': 'string[]',   # 11.19 [kind, text|detail]
+                       'agent_call': 'string[]',  # 11.20
                        'tools_json': 'string', 'tool_get': 'Tool',
                        'agent': 'string', 'index_of': 'int', 'count': 'int',
                        'pad_start': 'string', 'pad_end': 'string'}.get(node.callee)
@@ -1105,11 +1106,22 @@ class CodeGenGo:
                   '\tif st == nil { return "" }',
                   "\treturn st.cur", "}", ""]
         if 'agent' in self._helpers:
-            # agent loop: LLM requests tool -> runtime executes -> returns -> repeats
-            # 'only' filters the exposed tools; maxSteps limits iterations.
-            H += ["// cryoAgent: tool-calling loop. POST contract",
-                  "// {model, messages, tools} -> {\"tool_call\":{name,arguments}} | {\"content\":...}.",
-                  "func cryoAgent(model, prompt string, only []string, maxSteps int) string {",
+            self._imports.update(('sync', 'fmt', 'os'))
+            H += ["// ── agent loop (roadmap 11.20) ──",
+                  "// Contract: POST {model, messages, tools} ->",
+                  "//   {\"tool_call\": {name, arguments}}      one call",
+                  "//   {\"tool_calls\": [{name, arguments}…]}  several, run together",
+                  "//   {\"content\": \"…\"}                      the answer",
+                  "type cryoToolReq struct {",
+                  '\tName      string          `json:"name"`',
+                  '\tArguments json.RawMessage `json:"arguments"`',
+                  "}",
+                  "",
+                  "// cryoAgentCall: [kind, text|detail]; kind is \"\" on success.",
+                  "// The step budget used to end with return \"\", which is also",
+                  "// what an empty answer looks like — a long run that hit the",
+                  "// ceiling was indistinguishable from one that finished.",
+                  "func cryoAgentCall(model, prompt string, only []string, maxSteps, maxContext int) []string {",
                   "\ttools := cryoToolList()",
                   "\tif len(only) > 0 {",
                   "\t\tset := map[string]bool{}",
@@ -1118,25 +1130,76 @@ class CodeGenGo:
                   "\t\tfor _, t := range tools { if set[t.Name] { f = append(f, t) } }",
                   "\t\ttools = f", "\t}",
                   "\tif maxSteps <= 0 { maxSteps = 8 }",
+                  "\tif maxContext <= 0 { maxContext = 24000 }",
                   '\tmessages := []map[string]any{{"role": "user", "content": prompt}}',
                   "\tfor step := 0; step < maxSteps; step++ {",
-                  '\t\tresp, _, _ := cryoLLMPost(map[string]any{"model": model, "messages": messages, "tools": tools}, 0, 2)',
+                  "\t\tmessages = cryoTrimContext(messages, maxContext)",
+                  '\t\tresp, kind, detail := cryoLLMPost(map[string]any{"model": model, "messages": messages, "tools": tools}, 0, 2)',
+                  '\t\tif kind != "" { return []string{kind, detail} }',
                   "\t\tvar dec struct {",
-                  "\t\t\tToolCall *struct {",
-                  '\t\t\t\tName      string          `json:"name"`',
-                  '\t\t\t\tArguments json.RawMessage `json:"arguments"`',
-                  '\t\t\t} `json:"tool_call"`',
-                  '\t\t\tContent string `json:"content"`',
+                  '\t\t\tToolCall  *cryoToolReq  `json:"tool_call"`',
+                  '\t\t\tToolCalls []cryoToolReq `json:"tool_calls"`',
+                  '\t\t\tContent   string        `json:"content"`',
                   "\t\t}",
-                  "\t\tjson.Unmarshal([]byte(resp), &dec)",
-                  "\t\tif dec.ToolCall == nil {",
-                  "\t\t\treturn dec.Content", "\t\t}",
-                  "\t\tresult := cryoToolCall(dec.ToolCall.Name, string(dec.ToolCall.Arguments))",
-                  "\t\tmessages = append(messages,",
-                  '\t\t\tmap[string]any{"role": "assistant", "tool_call": dec.ToolCall},',
-                  '\t\t\tmap[string]any{"role": "tool", "name": dec.ToolCall.Name, "content": result})',
+                  "\t\tif err := json.Unmarshal([]byte(resp), &dec); err != nil {",
+                  '\t\t\treturn []string{"bad_reply", "the agent reply is not valid JSON (" + err.Error() + ")"}',
+                  "\t\t}",
+                  "\t\tcalls := dec.ToolCalls",
+                  "\t\tif dec.ToolCall != nil { calls = append([]cryoToolReq{*dec.ToolCall}, calls...) }",
+                  "\t\tif len(calls) == 0 {",
+                  '\t\t\treturn []string{"", dec.Content}', "\t\t}",
+                  "\t\t// Several tools in one step run TOGETHER: they are",
+                  "\t\t// independent by construction — the model asked for them",
+                  "\t\t// without seeing any of their results — so serialising",
+                  "\t\t// them only adds latency.",
+                  "\t\tresults := make([]string, len(calls))",
+                  "\t\tif len(calls) == 1 {",
+                  "\t\t\tresults[0] = cryoToolCall(calls[0].Name, string(calls[0].Arguments))",
+                  "\t\t} else {",
+                  "\t\t\tvar wg sync.WaitGroup",
+                  "\t\t\tfor i, c := range calls {",
+                  "\t\t\t\twg.Add(1)",
+                  "\t\t\t\tgo func(i int, c cryoToolReq) {",
+                  "\t\t\t\t\tdefer wg.Done()",
+                  "\t\t\t\t\tresults[i] = cryoToolCall(c.Name, string(c.Arguments))",
+                  "\t\t\t\t}(i, c)",
+                  "\t\t\t}",
+                  "\t\t\twg.Wait()",
+                  "\t\t}",
+                  "\t\tfor i, c := range calls {",
+                  "\t\t\tmessages = append(messages,",
+                  '\t\t\t\tmap[string]any{"role": "assistant", "tool_call": c},',
+                  '\t\t\t\tmap[string]any{"role": "tool", "name": c.Name, "content": results[i]})',
+                  "\t\t}",
                   "\t}",
-                  '\treturn ""', "}", ""]
+                  '\treturn []string{"step_budget",',
+                  '\t\tfmt.Sprintf("the agent used all %d steps without reaching an answer", maxSteps)}',
+                  "}",
+                  "",
+                  "// cryoTrimContext: keep the conversation under a character",
+                  "// budget by dropping the OLDEST tool exchanges. The first",
+                  "// message is the task and is never dropped — losing it leaves",
+                  "// the model working on a question it can no longer see.",
+                  "func cryoTrimContext(messages []map[string]any, maxContext int) []map[string]any {",
+                  "\tsize := func(ms []map[string]any) int {",
+                  "\t\tb, _ := json.Marshal(ms)",
+                  "\t\treturn len(b)",
+                  "\t}",
+                  "\tif size(messages) <= maxContext { return messages }",
+                  "\tdropped := 0",
+                  "\tfor len(messages) > 3 && size(messages) > maxContext {",
+                  "\t\tmessages = append(messages[:1], messages[3:]...)   // a call+result pair",
+                  "\t\tdropped += 2",
+                  "\t}",
+                  "\tif dropped > 0 {",
+                  '\t\tfmt.Fprintf(os.Stderr, "[Cryo agent] context over %d bytes: dropped the %d oldest tool messages\\n", maxContext, dropped)',
+                  "\t}",
+                  "\treturn messages", "}",
+                  "",
+                  "func cryoAgent(model, prompt string, only []string, maxSteps int) string {",
+                  "\tr := cryoAgentCall(model, prompt, only, maxSteps, 0)",
+                  '\tif r[0] != "" { return "" }',
+                  "\treturn r[1]", "}", ""]
         if 'open' in self._helpers:
             self._imports.update(('os/exec', 'runtime'))
             H += ["// cryoOpen: opens a file/URL in the OS default app (browser).",
@@ -1271,6 +1334,8 @@ class CodeGenGo:
 
     def _tool_defs(self) -> List[str]:
         """Tool type + global registry + introspection helpers."""
+        # cryoToolArgs/cryoToolErr need these
+        self._imports.update(('strings', 'fmt', 'encoding/json'))
         D = ["// [PYRO] LLM Tools — schema derived from function signature",
              "type Tool struct {",
              '\tName       string `json:"name"`',
@@ -1294,7 +1359,39 @@ class CodeGenGo:
         # dispatcher: receives (name, argsJSON) -> calls real tool -> result
         self._imports.add('encoding/json')
         D += ["// cryoToolCall: executes the 'name' tool with JSON arguments and returns the result.",
-              "func cryoToolCall(name, args string) string {",
+              "// cryoToolErr: a failed tool is a RESULT, not the end of the",
+              "// loop (roadmap 11.20). The model reads it and can correct",
+              "// itself; aborting would throw away the whole run over one bad",
+              "// argument.",
+              "func cryoToolErr(msg string) string {",
+              '\tb, _ := json.Marshal(map[string]string{"error": msg})',
+              "\treturn string(b)",
+              "}",
+              "",
+              "// cryoToolArgs: `arguments` is an object in some providers and",
+              "// a JSON-ENCODED STRING in others (OpenAI sends",
+              '//   "arguments": "{\\"a\\":1}"',
+              "// ). Only the object form ever parsed here, and the error was",
+              "// discarded — so with the string form every tool ran on zero",
+              "// arguments and reported a confident answer about nothing.",
+              "func cryoToolArgs(raw string) string {",
+              "\tt := strings.TrimSpace(raw)",
+              '\tif strings.HasPrefix(t, "\\"") {',
+              "\t\tvar s string",
+              "\t\tif json.Unmarshal([]byte(t), &s) == nil { return s }",
+              "\t}",
+              "\treturn t", "}",
+              "",
+              "func cryoToolCall(name, rawArgs string) (out string) {",
+              "\targs := cryoToolArgs(rawArgs)",
+              "\t// A tool is ordinary Cryo code and can abort — a division by",
+              "\t// zero, an index out of range. Without this the agent loop",
+              "\t// dies with it and everything done so far is lost.",
+              "\tdefer func() {",
+              "\t\tif r := recover(); r != nil {",
+              '\t\t\tout = cryoToolErr(fmt.Sprintf("tool %q failed: %v", name, r))',
+              "\t\t}",
+              "\t}()",
               "\tswitch name {"]
         for fn in self._tools:
             D.append(f"\tcase {self._go_string(fn.name)}:")
@@ -1302,7 +1399,12 @@ class CodeGenGo:
             fields = '; '.join(
                 f'{go_field(pn)} {go_type(pt)} `json:"{pn}"`' for pt, pn in fn.params)
             D.append(f"\t\tvar _a struct {{ {fields} }}")
-            D.append("\t\tjson.Unmarshal([]byte(args), &_a)")
+            # The error used to be discarded, so arguments the model got wrong
+            # silently became zero values and the tool ran on them.
+            D.append("\t\tif _e := json.Unmarshal([]byte(args), &_a); _e != nil {")
+            D.append('\t\t\treturn cryoToolErr("could not read the arguments for '
+                     + fn.name + ': " + _e.Error())')
+            D.append("\t\t}")
             call_args = ', '.join(f"_a.{go_field(pn)}" for _pt, pn in fn.params)
             if fn.return_type and fn.return_type != 'void':
                 D.append(f"\t\t_r := {gid(fn.name)}({call_args})")
@@ -1311,7 +1413,10 @@ class CodeGenGo:
             else:
                 D.append(f"\t\t{gid(fn.name)}({call_args})")
                 D.append('\t\treturn "null"')
-        D += ["\t}", '\treturn ""', "}", ""]
+        # An unknown name returned "", which reads to the model as a tool that
+        # ran and produced nothing.
+        D += ["\t}",
+              '\treturn cryoToolErr("unknown tool: " + name)', "}", ""]
         return D
 
     # ── declarations ─────────────────────────────────────────
@@ -2335,6 +2440,26 @@ class CodeGenGo:
             prompt = self._expr(a[1]) if len(a) > 1 else '""'
             opts   = self._llm_opts(a[2] if len(a) > 2 else None)
             return f'cryoLLM({model}, {prompt}, "", {opts})'   # no schema (raw completion)
+        # ── 11.20: the agent outcome as a value ──
+        if c == 'agent_call':
+            self._use_tools = True
+            self._helpers.update(('llm', 'sandbox', 'agent'))
+            model  = self._expr(a[0]) if a else '""'
+            prompt = self._expr(a[1]) if len(a) > 1 else '""'
+            only, steps, ctx = "[]string{}", "0", "0"
+            if len(a) > 2 and isinstance(a[2], MapLiteral):
+                for k, v in a[2].pairs:
+                    key = k.value if isinstance(k, Literal) else getattr(k, 'name', '')
+                    if key == 'tools' and isinstance(v, ArrayLiteral):
+                        elems = ', '.join(self._expr(e) for e in v.elements)
+                        only = f"[]string{{{elems}}}"
+                    elif key == 'tools':
+                        only = self._expr(v)
+                    elif key == 'steps':
+                        steps = f"int({self._expr(v)})"
+                    elif key == 'max_context':
+                        ctx = f"int({self._expr(v)})"
+            return f'cryoAgentCall({model}, {prompt}, {only}, {steps}, {ctx})'
         # ── 11.19: the outcome as a value ──
         if c == 'llm_call':
             self._helpers.update(('llm', 'sandbox'))
