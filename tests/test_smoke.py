@@ -394,7 +394,8 @@ print("[phase3] llm structured output")
 g = gen_go('schema F { string name; } F f = llm("m", "p") as F; print(f.name);')
 check("go llm...as T -> cryoLLM + Unmarshal", "cryoLLM(" in g and "json.Unmarshal" in g)
 check("go llm...as T passes o schema", '\\"name\\"' in g)
-check("go llm raw", 'cryoLLM("m", "p", "")' in gen_go('string r = llm("m", "p"); print(r);'))
+# 11.16 added the generation-options argument; with no options it is nil.
+check("go llm raw", 'cryoLLM("m", "p", "", nil)' in gen_go('string r = llm("m", "p"); print(r);'))
 
 print("[phase3] tools")
 g = gen_go('tool fn buscar(string sku) -> number ={ return 1.0; } print(tools_json());')

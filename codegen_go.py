@@ -642,9 +642,10 @@ class CodeGenGo:
                   "\tfor i, v := range data { buf[i] = byte(v & 0xFF) }",
                   "\treturn os.WriteFile(path, buf, 0644) == nil", "}", ""]
         if 'llm' in self._helpers:
-            self._imports.update(('os', 'net/http', 'io', 'encoding/json', 'bytes', 'fmt'))
+            self._imports.update(('os', 'net/http', 'io', 'encoding/json', 'bytes', 'fmt', 'time'))
             H += ["// cryoLLMPost: POST of payload to CRYO_LLM_URL with 3 retries.",
-                  "func cryoLLMPost(payload map[string]any) string {",
+                  "// timeoutMs > 0 bounds each attempt (roadmap 11.16).",
+                  "func cryoLLMPost(payload map[string]any, timeoutMs int64) string {",
                   '\tcryoSandboxGuard("llm/agent")',
                   '\turl := os.Getenv("CRYO_LLM_URL")',
                   '\tif url == "" {',
@@ -656,7 +657,11 @@ class CodeGenGo:
                   '\t\treq.Header.Set("Content-Type", "application/json")',
                   '\t\tif key := os.Getenv("CRYO_LLM_KEY"); key != "" {',
                   '\t\t\treq.Header.Set("Authorization", "Bearer "+key)', "\t\t}",
-                  "\t\tresp, err := http.DefaultClient.Do(req)",
+                  "\t\tclient := http.DefaultClient",
+                  "\t\tif timeoutMs > 0 {",
+                  "\t\t\tclient = &http.Client{Timeout: time.Duration(timeoutMs) * time.Millisecond}",
+                  "\t\t}",
+                  "\t\tresp, err := client.Do(req)",
                   "\t\tif err != nil { continue }",
                   "\t\tout, _ := io.ReadAll(resp.Body)",
                   "\t\tresp.Body.Close()",
@@ -664,13 +669,25 @@ class CodeGenGo:
                   "\t}",
                   '\treturn ""', "}", "",
                   "// cryoLLM: contrato POST {model, prompt, schema?} -> corpo JSON.",
-                  "func cryoLLM(model, prompt, schema string) string {",
+                  "func cryoLLM(model, prompt, schema string, opts map[string]any) string {",
                   '\tpayload := map[string]any{"model": model, "prompt": prompt}',
                   '\tif schema != "" {',
                   "\t\tvar sc any",
                   '\t\tif json.Unmarshal([]byte(schema), &sc) == nil { payload["schema"] = sc }',
                   "\t}",
-                  "\treturn cryoLLMPost(payload)", "}", ""]
+                  "\t// 11.16 — generation controls ride in the same payload;",
+                  "\t// timeout is ours, not the provider's, so it is removed.",
+                  "\tvar timeoutMs int64",
+                  "\tfor k, v := range opts {",
+                  '\t\tif k == "timeout" {',
+                  "\t\t\tswitch n := v.(type) {",
+                  "\t\t\tcase int64: timeoutMs = n",
+                  "\t\t\tcase int: timeoutMs = int64(n)",
+                  "\t\t\tcase float64: timeoutMs = int64(n)",
+                  "\t\t\t}",
+                  "\t\t\tcontinue", "\t\t}",
+                  "\t\tpayload[k] = v", "\t}",
+                  "\treturn cryoLLMPost(payload, timeoutMs)", "}", ""]
         if 'agent' in self._helpers:
             # agent loop: LLM requests tool -> runtime executes -> returns -> repeats
             # 'only' filters the exposed tools; maxSteps limits iterations.
@@ -687,7 +704,7 @@ class CodeGenGo:
                   "\tif maxSteps <= 0 { maxSteps = 8 }",
                   '\tmessages := []map[string]any{{"role": "user", "content": prompt}}',
                   "\tfor step := 0; step < maxSteps; step++ {",
-                  '\t\tresp := cryoLLMPost(map[string]any{"model": model, "messages": messages, "tools": tools})',
+                  '\t\tresp := cryoLLMPost(map[string]any{"model": model, "messages": messages, "tools": tools}, 0)',
                   "\t\tvar dec struct {",
                   "\t\t\tToolCall *struct {",
                   '\t\t\t\tName      string          `json:"name"`',
@@ -1486,8 +1503,9 @@ class CodeGenGo:
             model = self._expr(inner.args[0]) if inner.args else '""'
             prompt = self._expr(inner.args[1]) if len(inner.args) > 1 else '""'
             schema = self._json_schema(target)
+            opts = self._llm_opts(inner.args[2] if len(inner.args) > 2 else None)
             return (f"func() {gt} {{ var _v {gt}; "
-                    f"_ = json.Unmarshal([]byte(cryoLLM({model}, {prompt}, {schema})), &_v); "
+                    f"_ = json.Unmarshal([]byte(cryoLLM({model}, {prompt}, {schema}, {opts})), &_v); "
                     f"return _v }}()")
         # numeric conversions
         if target in ('int', 'number'):
@@ -1554,6 +1572,25 @@ class CodeGenGo:
             self._helpers.add('imod'); return f"cryoIModChk({l}, {r})"
 
         return f"({l} {op} {r})"
+
+    def _llm_opts(self, node) -> str:
+        """The generation-options argument of llm() as a Go map (11.16).
+
+        Built here rather than by _expr on the map literal, because that infers
+        one element type from the first value — and these options are a mix of
+        float, int and string by nature, so `map[string]any` is the only shape
+        that holds them. The parser has already checked the names and the
+        literal kinds; values may be arbitrary expressions.
+        """
+        if node is None:
+            return "nil"
+        if not isinstance(node, MapLiteral):
+            return "nil"
+        parts = []
+        for k, v in node.pairs:
+            key = k.value if isinstance(k, Literal) else getattr(k, 'name', '')
+            parts.append(f'"{key}": {self._expr(v)}')
+        return "map[string]any{" + ", ".join(parts) + "}"
 
     def _ternary(self, node: TernaryExpr) -> str:
         # Go has no ?:; uses IIFE with inferred type (lazy evaluation)
@@ -1839,10 +1876,12 @@ class CodeGenGo:
             self._helpers.update(('llm', 'sandbox'))
             model  = self._expr(a[0]) if a else '""'
             prompt = self._expr(a[1]) if len(a) > 1 else '""'
-            return f'cryoLLM({model}, {prompt}, "")'   # without schema (raw completion)
+            opts   = self._llm_opts(a[2] if len(a) > 2 else None)
+            return f'cryoLLM({model}, {prompt}, "", {opts})'   # no schema (raw completion)
         if c == 'tools':
             self._use_tools = True
             return "cryoToolNames()"
+        # (see _llm_opts below for the generation-controls argument)
         if c == 'tool_get' and len(a) == 1:
             self._use_tools = True
             return f"cryoTools[{self._expr(a[0])}]"
