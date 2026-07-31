@@ -38,6 +38,7 @@ from security    import audit_ast,  format_audit      # CRYO
 from foreign     import verify as verify_foreign, ForeignError   # CRYO
 from backends     import select_backend, missing_capabilities   # CRYO
 from modules      import resolve_modules, ModuleError           # CRYO
+import modules                                                  # CRYO (11.23 cache hooks)
 from semantic     import check as semantic_check, SemanticError  # CRYO
 from generics     import monomorphize                             # CRYO
 from traits       import lower_traits                             # CRYO
@@ -92,9 +93,91 @@ def default_abi() -> str:
 def compile_source(source: str, backend: str, safe: bool,
                    abi: str = 'sysv', base_dir: str | None = None,
                    optimize: bool = True, sandbox: bool = False,
-                   emit: str = 'html', assets: dict | None = None):
+                   emit: str = 'html', assets: dict | None = None,
+                   use_cache: bool = True):
     """Returns str (go/c/asm/frontend) or bytes (pyro/wasm = binary)."""
+    # ── 11.23: incremental compilation ──────────────────────
+    # The artifact key needs every input, and the imports are only known after
+    # module resolution — so the sources are collected while parsing and the
+    # cache is consulted once they are all in hand. The parse cache pays for
+    # itself on that first pass; the artifact cache skips everything after it.
+    import cache as _cache
+    settings = {'backend': backend, 'safe': safe, 'abi': abi,
+                'optimize': optimize, 'sandbox': sandbox, 'emit': emit,
+                'assets': sorted(assets) if assets else None}
+    art = _cache.ArtifactCache(enabled=use_cache)
+    read: list = []
+    if use_cache:
+        modules.PARSE_CACHE = _cache.ParseCache(enabled=True)
+        modules.READ_SOURCES = read
+    else:
+        modules.PARSE_CACHE = None
+        modules.READ_SOURCES = None
+    read.append(('<entry>', source))
+
     ast = load_ast(source, base_dir)
+    modules.PARSE_CACHE = None
+    modules.READ_SOURCES = None
+
+    key = art.key(read, settings) if use_cache else None
+    if key is not None:
+        hit = art.get(key)
+        if hit is not None:
+            data, warnings = hit
+            # Replay whatever the original compilation printed. Compiling is
+            # not a pure function, and a build that is fast but silent about a
+            # problem the first one reported is a worse build.
+            if warnings:
+                sys.stderr.write(warnings)
+            # Text backends are stored as bytes and handed back as text, so a
+            # cached build is indistinguishable from a fresh one.
+            return data if backend in ('pyro', 'wasm') else data.decode('utf-8')
+
+    # Capture diagnostics so they can be replayed on a later hit.
+    if key is not None:
+        buf = io.StringIO()
+        real_err = sys.stderr
+        sys.stderr = _Tee(real_err, buf)
+        try:
+            out = _compile_resolved(ast, backend, safe, abi, optimize, sandbox,
+                                    emit, assets)
+        finally:
+            sys.stderr = real_err
+        art.put(key, out if isinstance(out, bytes) else out.encode('utf-8'),
+                buf.getvalue())
+        return out
+
+    return _compile_resolved(ast, backend, safe, abi, optimize, sandbox,
+                             emit, assets)
+
+
+class _Tee:
+    """Writes to both streams: the user still sees a warning as it happens,
+    and the cache keeps a copy to replay next time."""
+
+    def __init__(self, *streams):
+        self._streams = streams
+
+    def write(self, s):
+        for st in self._streams:
+            st.write(s)
+        return len(s)
+
+    def flush(self):
+        for st in self._streams:
+            try:
+                st.flush()
+            except Exception:
+                pass
+
+    def __getattr__(self, name):
+        return getattr(self._streams[0], name)
+
+
+def _compile_resolved(ast, backend: str, safe: bool, abi: str,
+                      optimize: bool, sandbox: bool, emit: str, assets):
+    """Everything after module resolution. Split out so the artifact cache can
+    skip all of it — that is the 72% the profile showed."""
     ast = monomorphize(ast)
     ast = lower_traits(ast)
     semantic_check(ast)   # variable/function/arity/break — before optimising,
@@ -202,6 +285,7 @@ def compile_file(input_path: str,
                  strict: bool = False,
                  sandbox: bool = False,
                  optimize: bool = True,
+                 use_cache: bool = True,
                  emit_only: bool = False,
                  emit: str = 'html',
                  assets: dict | None = None,
@@ -284,7 +368,7 @@ def compile_file(input_path: str,
     try:
         code = compile_source(source, backend, safe, abi, base_dir=base_dir,
                               optimize=optimize, sandbox=sandbox, emit=emit,
-                              assets=assets)
+                              assets=assets, use_cache=use_cache)
     except (CodeGenError, CodeGenGoError, CodeGenAsmError,
             CodeGenPyroError, CodeGenNodeError) as e:
         # safety net: if auto chose a backend that failed,
@@ -295,7 +379,7 @@ def compile_file(input_path: str,
             backend = 'go'
             code = compile_source(source, backend, safe, abi, base_dir=base_dir,
                                   optimize=optimize, sandbox=sandbox, emit=emit,
-                              assets=assets)
+                                  assets=assets, use_cache=use_cache)
         else:
             raise
 
@@ -420,7 +504,9 @@ def main() -> None:
         prog='cryo',
         description='Cryo compiler v1.1.0 — .cryo → Go (base), native C, x86-64 asm, Pyro bytecode/native, front-end pages',
     )
-    ap.add_argument('input',           help='Input file (.cryo)')
+    # nargs='?' so `--clear-cache` alone is a valid command line; the
+    # requirement is enforced below, where it can say why.
+    ap.add_argument('input', nargs='?', help='Input file (.cryo)')
     ap.add_argument('-o', '--output',  help='Output file (.go/.pyro/.s)')
     ap.add_argument('--backend',
                     choices=('auto', 'go', 'c', 'asm', 'pyro', 'node', 'wasm',
@@ -444,6 +530,10 @@ def main() -> None:
                     help='Run the static security audit and continue compiling')
     ap.add_argument('--audit-only', action='store_true',
                     help='Runs the audit, prints the report and exits (does not compile)')
+    ap.add_argument('--no-cache', action='store_true',
+                    help='Do not read or write the incremental cache (11.23)')
+    ap.add_argument('--clear-cache', action='store_true',
+                    help='Empty .cryocache and exit')
     ap.add_argument('--strict', action='store_true',
                     help='With --audit/--audit-only: exit with code 2 if there are HIGH findings (CI gate)')
     ap.add_argument('--sandbox', action='store_true',
@@ -460,6 +550,15 @@ def main() -> None:
     ap.add_argument('--run',    action='store_true', help='Run after compiling')
     ap.add_argument('--no-banner', action='store_true', help='Hide the banner')
     args = ap.parse_args()
+
+    if args.clear_cache:
+        import cache as _cache
+        n, size = _cache.clear()
+        print(f"cache cleared: {n} entr(ies), {size} bytes")
+        if not args.input:
+            return
+    if not args.input:
+        ap.error("an input file is required")
 
     if not args.no_banner:
         print(BANNER)
@@ -479,6 +578,7 @@ def main() -> None:
             strict      = args.strict,
             sandbox     = args.sandbox,
             optimize    = not args.no_opt,
+            use_cache   = not args.no_cache,
             emit_only   = args.emit_only,
             emit        = args.emit,
             assets      = collect_assets(args.assets) if args.assets else None,
