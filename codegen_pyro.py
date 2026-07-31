@@ -97,6 +97,12 @@ _OPERAND = {
 
 _NO_SLOT = 0xFFFF   # TRYPUSH without catch variable
 
+# The key the synthetic top-level function is registered under in _fnindex.
+# Deliberately unspellable as a Cryo identifier: it used to be registered as
+# 'main', so a user's own `fn main()` was overwritten in the table and
+# `main();` called the top level — which called itself, forever.
+_ENTRY_KEY = '<entry>'
+
 # VM native builtins: name -> (id, argc). The VM mirrors this table.
 NATIVES = {
     'sqrt':      (0, 1),  'pow':      (1, 2),  'abs':    (2, 1),
@@ -344,13 +350,24 @@ class CodeGenPyro:
                 self._globals[st.name] = len(self._globals)
                 self._toplevel_vars.add(id(st))
 
-        names = [f.name for f in user_fns] + ['main']
+        # The synthetic top level is registered under a key no Cryo identifier
+        # can spell. It used to be registered as 'main', which a user function
+        # of that name then collided with: `fn main() ... main();` resolved the
+        # call to the TOP LEVEL rather than the function, so the program called
+        # itself and spun forever (it ran correctly on node — an invariant-1
+        # break, on the single likeliest name for a user to pick).
+        #
+        # Only the dictionary KEY changes. The function keeps the name 'main'
+        # in the table, so stack traces read the same, and the index order is
+        # untouched, so a program without a user `main` compiles to identical
+        # bytes and the bootstrap fixed point is unaffected.
+        names = [f.name for f in user_fns] + [_ENTRY_KEY]
         for i, nm in enumerate(names):
             self._fnindex[nm] = i
 
         for fn in user_fns:
             self._compile_fn(fn.name, fn.params, fn.body)
-        self._compile_fn('main', [], top, synthetic=True)
+        self._compile_fn('main', [], top, synthetic=True, index_key=_ENTRY_KEY)
 
         # lambdas discovered while compiling bodies are queued (with their index
         # reserved) and compiled here in index order, so each lands at the
@@ -362,9 +379,11 @@ class CodeGenPyro:
 
         return self._assemble()
 
-    def _compile_fn(self, name, params, body, synthetic=False):
+    def _compile_fn(self, name, params, body, synthetic=False, index_key=None):
         f = _Func(name, len(params))
-        f.index = self._fnindex[name]
+        # index_key separates the table lookup from the emitted NAME, so the
+        # synthetic top level can be called 'main' without owning that key.
+        f.index = self._fnindex[index_key or name]
         self._cur = f
         self._loop_stack = []
         self._cur_line = 0
@@ -1231,7 +1250,7 @@ class CodeGenPyro:
             out.append(f.nparams & 0xFF)
             out += struct.pack('<H', len(f.locals))
         # entry
-        out += struct.pack('<H', self._fnindex['main'])
+        out += struct.pack('<H', self._fnindex[_ENTRY_KEY])
         # code
         out += struct.pack('<I', code_len)
         out += code

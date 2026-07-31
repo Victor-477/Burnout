@@ -1593,6 +1593,28 @@ check("go: array of function values compiles", "[]func(int64) int64" in gen_go(_
 check("node: array of function values compiles", "cryoIndex(ops" in gen_node(_fn_arr_src))
 check("pyro: array of function values compiles", isinstance(gen_pyro(_fn_arr_src), (bytes, bytearray)))
 
+# ── 11.38: a user function named `main` ──────────────────
+# The synthetic top level is ALSO called 'main', and it used to be registered
+# in the function table under that name — overwriting a user's own `fn main()`.
+# `main();` then resolved to the top level, which called itself, forever. It
+# ran correctly on node, so it broke backend parity on the single likeliest
+# name for a user to pick; box_marketplace/cryo_files/box_store.cryo is one of
+# the repo's own examples that hung because of it.
+print("[11.38] a user function named 'main'")
+_main_src = 'fn main() -> void ={ print(7); }\nmain();\n'
+_g = CodeGenPyro(safe=True)
+_blob = _g.generate(parse_ast(_main_src))
+check("pyro: a program with `fn main()` compiles",
+      isinstance(_blob, (bytes, bytearray)))
+# The distinguishing check: 'main' in the lookup table must be the USER's
+# function, not the entry. A program that merely compiles proves nothing here —
+# the broken version compiled too, and then spun.
+check("pyro: the name 'main' resolves to the user's function",
+      _g._fnindex.get('main') == 0)
+check("pyro: the synthetic entry has its own, unspellable key",
+      _g._fnindex.get('<entry>') == 1)
+check("node: the same program still compiles", "7" in gen_node(_main_src))
+
 # ── result ───────────────────────────────────────────────
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
