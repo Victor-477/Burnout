@@ -18,6 +18,8 @@
 #    entryfn  u16   (index of the 'main' function)
 #    codelen  u32   after: code bytes (possibly encoded)
 # ============================================================
+import hashlib
+import hmac
 import struct
 from ast_nodes import *
 from typing import Dict, List, Optional, Set
@@ -174,6 +176,7 @@ _FLAG_DEBUG   = 0x02
 _FLAG_SANDBOX = 0x04
 _FLAG_ASSETS  = 0x08   # 11.9: embedded asset section follows the debug one
 _FLAG_PERMS   = 0x10   # 11.12: declared permissions follow the assets
+_FLAG_SIGNED  = 0x20   # 11.14: HMAC-SHA256 of everything before it, LAST
 
 # 11.12 — the source spelling (short, for the programmer) mapped to the
 # runtime capability name (explicit, for the operator reading a policy).
@@ -208,8 +211,11 @@ class CodeGenPyro:
     def __init__(self, safe: bool = True, encode: bool = True,
                  optimize: bool = True, sandbox: bool = False,
                  extra_natives: Optional[Set[str]] = None,
-                 assets: Optional[Dict[str, bytes]] = None):
+                 assets: Optional[Dict[str, bytes]] = None,
+                 sign_key: Optional[bytes] = None):
         self.safe = safe
+        # 11.14 — when set, the container is signed (see the tail of _assemble)
+        self.sign_key = sign_key
         self.encode = encode
         self.optimize = optimize
         self.sandbox = sandbox
@@ -1217,6 +1223,8 @@ class CodeGenPyro:
             flags |= _FLAG_ASSETS
         if self._perms:
             flags |= _FLAG_PERMS
+        if self.sign_key:
+            flags |= _FLAG_SIGNED
 
         out = bytearray()
         out += _MAGIC
@@ -1279,6 +1287,13 @@ class CodeGenPyro:
                 for k, v in sorted(self._perms.items()) if v)
             pb = spec.encode('utf-8')
             out += struct.pack('<I', len(pb)); out += pb
+        # 11.14 — the signature is LAST, and covers every byte before it:
+        # magic, flags, constants, code, debug, assets and permissions.
+        # Anything left outside would be exactly the part worth editing, and
+        # the permissions section (11.12) is the clearest example: widening
+        # `net` costs one byte and produces no error.
+        if self.sign_key:
+            out += hmac.new(self.sign_key, bytes(out), hashlib.sha256).digest()
         return bytes(out)
 
     @staticmethod

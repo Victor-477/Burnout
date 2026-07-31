@@ -86,6 +86,40 @@ def collect_assets(directory: str) -> dict:
     return out
 
 
+def load_sign_key(spec: str) -> bytes:
+    """Read the signing key named by --sign.
+
+    `env:NAME` reads it from the environment; anything else is a file path.
+    A key cannot be passed literally on the command line ON PURPOSE: argv is
+    readable by every process on the machine and lands in shell history, so
+    offering `--sign <secret>` would make the convenient way the unsafe one.
+
+    Whitespace is stripped so a key file written by `echo` or an editor that
+    adds a trailing newline still produces the same key — otherwise signing and
+    verifying with "the same" key silently disagree.
+    """
+    if spec.startswith('env:'):
+        name = spec[4:]
+        val = os.environ.get(name)
+        if not val:
+            raise FileNotFoundError(
+                f"--sign env:{name}: the environment variable is not set or is empty")
+        key = val.strip().encode('utf-8')
+    else:
+        if not os.path.isfile(spec):
+            raise FileNotFoundError(
+                f"--sign: no such key file: {spec} "
+                f"(use 'env:NAME' to read the key from the environment)")
+        with open(spec, 'rb') as f:
+            key = f.read().strip()
+    if len(key) < 16:
+        # Not a policy about entropy — a guard against the common accident of
+        # pointing --sign at the wrong file and signing with three bytes.
+        raise ValueError("--sign: the key is shorter than 16 bytes; "
+                         "that is almost certainly the wrong file")
+    return key
+
+
 def default_abi() -> str:
     """Default ABI of the asm backend depending on the platform."""
     return 'win64' if sys.platform == 'win32' else 'sysv'
@@ -95,7 +129,8 @@ def compile_source(source: str, backend: str, safe: bool,
                    abi: str = 'sysv', base_dir: str | None = None,
                    optimize: bool = True, sandbox: bool = False,
                    emit: str = 'html', assets: dict | None = None,
-                   use_cache: bool = True, path: str | None = None):
+                   use_cache: bool = True, path: str | None = None,
+                   sign_key: bytes | None = None):
     """Returns str (go/c/asm/frontend) or bytes (pyro/wasm = binary)."""
     # ── 11.23: incremental compilation ──────────────────────
     # The artifact key needs every input, and the imports are only known after
@@ -105,7 +140,15 @@ def compile_source(source: str, backend: str, safe: bool,
     import cache as _cache
     settings = {'backend': backend, 'safe': safe, 'abi': abi,
                 'optimize': optimize, 'sandbox': sandbox, 'emit': emit,
-                'assets': sorted(assets) if assets else None}
+                'assets': sorted(assets) if assets else None,
+                # 11.14 — a DIGEST of the signing key, never the key. It has to
+                # be in the cache key or a signed build and an unsigned one
+                # would share an entry and the signature would come and go
+                # depending on what was compiled first; but the cache filename
+                # is derived from these settings, so the key itself must not
+                # appear in it.
+                'sign': (__import__('hashlib').sha256(sign_key).hexdigest()[:16]
+                         if sign_key else None)}
     art = _cache.ArtifactCache(enabled=use_cache)
     read: list = []
     if use_cache:
@@ -141,7 +184,8 @@ def compile_source(source: str, backend: str, safe: bool,
         sys.stderr = _Tee(real_err, buf)
         try:
             out = _compile_resolved(ast, backend, safe, abi, optimize, sandbox,
-                                    emit, assets, source, path or base_dir)
+                                    emit, assets, source, path or base_dir,
+                                    sign_key)
         finally:
             sys.stderr = real_err
         art.put(key, out if isinstance(out, bytes) else out.encode('utf-8'),
@@ -149,7 +193,7 @@ def compile_source(source: str, backend: str, safe: bool,
         return out
 
     return _compile_resolved(ast, backend, safe, abi, optimize, sandbox,
-                             emit, assets, source, path or base_dir)
+                             emit, assets, source, path or base_dir, sign_key)
 
 
 class _Tee:
@@ -177,7 +221,8 @@ class _Tee:
 
 def _compile_resolved(ast, backend: str, safe: bool, abi: str,
                       optimize: bool, sandbox: bool, emit: str, assets,
-                      source: str = None, path: str = None):
+                      source: str = None, path: str = None,
+                      sign_key: bytes | None = None):
     """Everything after module resolution. Split out so the artifact cache can
     skip all of it — that is the 72% the profile showed."""
     ast = monomorphize(ast)
@@ -203,7 +248,7 @@ def _compile_resolved(ast, backend: str, safe: bool, abi: str,
         return CodeGenWasm(safe=safe).generate(ast)   # bytes (.wasm)
     if backend == 'pyro':
         return CodeGenPyro(safe=safe, optimize=optimize, sandbox=sandbox,
-                           assets=assets).generate(ast)   # bytes
+                           assets=assets, sign_key=sign_key).generate(ast)
     return CodeGenC(safe=safe).generate(ast)
 
 
@@ -296,6 +341,7 @@ def compile_file(input_path: str,
                  emit_only: bool = False,
                  emit: str = 'html',
                  assets: dict | None = None,
+                 sign_key: bytes | None = None,
                  dis: bool = False,
                  run: bool = False) -> str:
 
@@ -376,7 +422,7 @@ def compile_file(input_path: str,
         code = compile_source(source, backend, safe, abi, base_dir=base_dir,
                               optimize=optimize, sandbox=sandbox, emit=emit,
                               assets=assets, use_cache=use_cache,
-                              path=input_path)
+                              path=input_path, sign_key=sign_key)
     except (CodeGenError, CodeGenGoError, CodeGenAsmError,
             CodeGenPyroError, CodeGenNodeError) as e:
         # safety net: if auto chose a backend that failed,
@@ -388,7 +434,7 @@ def compile_file(input_path: str,
             code = compile_source(source, backend, safe, abi, base_dir=base_dir,
                                   optimize=optimize, sandbox=sandbox, emit=emit,
                                   assets=assets, use_cache=use_cache,
-                                  path=input_path)
+                                  path=input_path, sign_key=sign_key)
         else:
             raise
 
@@ -582,6 +628,11 @@ def main() -> None:
                     help='It only generates the source (.pyro/.s); does not invoke the toolchain')
     ap.add_argument('--no-opt', action='store_true',
                     help='Turn off bytecode optimizer (pyro backend)')
+    ap.add_argument('--sign', metavar='KEY',
+                    help='pyro backend: sign the .pyro so the VM can refuse a '
+                         'tampered one. KEY is a path to a key file, or "env:NAME" '
+                         'to read it from the environment (preferred: a key on the '
+                         'command line is visible to every process on the machine)')
     ap.add_argument('--dis', action='store_true',
                     help='Disassembles the generated Pyro bytecode (pyro backend)')
     ap.add_argument('--tokens', action='store_true', help='Print tokens')
@@ -622,6 +673,7 @@ def main() -> None:
             emit_only   = args.emit_only,
             emit        = args.emit,
             assets      = collect_assets(args.assets) if args.assets else None,
+            sign_key    = load_sign_key(args.sign) if args.sign else None,
             dis         = args.dis,
             run         = args.run,
         )
