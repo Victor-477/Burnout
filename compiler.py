@@ -94,7 +94,7 @@ def compile_source(source: str, backend: str, safe: bool,
                    abi: str = 'sysv', base_dir: str | None = None,
                    optimize: bool = True, sandbox: bool = False,
                    emit: str = 'html', assets: dict | None = None,
-                   use_cache: bool = True):
+                   use_cache: bool = True, path: str | None = None):
     """Returns str (go/c/asm/frontend) or bytes (pyro/wasm = binary)."""
     # ── 11.23: incremental compilation ──────────────────────
     # The artifact key needs every input, and the imports are only known after
@@ -140,7 +140,7 @@ def compile_source(source: str, backend: str, safe: bool,
         sys.stderr = _Tee(real_err, buf)
         try:
             out = _compile_resolved(ast, backend, safe, abi, optimize, sandbox,
-                                    emit, assets)
+                                    emit, assets, source, path or base_dir)
         finally:
             sys.stderr = real_err
         art.put(key, out if isinstance(out, bytes) else out.encode('utf-8'),
@@ -148,7 +148,7 @@ def compile_source(source: str, backend: str, safe: bool,
         return out
 
     return _compile_resolved(ast, backend, safe, abi, optimize, sandbox,
-                             emit, assets)
+                             emit, assets, source, path or base_dir)
 
 
 class _Tee:
@@ -175,12 +175,13 @@ class _Tee:
 
 
 def _compile_resolved(ast, backend: str, safe: bool, abi: str,
-                      optimize: bool, sandbox: bool, emit: str, assets):
+                      optimize: bool, sandbox: bool, emit: str, assets,
+                      source: str = None, path: str = None):
     """Everything after module resolution. Split out so the artifact cache can
     skip all of it — that is the 72% the profile showed."""
     ast = monomorphize(ast)
     ast = lower_traits(ast)
-    semantic_check(ast)   # variable/function/arity/break — before optimising,
+    semantic_check(ast, source, path)   # variable/function/arity/break —
                           # so an error names what was written
     verify_foreign(ast)   # foreign blocks/libraries require `import >Lang<`
     if optimize:
@@ -368,7 +369,8 @@ def compile_file(input_path: str,
     try:
         code = compile_source(source, backend, safe, abi, base_dir=base_dir,
                               optimize=optimize, sandbox=sandbox, emit=emit,
-                              assets=assets, use_cache=use_cache)
+                              assets=assets, use_cache=use_cache,
+                              path=input_path)
     except (CodeGenError, CodeGenGoError, CodeGenAsmError,
             CodeGenPyroError, CodeGenNodeError) as e:
         # safety net: if auto chose a backend that failed,
@@ -379,7 +381,8 @@ def compile_file(input_path: str,
             backend = 'go'
             code = compile_source(source, backend, safe, abi, base_dir=base_dir,
                                   optimize=optimize, sandbox=sandbox, emit=emit,
-                                  assets=assets, use_cache=use_cache)
+                                  assets=assets, use_cache=use_cache,
+                                  path=input_path)
         else:
             raise
 
@@ -499,6 +502,37 @@ def compile_file(input_path: str,
     return output_path
 
 
+def _point_at(path, message, prefix):
+    """Render a front-end error against its source line (roadmap 11.24).
+
+    Lexer and parser errors carry their position inside the message text — the
+    raise sites format "Line N" into it — so the number is recovered here
+    rather than threaded through forty call sites. Falls back to the plain
+    message when there is no line, or the file cannot be read.
+    """
+    import re as _re
+    import diagnostics as _dx
+    msg = str(message).strip()
+    # The raise sites already include the tag, and printing it again produced
+    # "[Syntax Error] [Syntax Error] Line 2: ...".
+    if msg.startswith(prefix):
+        msg = msg[len(prefix):].strip()
+    m = _re.search(r"Line (\d+)", msg)
+    if not m or not path:
+        return prefix + " " + msg
+    try:
+        with open(path, encoding="utf-8") as f:
+            src = f.read()
+    except OSError:
+        return prefix + " " + msg
+    line = int(m.group(1))
+    body = msg[m.end():].lstrip(": ").strip() or msg
+    # Underline the token when the message names one, e.g. SEMICOLON (';')
+    tok = _re.search(r"\((['\"])(.+?)\1\)", body)
+    needle = tok.group(2) if tok else None
+    return _dx.render(src, line, prefix + " " + body, path, needle)
+
+
 def main() -> None:
     ap = argparse.ArgumentParser(
         prog='cryo',
@@ -586,9 +620,13 @@ def main() -> None:
             run         = args.run,
         )
     except LexerError     as e:
-        print(f"\n[Lexical Error]    {e}", file=sys.stderr); sys.exit(1)
+        print("\n" + _point_at(args.input, str(e), '[Lexical Error]'),
+              file=sys.stderr); sys.exit(1)
     except ParseError     as e:
-        print(f"\n[Syntax Error] {e}", file=sys.stderr); sys.exit(1)
+        # 11.24 — these messages already carry "Line N"; showing that line with
+        # a caret turns a coordinate into the mistake itself.
+        print("\n" + _point_at(args.input, str(e), '[Syntax Error]'),
+              file=sys.stderr); sys.exit(1)
     except ForeignError   as e:
         print(f"\n[Foreign Error] {e}", file=sys.stderr); sys.exit(1)
     except ModuleError    as e:
