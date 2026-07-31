@@ -25,6 +25,7 @@
 # ============================================================
 import argparse
 import json
+import glob
 import os
 import platform
 import shutil
@@ -104,8 +105,10 @@ def build_vms(verbose=True):
     os.makedirs(BUILD, exist_ok=True)
     if verbose:
         print("building the Go VM ...", end=' ', flush=True)
-    r = subprocess.run(['go', 'build', '-o', GO_VM,
-                        os.path.join(VMDIR, 'main.go')],
+    # every .go file in the VM directory — the debugger and profiler (11.25)
+    # live beside main.go, and naming only main.go stopped compiling
+    r = subprocess.run(['go', 'build', '-o', GO_VM]
+                       + sorted(glob.glob(os.path.join(VMDIR, '*.go'))),
                        capture_output=True, text=True)
     go_ok = r.returncode == 0
     if verbose:

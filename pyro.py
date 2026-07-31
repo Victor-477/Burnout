@@ -161,6 +161,40 @@ def cmd_vm(a):
             except OSError: pass
 
 
+def _vm_with(a, flags, want_source=False):
+    """Run the VM with extra flags before the program (11.25).
+
+    The VM takes its own options ahead of the .pyro and hands everything after
+    it to the program, so a script's own --debug is never intercepted.
+    """
+    vm = find_vm()
+    if vm is None:
+        _err("no Pyro VM binary found (build pyro/vm) — try `pyro build`")
+    pyro_path, tmp = to_pyro(a.input, safe=not a.unsafe, sandbox=a.sandbox)
+    try:
+        opts = list(flags)
+        # The debugger shows source lines, and only the .cryo has them — the
+        # .pyro records line NUMBERS, not the text.
+        if want_source and a.input.endswith('.cryo'):
+            opts.append('--source=' + a.input)
+        sys.exit(subprocess.run([vm] + opts + [pyro_path] + a.args).returncode)
+    finally:
+        if tmp and tmp != a.input:
+            try: os.remove(tmp)
+            except OSError: pass
+
+
+def cmd_debug(a):
+    _vm_with(a, ['--debug'], want_source=True)
+
+
+def cmd_profile(a):
+    flags = ['--profile', '--profile-hz=%d' % a.hz]
+    if a.output:
+        flags.append('--profile-out=' + a.output)
+    _vm_with(a, flags)
+
+
 def cmd_run(a):
     cc_name, _ = find_cc()
     if a.vm or cc_name is None:
@@ -202,6 +236,19 @@ def main():
 
     pv = sub.add_parser("vm", help="run on the Pyro VM")
     common(pv, with_args=True); pv.set_defaults(fn=cmd_vm)
+
+    # 11.25 — debugging and profiling, both on the Pyro VM
+    pd = sub.add_parser("debug", help="run under the VM debugger "
+                                      "(breakpoints, single-step)")
+    common(pd, with_args=True); pd.set_defaults(fn=cmd_debug)
+
+    pp = sub.add_parser("profile", help="run and report time per Cryo function")
+    common(pp, with_args=True)
+    pp.add_argument("--hz", type=int, default=1000,
+                    help="sampling rate (default 1000); raise it for programs "
+                         "that finish in a few milliseconds")
+    pp.add_argument("-o", "--output", help="write the profile here (default stderr)")
+    pp.set_defaults(fn=cmd_profile)
 
     pc = sub.add_parser("c", help="emit AOT C source")
     common(pc); pc.add_argument("-o", "--output", help="output .c path")

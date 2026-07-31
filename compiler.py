@@ -14,6 +14,7 @@ import sys
 import os
 import io
 import argparse
+import glob
 import subprocess
 
 # ── Windows: guarantees UTF-8 output (avoids crash with cp1252) ──
@@ -239,18 +240,23 @@ def _run_pyro(pyro_path: str, compiler_dir: str, run: bool, verbose: bool):
     if sys.platform == 'win32':
         pyrovm += '.exe'
 
-    # (re)compiles the VM if it does not yet exist or if the source is newer
-    src = os.path.join(vm_dir, 'main.go')
-    need = (not os.path.isfile(pyrovm) or
-            (os.path.isfile(src) and os.path.getmtime(src) > os.path.getmtime(pyrovm)))
+    # (re)compiles the VM if it does not yet exist or if any source is newer.
+    # Every .go file, not just main.go: 11.25 split the debugger and the
+    # profiler into their own files, and a staleness check that watches one
+    # file silently keeps running the old VM when the others change.
+    srcs = sorted(glob.glob(os.path.join(vm_dir, '*.go')))
+    need = not os.path.isfile(pyrovm)
+    if not need and srcs:
+        need = max(os.path.getmtime(s) for s in srcs) > os.path.getmtime(pyrovm)
     try:
         if need:
             if verbose:
                 print(f"→ Compiling Pyro VM: go build -o {pyrovm}  (in {vm_dir})")
-            # Build the specific .go file, NOT the package ('.'): pyro/vm also
-            # holds the C VM (main.c, pyro_runtime.c) and `go build .` refuses
-            # with "C source files not allowed when not using cgo or SWIG".
-            r = subprocess.run(['go', 'build', '-o', pyrovm, 'main.go'],
+            # Name the .go files, NOT the package ('.'): pyro/vm also holds the
+            # C VM (main.c, pyro_runtime.c) and `go build .` has refused with
+            # "C source files not allowed when not using cgo or SWIG".
+            r = subprocess.run(['go', 'build', '-o', pyrovm]
+                               + [os.path.basename(s) for s in srcs],
                                cwd=vm_dir, capture_output=True, text=True)
             if r.returncode != 0:
                 print(f"[go] Error compiling Pyro VM:\n{r.stderr}", file=sys.stderr)
