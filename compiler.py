@@ -41,6 +41,7 @@ from modules      import resolve_modules, ModuleError           # CRYO
 from semantic     import check as semantic_check, SemanticError  # CRYO
 from generics     import monomorphize                             # CRYO
 from traits       import lower_traits                             # CRYO
+from optimize     import optimize as optimize_ast              # CRYO (11.21)
 from codegen_c    import CodeGenC,    CodeGenError       # C backend
 from codegen_go   import CodeGenGo,   CodeGenGoError     # Go backend
 from codegen_asm  import CodeGenAsm,  CodeGenAsmError    # x86-64 backend
@@ -96,8 +97,13 @@ def compile_source(source: str, backend: str, safe: bool,
     ast = load_ast(source, base_dir)
     ast = monomorphize(ast)
     ast = lower_traits(ast)
-    semantic_check(ast)   # variable/function/aridade/break — errors early, with line
+    semantic_check(ast)   # variable/function/arity/break — before optimising,
+                          # so an error names what was written
     verify_foreign(ast)   # foreign blocks/libraries require `import >Lang<`
+    if optimize:
+        # 11.21 — folding, propagation, pruning and inlining on the AST, so
+        # every backend benefits and not just the pyro peephole.
+        ast = optimize_ast(ast)
     if backend == 'frontend':
         # 10.11/10.13 — assembles html/javascript/CSS blocks into a page.
         # Not a code generator: it emits a document, not a program.
