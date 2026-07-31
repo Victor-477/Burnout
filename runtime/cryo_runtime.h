@@ -63,6 +63,32 @@ char*   cryo_str_concat(const char* a, const char* b);
 char*   cryo_i64_to_str(int64_t n);
 char*   cryo_f64_to_str(double n);
 char*   cryo_bool_to_str(bool b);
+/* 11.27 — rendering an ARRAY. CryoArray stores raw uint64_t and does not know
+   what its elements are, so the element type comes from the code generator and
+   picks the function. The output is the canonical VM form (PYRO_RUNTIME.md
+   §3.1): "[a, b, c]", elements separated by ", ", strings NOT quoted — so
+   print(a) reads identically on every backend, which is the whole point. The
+   returned buffer is malloc'd. */
+char*   cryo_arr_to_str_i(CryoArray* a);
+char*   cryo_arr_to_str_f(CryoArray* a);
+char*   cryo_arr_to_str_s(CryoArray* a);
+char*   cryo_arr_to_str_b(CryoArray* a);
+
+/* ---------- 11.27: optionals (T?) ----------
+   T? is a POINTER, the same representation the go backend uses: NULL is null,
+   anything else points at the value. `string?` needs no wrapper at all — a
+   char* is already nullable — which is why there is no cryo_opt_s.
+
+   cryo_unwrap_* implements `x!`, and aborts with the SAME message the Pyro VM
+   prints, byte for byte: the two are compared in test_c_vm.py, and a runtime
+   that words its failures differently is a different language. */
+int64_t* cryo_opt_i(int64_t v);
+double*  cryo_opt_f(double v);
+bool*    cryo_opt_b(bool v);
+int64_t  cryo_unwrap_i(int64_t* p);
+double   cryo_unwrap_f(double* p);
+bool     cryo_unwrap_b(bool* p);
+char*    cryo_unwrap_s(char* p);
 int64_t cryo_str_len(const char* s);
 bool    cryo_str_eq(const char* a, const char* b);
 char*   cryo_str_slice(const char* s, int64_t start, int64_t end);

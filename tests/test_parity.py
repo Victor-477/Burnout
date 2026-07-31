@@ -208,6 +208,96 @@ check("with a Cryo diagnostic, not a gcc error",
 check("and the message says where the `any` came from",
       'comprehension' in _msg, _msg[:300])
 
+# ── 11.34: `??` on a data-carrying enum ────────────────────
+# `??` asks whether a value is null. An `Err("no")` is not null, so the
+# operator handed back the value itself — printing `{tag: Err, val0: no}` on
+# pyro and node, leaking the representation into user output, and failing to
+# compile on go.
+#
+# Making `r ?? 9` mean "the Ok payload, else 9" is not available to the
+# compiler: Result/Ok/Err are ordinary user declarations here and nothing marks
+# which variant is the successful one. So it is refused, in the FRONT END, so
+# every backend agrees by construction rather than by three separate fixes.
+print("\n── 11.34: `??` on an enum with data ──")
+_res = "enum Result { Ok(int), Err(string) }\n"
+_work = tempfile.mkdtemp(prefix='cryo_par_')
+_src = _res + 'Result r = Err("no");\nprint(r ?? 9);\n'
+for _b in ('pyro', 'node', 'go'):
+    _r = _compile(_work, _src, _b, os.path.join(_work, 'o.' + _b))
+    _m = _r.stdout + _r.stderr
+    check(f"{_b}: refused rather than leaking the enum", _r.returncode != 0, _m[:160])
+    check(f"{_b}: and the message points at match",
+          'match' in _m and "'??'" in _m, _m[:200])
+
+# A constructor call directly, not only a variable.
+_r = _compile(_work, _res + 'print(Err("no") ?? 9);\n', 'pyro',
+              os.path.join(_work, 'o2.pyro'))
+check("a constructor call is caught too", _r.returncode != 0,
+      (_r.stdout + _r.stderr)[:160])
+
+# What must NOT be refused. `??` on an optional is the operator's actual job,
+# and a payload-less enum is an integer constant on every backend — refusing
+# that would reject code that works today for no gain.
+agree("`??` on an optional still works",
+      "int? a = null;\nprint(a ?? 9);\nint? b = 4;\nprint(b ?? 9);\n",
+      expect="9\n4")
+agree("`??` on a string optional still works",
+      'string? s = null;\nprint(s ?? "dflt");\n', expect="dflt")
+_r = _compile(_work, "enum Level { LOW, HIGH }\nLevel a = LOW;\nprint(a ?? HIGH);\n",
+              'pyro', os.path.join(_work, 'o3.pyro'))
+check("a payload-less enum is NOT refused", _r.returncode == 0,
+      (_r.stdout + _r.stderr)[:200])
+
+# ── 11.27: the C backend's gaps shrink ─────────────────────
+# Printing an array and using an optional both used to be refused with "use
+# --backend go". Both now work, and the point of testing them HERE rather than
+# in a C-only test is that the output has to match the other backends
+# character for character — `[0, 1, 2]`, not Go's `[0 1 2]` or C's own idea.
+print("\n── 11.27: arrays and optionals on the C backend ──")
+_ALL = ('pyro', 'node', 'go', 'c')
+agree("printing an int array", "int[] a = [0, 1, 2];\nprint(a);\n",
+      backends=_ALL, expect="[0, 1, 2]")
+agree("printing a string array", 'string[] s = ["a", "b"];\nprint(s);\n',
+      backends=_ALL, expect="[a, b]")
+agree("printing a bool array", "bool[] t = [true, false];\nprint(t);\n",
+      backends=_ALL, expect="[true, false]")
+agree("printing a number array", "number[] f = [1.5, 2.0];\nprint(f);\n",
+      backends=_ALL, expect="[1.5, 2]")
+agree("printing an empty array", "int[] e = [];\nprint(e);\n",
+      backends=_ALL, expect="[]")
+agree("to_string of an array", 'int[] a = [1, 2];\nprint("v: " + to_string(a));\n',
+      backends=_ALL, expect="v: [1, 2]")
+
+agree("an optional defaulting with ??", "int? a = null;\nprint(a ?? 7);\n",
+      backends=_ALL, expect="7")
+agree("a present optional", "int? b = 3;\nprint(b ?? 7);\nprint(b!);\n",
+      backends=_ALL, expect="3\n3")
+agree("a string optional", 'string? s = null;\nprint(s ?? "dflt");\n',
+      backends=_ALL, expect="dflt")
+agree("a number and a bool optional",
+      "number? f = 2.5;\nbool? t = true;\nprint(f!);\nprint(t!);\n",
+      backends=_ALL, expect="2.5\ntrue")
+agree("comparing an optional against null",
+      "int? x = null;\nint? y = 5;\nprint(x == null);\nprint(y == null);\n",
+      backends=_ALL, expect="true\nfalse")
+
+# `??` must evaluate its left side ONCE. Written as a plain conditional in C it
+# would be evaluated twice, doubling any side effect in it.
+agree("?? evaluates its left side once",
+      "int calls = 0;\n"
+      "fn bump() -> int? ={ calls = calls + 1; return null; }\n"
+      "print(bump() ?? 9);\nprint(calls);\n",
+      backends=('pyro', 'node'), expect="9\n1")
+
+# Still refused, and the message must name what IS supported rather than only
+# pointing elsewhere.
+_w = tempfile.mkdtemp(prefix='cryo_par_')
+_r = _compile(_w, 'map<string,int> m = {"a": 1};\nprint(m["a"]);\n', 'c',
+              os.path.join(_w, 'm.c'))
+check("a map is still refused on C", _r.returncode != 0)
+check("and the message names the backends that do support it",
+      'go' in (_r.stdout + _r.stderr), (_r.stdout + _r.stderr)[:200])
+
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))
 sys.exit(1 if _failed else 0)

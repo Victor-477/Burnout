@@ -21,11 +21,36 @@ C_TYPE: Dict[str, str] = {
     'null':   'void*',
 }
 
+# 11.27 — T? is a POINTER, the same representation the go backend uses.
+# `string?` needs no wrapper: char* is already nullable.
+_OPT_C = {'int': 'int64_t*', 'number': 'double*', 'bool': 'bool*',
+          'string': 'char*'}
+_OPT_WRAP = {'int': 'cryo_opt_i', 'number': 'cryo_opt_f', 'bool': 'cryo_opt_b'}
+_OPT_UNWRAP = {'int': 'cryo_unwrap_i', 'number': 'cryo_unwrap_f',
+               'bool': 'cryo_unwrap_b', 'string': 'cryo_unwrap_s'}
+
+
+def is_optional(t: str) -> bool:
+    return bool(t) and t.endswith('?')
+
+
+def opt_base(t: str) -> str:
+    return t[:-1] if is_optional(t) else t
+
+
 def c_type(t: str) -> str:
-    if t and (t.startswith('map<') or t.endswith('?')):
+    if t and t.endswith('?'):
+        base = t[:-1]
+        if base in _OPT_C:
+            return _OPT_C[base]
         raise CodeGenError(
-            f"type '{t}' (map/optional) is not yet supported in the C backend; "
-            f"use --backend go.")
+            f"optional type '{t}' is not supported in the C backend — only "
+            f"int?, number?, bool? and string? are; use --backend go, node or "
+            f"pyro.")
+    if t and t.startswith('map<'):
+        raise CodeGenError(
+            f"type '{t}' (map) is not yet supported in the C backend; "
+            f"use --backend go, node or pyro.")
     # function types have no C spelling here: unknown types pass through
     # verbatim, so without this guard `fn(int)->int` leaked into the output and
     # produced invalid C that only failed later, inside gcc.
@@ -97,6 +122,12 @@ class TypeEnv:
         if isinstance(node, BinaryExpr):
             if node.op in ('==', '!=', '<', '>', '<=', '>=', '&&', '||'):
                 return 'bool'
+            # 11.27 — `a ?? b` yields a PRESENT value, so its type is the
+            # unwrapped one. Reporting 'int?' here made print() try to render
+            # an optional and refuse.
+            if node.op == '??':
+                lt = self.infer(node.left)
+                return lt[:-1] if lt.endswith('?') else lt
             lt = self.infer(node.left)
             rt = self.infer(node.right)
             if lt == 'string' or rt == 'string': return 'string'
@@ -104,6 +135,11 @@ class TypeEnv:
             return lt if lt != 'unknown' else rt
         if isinstance(node, UnaryExpr):
             return 'bool' if node.op == '!' else self.infer(node.operand)
+        # 11.27 — `x!` yields the value, so the type is the unwrapped one.
+        if isinstance(node, UnwrapExpr):
+            inner = getattr(node, 'operand', None) or getattr(node, 'expr', None)
+            t = self.infer(inner)
+            return t[:-1] if t.endswith('?') else t
         if isinstance(node, TernaryExpr):
             t = self.infer(node.then_value)
             return t if t != 'unknown' else self.infer(node.else_value)
@@ -358,9 +394,12 @@ class CodeGenC:
                 fn = _PUSH_FN.get(et, 'cryo_array_push')
                 self._emit(f"{fn}({n.name}, {self._expr(elem)});")
         elif n.value is not None:
-            self._emit(f"{t} {n.name} = {self._expr(n.value)};")
+            self._emit(f"{t} {n.name} = {self._opt_value(n.value, n.var_type)};")
         else:
-            self._emit(f"{t} {n.name};")
+            # An optional with no initialiser is null, not uninitialised: a
+            # dangling pointer here would be read as "some value".
+            init = ' = NULL' if is_optional(n.var_type) else ''
+            self._emit(f"{t} {n.name}{init};")
 
     def _const(self, n: ConstDecl):
         self.te.set(n.name, n.var_type)
@@ -652,10 +691,13 @@ class CodeGenC:
     # ── expressions ──────────────────────────────────────────
 
     def _expr(self, node: Node) -> str:
-        if isinstance(node, (MapLiteral, CastExpr, UnwrapExpr, TryExpr, SpawnExpr, AwaitExpr)):
+        if isinstance(node, UnwrapExpr):
+            return self._unwrap(node)
+        if isinstance(node, (MapLiteral, CastExpr, TryExpr, SpawnExpr, AwaitExpr)):
             raise CodeGenError(
-                f"'{type(node).__name__}' (map/JSON/optional/'?' propagation/async) "
-                f"is not yet supported in the C backend; use --backend go.")
+                f"'{type(node).__name__}' (map/JSON/'?' propagation/async) "
+                f"is not yet supported in the C backend; use --backend go, node "
+                f"or pyro.")
         if isinstance(node, Literal):
             if node.kind == 'null':   return 'NULL'
             if node.kind == 'bool':   return 'true' if node.value else 'false'
@@ -720,7 +762,18 @@ class CodeGenC:
 
         if node.op == '&&': return f"({l} && {r})"
         if node.op == '||': return f"({l} || {r})"
-        if node.op == '??': return f"(({l}) != NULL ? ({l}) : ({r}))"
+        if node.op == '??':
+            # A scalar optional is a POINTER, so the present branch has to
+            # dereference it; `string?` is already a char* and must not be.
+            # Emitted via a statement expression so `l` is evaluated once —
+            # the obvious `(l != NULL ? *l : r)` evaluates it twice, which
+            # doubles any side effect in it.
+            base = opt_base(lt)
+            if is_optional(lt) and base in _OPT_WRAP:
+                ct = c_type(base)
+                return (f"({{ {c_type(lt)} __o = ({l}); "
+                        f"__o != NULL ? *__o : ({ct})({r}); }})")
+            return f"(({l}) != NULL ? ({l}) : ({r}))"
 
         # String concatenation
         if node.op == '+' and (lt == 'string' or rt == 'string'):
@@ -978,9 +1031,56 @@ class CodeGenC:
         args_str = ', '.join(args)
         return f"{obj}.{m}({args_str})"
 
+    _ARR_TO_STR = {'int': 'cryo_arr_to_str_i', 'number': 'cryo_arr_to_str_f',
+                   'string': 'cryo_arr_to_str_s', 'bool': 'cryo_arr_to_str_b'}
+
+    def _opt_value(self, value: Node, declared: str) -> str:
+        """A value on its way into a slot of type `declared` (11.27).
+
+        A plain `3` going into an `int?` has to be put somewhere with an
+        address. `null` and something already optional pass straight through —
+        wrapping those would box a pointer inside another pointer.
+        """
+        src = self._expr(value)
+        if not is_optional(declared):
+            return src
+        if isinstance(value, Literal) and value.kind == 'null':
+            return 'NULL'
+        if is_optional(self.te.infer(value)):
+            return src
+        wrap = _OPT_WRAP.get(opt_base(declared))
+        return f"{wrap}({src})" if wrap else src
+
+    def _unwrap(self, node) -> str:
+        """`x!` — the value, or abort if it is null."""
+        inner = getattr(node, 'operand', None) or getattr(node, 'expr', None)
+        t = self.te.infer(inner)
+        fn = _OPT_UNWRAP.get(opt_base(t))
+        if not fn:
+            raise CodeGenError(
+                f"'!' (unwrap) needs an optional; this is '{t}'. Only int?, "
+                f"number?, bool? and string? are supported in the C backend.")
+        return f"{fn}({self._expr(inner)})"
+
     def _to_str(self, expr: str, typ: str) -> str:
         if typ == 'string': return expr
         if typ == 'int':    return f"cryo_i64_to_str({expr})"
         if typ == 'number': return f"cryo_f64_to_str({expr})"
         if typ == 'bool':   return f"cryo_bool_to_str({expr})"
+        # 11.27 — printing an array. CryoArray holds raw uint64_t and does not
+        # know what is in it, so the ELEMENT TYPE picks the function; the
+        # generator is the only place that knows it.
+        if typ and typ.endswith('[]'):
+            el = typ[:-2]
+            fn = self._ARR_TO_STR.get(el)
+            if fn:
+                return f"{fn}({expr})"
+            if el.endswith('[]'):
+                raise CodeGenError(
+                    f"printing a nested array ('{typ}') is not supported in the C "
+                    f"backend; print the inner arrays, or use --backend go, node "
+                    f"or pyro.")
+            raise CodeGenError(
+                f"printing an array of '{el}' is not supported in the C backend; "
+                f"use --backend go, node or pyro.")
         raise CodeGenError(f"cannot convert type '{typ}' to string in C backend")

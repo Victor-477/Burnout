@@ -293,6 +293,98 @@ char* cryo_bool_to_str(bool b) {
     return b ? "true" : "false";
 }
 
+/* ---------- 11.27: rendering an array ----------
+   One growable buffer rather than repeated cryo_str_concat: concatenating in a
+   loop is quadratic and allocates a throwaway string per element, which for a
+   large array is the difference between printing it and appearing to hang. */
+typedef struct { char* p; size_t len, cap; } CryoSb;
+
+static void cryo_sb_init(CryoSb* b) {
+    b->cap = 64; b->len = 0; b->p = malloc(b->cap); if (b->p) b->p[0] = 0;
+}
+
+static void cryo_sb_add(CryoSb* b, const char* s) {
+    if (!b->p || !s) return;
+    size_t n = strlen(s);
+    if (b->len + n + 1 > b->cap) {
+        while (b->len + n + 1 > b->cap) b->cap *= 2;
+        char* np = realloc(b->p, b->cap);
+        if (!np) return;
+        b->p = np;
+    }
+    memcpy(b->p + b->len, s, n + 1);
+    b->len += n;
+}
+
+/* The shared shape. `one` renders element i; `owned` says whether it malloc'd,
+   so a static "true"/"false" is not passed to free(). */
+static char* cryo_arr_join(CryoArray* a, char* (*one)(CryoArray*, int64_t),
+                           bool owned) {
+    CryoSb b; cryo_sb_init(&b);
+    cryo_sb_add(&b, "[");
+    int64_t n = a ? a->length : 0;
+    for (int64_t i = 0; i < n; i++) {
+        if (i) cryo_sb_add(&b, ", ");
+        char* s = one(a, i);
+        cryo_sb_add(&b, s ? s : "null");
+        if (owned && s) free(s);
+    }
+    cryo_sb_add(&b, "]");
+    return b.p;
+}
+
+static char* cryo_arr_el_i(CryoArray* a, int64_t i) {
+    return cryo_i64_to_str((int64_t)cryo_array_get(a, i));
+}
+static char* cryo_arr_el_f(CryoArray* a, int64_t i) {
+    uint64_t u = cryo_array_get(a, i); double d; memcpy(&d, &u, 8);
+    return cryo_f64_to_str(d);
+}
+static char* cryo_arr_el_s(CryoArray* a, int64_t i) {
+    /* Strings are stored as pointers and are NOT quoted in the canonical
+       form — "[a, b]", matching the VM and the go/node backends. */
+    return (char*)(uintptr_t)cryo_array_get(a, i);
+}
+static char* cryo_arr_el_b(CryoArray* a, int64_t i) {
+    return cryo_bool_to_str(cryo_array_get(a, i) != 0);
+}
+
+char* cryo_arr_to_str_i(CryoArray* a) { return cryo_arr_join(a, cryo_arr_el_i, true); }
+char* cryo_arr_to_str_f(CryoArray* a) { return cryo_arr_join(a, cryo_arr_el_f, true); }
+char* cryo_arr_to_str_s(CryoArray* a) { return cryo_arr_join(a, cryo_arr_el_s, false); }
+char* cryo_arr_to_str_b(CryoArray* a) { return cryo_arr_join(a, cryo_arr_el_b, false); }
+
+/* ---------- 11.27: optionals (T?) ---------- */
+
+/* The exact text the Pyro VM prints. Not routed through _cryo_fatal, which
+   formats as "kind: detail" — this message has no kind, and the two runtimes
+   are compared byte for byte by test_c_vm.py. */
+static void _cryo_unwrap_null(void) {
+    fprintf(stderr, "[Cryo Security] unwrap of null value\n");
+    abort();
+}
+
+int64_t* cryo_opt_i(int64_t v) {
+    int64_t* p = malloc(sizeof(int64_t));
+    if (!p) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    *p = v; return p;
+}
+double* cryo_opt_f(double v) {
+    double* p = malloc(sizeof(double));
+    if (!p) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    *p = v; return p;
+}
+bool* cryo_opt_b(bool v) {
+    bool* p = malloc(sizeof(bool));
+    if (!p) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    *p = v; return p;
+}
+
+int64_t cryo_unwrap_i(int64_t* p) { if (!p) _cryo_unwrap_null(); return *p; }
+double  cryo_unwrap_f(double* p)  { if (!p) _cryo_unwrap_null(); return *p; }
+bool    cryo_unwrap_b(bool* p)    { if (!p) _cryo_unwrap_null(); return *p; }
+char*   cryo_unwrap_s(char* p)    { if (!p) _cryo_unwrap_null(); return p; }
+
 int64_t cryo_str_len(const char* s) {
     return s ? (int64_t)strlen(s) : 0;
 }

@@ -371,7 +371,18 @@ def expect_c_err(src, label):
     except Exception as e:
         check(label, "backend go" in str(e).lower())
 expect_c_err('map<string,int> m = {};', "c rejeita map")
-expect_c_err('int? x = null;', "c rejeita optional")
+# 11.27 — scalar optionals are SUPPORTED on C now (int?/number?/bool?/string?),
+# so the old "c rejects optional" assertion was retired rather than relaxed.
+# What is still refused is an optional of a type with no pointer form, and the
+# message has to name the supported ones instead of just pointing at go.
+check("c aceita int? (11.27)", 'int64_t*' in gen_c('int? x = null; print(x ?? 1);'))
+check("c aceita string?", isinstance(gen_c('string? s = null; print(s ?? "d");'), str))
+try:
+    gen_c('struct S { int a; } S? p = null;')
+    check("c rejeita optional de struct (should fail)", False)
+except Exception as e:
+    check("c rejeita optional de struct, nomeando os suportados",
+          'int?' in str(e) and 'string?' in str(e))
 
 # ── Phase 2: concurrency (async) + HTTP (backend Go) ────────
 print("[phase2] async: spawn / await / future")
