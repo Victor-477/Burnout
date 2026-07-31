@@ -158,6 +158,7 @@ class TypeEnv:
     def __init__(self):
         self._scopes: List[Dict[str, str]] = [{}]
         self._fns:    Dict[str, str] = {}
+        self._fn_params: Dict[str, List[str]] = {}
         self._structs: Dict[str, Dict[str, str]] = {}
         self._enums:  Set[str] = set()
 
@@ -171,8 +172,19 @@ class TypeEnv:
                 return s[name]
         return 'unknown'
 
-    def reg_fn(self, name, ret): self._fns[name] = ret
+    def reg_fn(self, name, ret, params=None):
+        self._fns[name] = ret
+        # 11.31 — parameter types, so an `any` argument can be asserted to what
+        # the callee actually declared. Only return types were recorded, which
+        # is why `takes(a)` with `any a` reached Go as `a * 2` and failed with
+        # "mismatched types any and untyped int".
+        if params is not None:
+            self._fn_params[name] = [pt for pt, _pn in params]
+
     def fn_ret(self, name):      return self._fns.get(name, 'unknown')
+    def fn_param(self, name, i):
+        ps = self._fn_params.get(name)
+        return ps[i] if ps and i < len(ps) else 'unknown'
     def reg_struct(self, name, fields): self._structs[name] = fields
     def struct_field(self, s, f): return self._structs.get(s, {}).get(f, 'unknown')
     def reg_enum(self, name):     self._enums.add(name)
@@ -283,6 +295,9 @@ class CodeGenGo:
         self._tools: List[FunctionDecl] = []
         self._use_tools = False
         self._member_to_enum: Dict[str, str] = {}
+        # 11.30 — generated variant struct name -> its Cryo member name, so
+        # cryoStr can lead an enum value with `tag:` the way pyro and node do.
+        self._enum_tags: Dict[str, str] = {}
 
     @property
     def _safe_mode(self) -> bool:
@@ -352,14 +367,14 @@ class CodeGenGo:
                     # A variant with data compiles to a constructor function, so
                     # register its RETURN TYPE (the enum). Without this,
                     # infer(Ok(x)) is 'unknown' and every context that needs a
-                    # concrete Go type falls back to `any` — which does not
+                    # concrete Go type falls back to `any` â€” which does not
                     # satisfy the enum interface. That is what made
                     #     Res r = cond ? Ok(x) : Err("e");
-                    # emit `func() any {…}()` and fail to compile.
+                    # emit `func() any {â€¦}()` and fail to compile.
                     self.te.reg_fn(m.name, n.name)
                     self.te.reg_fn(f"{n.name}_{m.name}", n.name)
             elif isinstance(n, FunctionDecl):
-                self.te.reg_fn(n.name, n.return_type or 'void')
+                self.te.reg_fn(n.name, n.return_type or 'void', n.params)
             elif isinstance(n, ConstDecl):
                 self.te.set(n.name, n.var_type)
 
@@ -423,6 +438,13 @@ class CodeGenGo:
             # differently on every backend (invariant 1). The canonical form is
             # the VM's: "[a, b, c]" for arrays, "{k: v, ...}" for maps ordered by
             # the key's own text, strings never quoted, nil as "null".
+            # 11.30 — variant struct name -> tag. Always emitted (empty when the
+            # program has no data-carrying enum) so cryoStr can reference it
+            # unconditionally rather than being generated in two variants.
+            H += ["var cryoEnumTag = map[string]string{"]
+            for struct_name, member in sorted(self._enum_tags.items()):
+                H += [f'\t"{struct_name}": "{member}",']
+            H += ["}", ""]
             H += ["func cryoStrPairs(keys, vals []string) string {",
                   "\tidx := make([]int, len(keys))",
                   "\tfor i := range idx { idx[i] = i }",
@@ -467,8 +489,13 @@ class CodeGenGo:
                   "\t\t// structs are maps in the VM, so they render as maps here;",
                   "\t\t// the json tag carries the field's original Cryo name.",
                   "\t\tt := rv.Type()",
-                  "\t\tkeys := make([]string, 0, t.NumField())",
-                  "\t\tvals := make([]string, 0, t.NumField())",
+                  "\t\tkeys := make([]string, 0, t.NumField()+1)",
+                  "\t\tvals := make([]string, 0, t.NumField()+1)",
+                  # 11.30 — an enum variant leads with its tag, as on pyro/node
+                  '\t\tif tag, ok := cryoEnumTag[t.Name()]; ok {',
+                  '\t\t\tkeys = append(keys, "tag")',
+                  "\t\t\tvals = append(vals, tag)",
+                  "\t\t}",
                   "\t\tfor i := 0; i < t.NumField(); i++ {",
                   "\t\t\tf := t.Field(i)",
                   '\t\t\tif f.PkgPath != "" { continue }',
@@ -499,6 +526,43 @@ class CodeGenGo:
         if 'assert' in self._helpers:
             H += ["func cryoAssert(cond bool, msg string) {",
                   "\tif !cond {", '\t\tpanic("[Cryo Assert] " + msg)', "\t}", "}", ""]
+        if 'anycast' in self._helpers:
+            # 11.31 — an `any` reaching a typed slot. go is the only backend
+            # where the interface is explicit, so this supplies what pyro and
+            # node do implicitly.
+            #
+            # The numeric cases are not laxity. A Cryo `int` is int64 here, but
+            # a value that entered the interface as an untyped constant, or
+            # came back from json_decode as a float64, is a different dynamic
+            # type carrying the same number — and on pyro and node it converts
+            # without comment. Refusing it would make go disagree with them
+            # again, in the other direction.
+            #
+            # Anything else PANICS rather than yielding a zero value: `int b =
+            # a` succeeding with b == 0 when `a` held a string is the failure
+            # the dynamic backends do not have, and a silent wrong number is
+            # worse than a stop.
+            H += ["func cryoAs[T any](v any) T {",
+                  "\tif t, ok := v.(T); ok {", "\t\treturn t", "\t}",
+                  "\tvar zero T",
+                  "\tif v == nil {", "\t\treturn zero", "\t}",
+                  "\tswitch any(zero).(type) {",
+                  "\tcase int64:",
+                  "\t\tswitch n := v.(type) {",
+                  "\t\tcase int:     return any(int64(n)).(T)",
+                  "\t\tcase int32:   return any(int64(n)).(T)",
+                  "\t\tcase float64: return any(int64(n)).(T)",
+                  "\t\t}",
+                  "\tcase float64:",
+                  "\t\tswitch n := v.(type) {",
+                  "\t\tcase int:     return any(float64(n)).(T)",
+                  "\t\tcase int32:   return any(float64(n)).(T)",
+                  "\t\tcase int64:   return any(float64(n)).(T)",
+                  "\t\t}",
+                  "\t}",
+                  '\tpanic(fmt.Sprintf("[Cryo] value of type %T cannot be used '
+                  'as %T", v, zero))',
+                  "}", ""]
         if 'addovf' in self._helpers:
             H += ["func cryoAddOvf(a, b int64) int64 {",
                   "\ts := a + b",
@@ -1441,6 +1505,13 @@ class CodeGenGo:
                     self._enum_defs.append(f"\tVal{idx} {go_type(t)}")
                 self._enum_defs.append("}")
                 self._enum_defs.append(f"func ({struct_name}) is{gid(n.name)}() {{}}")
+                # 11.30 — the variant TAG, for printing. On pyro and node an
+                # enum value is a tagged map and prints as `{tag: Ok, val0: 5}`;
+                # on go it is a struct and cryoStr rendered only its fields —
+                # `{val0: 5}` — losing the one part that says WHICH variant it
+                # is. Reflection cannot recover the member name from the type,
+                # so it is recorded here, where it is known.
+                self._enum_tags[struct_name] = m.name
                 
                 params = ', '.join(f"v{idx} {go_type(t)}" for idx, t in enumerate(m.fields))
                 args_struct = ', '.join(f"Val{idx}: v{idx}" for idx in range(len(m.fields)))
@@ -1605,7 +1676,10 @@ class CodeGenGo:
             okv = self._go_try(n.value.operand)
             self._emit(f"{gid(n.name)} = {okv}")
             return
-        self._emit(f"{gid(n.name)} = {self._expr(n.value)}")
+        # _expr_typed, not _expr: the declared type of the target is what makes
+        # an `any` on the right assertable (11.31).
+        self._emit(f"{gid(n.name)} = "
+                   f"{self._expr_typed(n.value, self.te.get(n.name))}")
 
     def _index_assign(self, n: IndexAssignment):
         self._emit(f"{self._expr(n.obj)}[{self._expr(n.index)}] = {self._expr(n.value)}")
@@ -1622,8 +1696,27 @@ class CodeGenGo:
         Go cannot infer an element type from `[]any{…}`, so a literal has to be
         spelled with the type of the place it is going into (declared variable,
         function return, …). Without such a hint we fall back to []any, which is
-        right only in a genuinely typeless position."""
-        elems = ', '.join(self._expr(e) for e in node.elements)
+        right only in a genuinely typeless position.
+
+        The hint has to be passed DOWN as well. Elements used to be emitted
+        with plain _expr, which threw the context away one level in, so
+        `int[][] n = [[1, 2], [3]]` produced `[][]int64{[]any{…}, …}` and Go
+        refused it: "cannot use []any{…} as []int64 value". A nested literal is
+        exactly the case where Go can least infer anything, so it is the case
+        that most needs the type.
+        """
+        et = elem_type(typ) if typ and typ.endswith('[]') else None
+        parts = []
+        for e in node.elements:
+            if isinstance(e, ArrayLiteral):
+                parts.append(self._array_literal(e, et))
+            elif isinstance(e, MapLiteral):
+                parts.append(self._map_literal(e, et))
+            else:
+                # _expr_typed, so an `any` element is asserted to the element
+                # type rather than landing in a typed slice untouched (11.31).
+                parts.append(self._expr_typed(e, et) if et else self._expr(e))
+        elems = ', '.join(parts)
         if typ and typ.endswith('[]'):
             return f"{go_type(typ)}{{{elems}}}"
         return f"[]any{{{elems}}}"
@@ -1900,7 +1993,29 @@ class CodeGenGo:
         """Expression with knowledge of the target type (handles null)."""
         if isinstance(node, Literal) and node.kind == 'null':
             return zero_value(target)
-        return self._expr(node)
+        return self._assert_any(self._expr(node), self.te.infer(node), target)
+
+    # 11.31 — an `any` value reaching a typed slot.
+    #
+    # `any a = 5; int b = a;` runs on pyro and node, where the conversion is
+    # implicit, and failed to COMPILE on go: "cannot use a (variable of
+    # interface type any) as int64 value: need type assertion". Go is the only
+    # backend that makes the interface explicit, so the code generator has to
+    # supply what the dynamic backends do for free.
+    #
+    # It is a CHECKED assertion, `v.(T)`, not `v.(T)` with the comma-ok form
+    # discarded: a wrong type must panic at the point of the mistake. Silently
+    # substituting a zero value would make `int b = a` succeed with b == 0 when
+    # `a` held a string — the dynamic backends raise there, and matching them
+    # matters more than avoiding a panic.
+    def _assert_any(self, src: str, from_t: str, to_t: str) -> str:
+        if from_t != 'any' or not to_t or to_t in ('any', 'unknown'):
+            return src
+        gt = go_type(to_t)
+        if not gt or gt in ('any', 'interface{}'):
+            return src
+        self._helpers.add('anycast')
+        return f"cryoAs[{gt}]({src})"
 
     def _expr(self, node: Node) -> str:
         if isinstance(node, TryExpr):
@@ -2077,6 +2192,19 @@ class CodeGenGo:
         r  = self._expr(node.right)
         op = node.op
 
+        # 11.31 — an `any` operand in arithmetic. Go will not add an interface
+        # to a number, so the side that is `any` is asserted to the other's
+        # type. Doing it here rather than only at declarations and call
+        # arguments matters because the 11.21 optimizer INLINES small
+        # functions: `takes(a)` with `fn takes(int n) = n * 2` arrives here as
+        # `a * 2` with the parameter's declared type already gone, so a fix
+        # that only looked at call sites would work until the optimizer ran.
+        if op not in ('&&', '||', '??') and lt != rt:
+            if lt == 'any' and rt not in ('any', 'unknown', 'null'):
+                l, lt = self._assert_any(l, 'any', rt), rt
+            elif rt == 'any' and lt not in ('any', 'unknown', 'null'):
+                r, rt = self._assert_any(r, 'any', lt), lt
+
         if op == '&&': return f"({l} && {r})"
         if op == '||': return f"({l} || {r})"
         if op == '??':
@@ -2162,13 +2290,37 @@ class CodeGenGo:
         self._helpers.add('str')
         return f"cryoStr({expr})"
 
+    def _enum_ctor_name(self, callee: str) -> str:
+        """`Result_Ok` -> `Ok` when that names an enum variant (11.33).
+
+        The generated Go has a struct `Result_Ok` and a constructor `Ok`, so
+        the mangled call has to be routed to the latter. Only rewritten when
+        the prefix really is the enum this member belongs to — a user function
+        that merely happens to contain an underscore is left alone.
+        """
+        enum = self._member_to_enum.get(callee)
+        if enum and callee.startswith(enum + '_'):
+            bare = callee[len(enum) + 1:]
+            if self._member_to_enum.get(bare) == enum:
+                return gid(bare)
+        return gid(callee)
+
     def _call(self, node: CallExpr) -> str:
         c = node.callee
         a = node.args
         # user-defined functions shadow stdlib builtins (print/len/has/keys stay reserved)
         if c in self.te._fns and c not in ('print', 'len', 'has', 'keys'):
-            args = ', '.join(self._expr(x) for x in a)
-            return f"{gid(c)}({args})"
+            # 11.33 — the mangled spelling of an enum constructor. Both `Ok` and
+            # `Result_Ok` are deliberately accepted (semantic.py registers the
+            # arity for each) and both work on pyro and node. On go the mangled
+            # one collided with the generated STRUCT of the same name, so
+            # `Result_Ok(5)` was read by Go as a type conversion and failed with
+            # "cannot convert 5 to type Result_Ok". The constructor function is
+            # the bare member name, so emit that.
+            callee = self._enum_ctor_name(c)
+            args = ', '.join(self._expr_typed(x, self.te.fn_param(c, i))
+                             for i, x in enumerate(a))
+            return f"{callee}({args})"
         if c == 'print':
             self._imports.add('fmt')
             if not a: return "fmt.Println()"

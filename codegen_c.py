@@ -33,6 +33,19 @@ def c_type(t: str) -> str:
         raise CodeGenError(
             f"function type '{t}' (first-class functions) is not supported in the C "
             f"backend; use --backend go, node or pyro.")
+    # Same leak, same fix. C has no dynamic type, and `any` fell through the
+    # pass-through below into the output verbatim, so gcc — not the compiler —
+    # reported `unknown type name 'any'` against generated code the programmer
+    # never wrote. A list comprehension reaches here without the word `any`
+    # appearing in the source at all: its synthetic helper is typed `any`, so
+    # the message says where it comes from rather than naming a type the
+    # reader cannot find.
+    if t == 'any':
+        raise CodeGenError(
+            "the dynamic type 'any' has no C representation. It also comes from "
+            "constructs that infer it — a comprehension, or a `for (x in xs)` "
+            "without a declared type. Give the variable an explicit type, or use "
+            "--backend go, node or pyro.")
     if t and t.endswith('[]'):
         return 'CryoArray*'
     return C_TYPE.get(t, t)          # struct types pass directly
@@ -284,7 +297,7 @@ class CodeGenC:
         elif isinstance(node, Switch):              self._switch(node)
         elif isinstance(node, Assert):              self._assert(node)
         elif isinstance(node, SafetyBlock):         self._safety(node)
-        elif isinstance(node, Block):               self._safety(node)
+        elif isinstance(node, Block):               self._block(node)
         elif isinstance(node, Import):              self._import(node)
         elif isinstance(node, Library):             self._library(node)
         elif isinstance(node, ForeignBlock):        self._foreign(node)
@@ -537,6 +550,29 @@ class CodeGenC:
         else:
             msg = f'"assert failed (line {n.line})"'
         self._emit(f"cryo_assert({cond}, {msg});")
+
+    def _block(self, n: Block):
+        """A plain lexical scope: `{ ... }` and a new name scope.
+
+        Block was routed to _safety, which reads `n.safe` — an attribute a
+        plain Block does not have, so `for (int i, string s in enumerate(a))`
+        on --backend c aborted with a Python AttributeError instead of
+        compiling. Every front-end desugaring that introduces a scope emits one
+        of these: enumerate, pairs, the 11.5 map form, comprehensions and
+        11.17's stream loop, so the C backend could not compile any of them.
+
+        A Block carries NO safety meaning, so it must not touch _safe_stack —
+        doing that would silently change whether the code inside it is
+        instrumented.
+        """
+        self._emit("{")
+        self._indent += 1
+        self.te.push()
+        for s in n.body:
+            self._gen(s)
+        self.te.pop()
+        self._indent -= 1
+        self._emit("}")
 
     def _safety(self, n: SafetyBlock):
         tag = 'safe' if n.safe else 'unsafe'
