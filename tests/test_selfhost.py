@@ -170,6 +170,45 @@ if got != expected:
 check("token stream identical to the reference lexer", got == expected)
 check("ends with EOF", len(got) > 0 and got[-1] == "EOF ")
 
+# ── 11.28: the tokens the self-hosted lexer used to be missing ──
+#
+# Fifteen kinds the reference lexer produced and this one did not. The failure
+# mode is what makes it worth its own sample: `pub`, `trait`, `impl` and
+# `permissions` lexed as plain IDENT, so the stream stayed the same LENGTH and
+# only a name-by-name comparison sees it. `..=` and `<<=` are the opposite
+# problem — they came out as two tokens each, and the trailing `=` then reads
+# as an assignment, so the divergence surfaces far from its cause.
+#
+# The three-character forms are listed first here because they are the ones an
+# ordering mistake breaks: `..=` must be tried before `..`, `<<=` before `<<`,
+# `::` before `:`.
+SAMPLE3 = ('int a = 0; a &= 1; a |= 2; a ^= 3; a <<= 1; a >>= 1; int b = ~a; '
+           'for (i in 0..5) { } for (j in 0..=5) { } '
+           'pub fn f() -> void ={ } trait T { } impl T for S { } '
+           'permissions { read = "./x"; } ns::name();')
+
+print("\n[11.28] tokens the self-hosted lexer was missing")
+exp_new = reference_tokens(SAMPLE3)
+got_new, res_new = selfhost_tokens(SAMPLE3)
+check("the extended sample compiled and ran", res_new.returncode == 0 and got_new)
+check("same number of tokens", len(got_new) == len(exp_new))
+if got_new != exp_new:
+    for i in range(max(len(got_new), len(exp_new))):
+        g = got_new[i] if i < len(got_new) else "<missing>"
+        e = exp_new[i] if i < len(exp_new) else "<extra>"
+        if g != e:
+            print(f"    divergence at position {i}: expected {e!r}, got {g!r}")
+            break
+check("token stream identical to the reference lexer", got_new == exp_new)
+
+# Each kind named individually: "the streams match" would still pass if a whole
+# construct silently disappeared from the sample during an edit.
+_kinds = {t.split(' ', 1)[0] for t in got_new}
+for _k in ('AMP_ASSIGN', 'PIPE_ASSIGN', 'CARET_ASSIGN', 'SHL_ASSIGN', 'SHR_ASSIGN',
+           'TILDE', 'RANGE', 'RANGE_INCL', 'PUB', 'TRAIT', 'IMPL',
+           'PERMISSIONS', 'COLON_COLON'):
+    check(f"emits {_k}", _k in _kinds)
+
 print("[9.3] self-hosted parser (Cryo on the Pyro VM) vs. reference parser")
 _esc = SAMPLE.replace("\\", "\\\\").replace('"', '\\"')
 res2 = _run_vm('import "parser.cryo"\nparse("' + _esc + '");\n')
