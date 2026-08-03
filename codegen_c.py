@@ -113,6 +113,34 @@ def elem_type(arr_t: str) -> str:
     return arr_t[:-2] if arr_t.endswith('[]') else 'unknown'
 
 
+_C_ESCAPES = {'\\': '\\\\', '"': '\\"', '\n': '\\n', '\t': '\\t',
+              '\r': '\\r', '\x00': '\\0'}
+
+
+def _c_string(v: str) -> str:
+    """A Cryo string as a C string literal.
+
+    The value was interpolated verbatim before, so a backslash in the program's
+    data became an ESCAPE in the generated C: `print("a\\\\b")` emitted
+    `"a\\b"`, which C reads as a backspace. A quote or a newline in the value
+    did worse and produced code that would not compile — the C compiler
+    reporting on a string the programmer never wrote.
+
+    Anything outside printable ASCII is left alone: the runtime is UTF-8 and
+    the generated file is compiled with -finput-charset=UTF-8, so the bytes
+    pass through correctly as themselves.
+    """
+    out = []
+    for ch in v:
+        if ch in _C_ESCAPES:
+            out.append(_C_ESCAPES[ch])
+        elif ord(ch) < 0x20:
+            out.append('\\%03o' % ord(ch))
+        else:
+            out.append(ch)
+    return '"' + ''.join(out) + '"'
+
+
 # ── Type Inference ──────────────────────────────────────
 
 class TypeEnv:
@@ -775,7 +803,7 @@ class CodeGenC:
         if isinstance(node, Literal):
             if node.kind == 'null':   return 'NULL'
             if node.kind == 'bool':   return 'true' if node.value else 'false'
-            if node.kind == 'string': return f'"{node.value}"'
+            if node.kind == 'string': return _c_string(node.value)
             if node.kind == 'int':    return str(node.value)
             if node.kind == 'float':  return repr(float(node.value))
             return str(node.value)
