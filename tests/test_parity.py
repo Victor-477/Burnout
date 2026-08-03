@@ -289,14 +289,108 @@ agree("?? evaluates its left side once",
       "print(bump() ?? 9);\nprint(calls);\n",
       backends=('pyro', 'node'), expect="9\n1")
 
-# Still refused, and the message must name what IS supported rather than only
-# pointing elsewhere.
+# Maps themselves are supported now — see the 11.27 section below, which
+# retired the "a map is still refused" assertion rather than relaxing it. What
+# is still refused is a map whose key or value has no C representation, and the
+# message has to name the four types that work rather than only point at go.
 _w = tempfile.mkdtemp(prefix='cryo_par_')
-_r = _compile(_w, 'map<string,int> m = {"a": 1};\nprint(m["a"]);\n', 'c',
-              os.path.join(_w, 'm.c'))
-check("a map is still refused on C", _r.returncode != 0)
-check("and the message names the backends that do support it",
-      'go' in (_r.stdout + _r.stderr), (_r.stdout + _r.stderr)[:200])
+_r = _compile(_w, 'struct S { int a; }\nmap<string,S> m = {};\nprint(len(m));\n',
+              'c', os.path.join(_w, 'm.c'))
+check("a map of an unrepresentable value type is refused", _r.returncode != 0,
+      (_r.stdout + _r.stderr)[:200])
+check("and the message names the types that do work",
+      'int, number, string or bool' in (_r.stdout + _r.stderr),
+      (_r.stdout + _r.stderr)[:300])
+
+# ── 11.4: or_else ──────────────────────────────────────────
+# Deferred since 11.4 because the synthetic `fn(any, any) -> any` it lowers to
+# would not compile on go — `any` did not reach a typed context there. 11.31
+# fixed that, which is why this can exist at all, and why the arithmetic case
+# below is the one that actually proves it: `or_else(a, 0) * 2` is where the
+# old failure appeared.
+print("\n── 11.4: or_else ──")
+_R = "enum Result { Ok(int), Err(string) }\n"
+agree("or_else on Ok yields the payload",
+      _R + "Result a = Ok(5);\nprint(or_else(a, 0));\n", expect="5")
+agree("or_else on Err yields the default",
+      _R + 'Result b = Err("no");\nprint(or_else(b, 9));\n', expect="9")
+agree("the result is usable in arithmetic",
+      _R + "Result a = Ok(5);\nint x = or_else(a, 0);\nprint(x + 1);\n"
+           "print(or_else(a, 0) * 2);\n", expect="6\n10")
+# A wildcard arm, not `Err(e)`: an enum may have more than two variants and
+# every non-Ok one should take the default rather than fall out of a
+# non-exhaustive match.
+agree("a third variant also takes the default",
+      "enum R { Ok(int), Err(string), Timeout(int) }\n"
+      "R t = Timeout(3);\nprint(or_else(t, 42));\n", expect="42")
+
+_w2 = tempfile.mkdtemp(prefix='cryo_par_')
+_r = _compile(_w2, _R + "Result a = Ok(1);\nprint(or_else(a));\n", 'pyro',
+              os.path.join(_w2, 'oe.pyro'))
+check("wrong arity is refused", _r.returncode != 0)
+check("and the message says what the arguments are",
+      'or_else takes 2' in (_r.stdout + _r.stderr), (_r.stdout + _r.stderr)[:200])
+
+# The desugaring must not steal a name the program defines itself.
+agree("a user function named or_else still wins",
+      "fn or_else(int a, int b) -> int ={ return a + b; }\nprint(or_else(2, 3));\n",
+      expect="5")
+
+# ── 11.27: maps on the C backend ───────────────────────────
+# The last of the three documented gaps. An open-addressed hash table in the C
+# runtime — and the thing worth checking is not that it stores values but that
+# it AGREES with the other backends about ORDER: both the VM and go render a
+# map, and return keys(), sorted by the key's own TEXT. A C map iterating in
+# bucket order would print the same program differently here, and differently
+# again after an insertion resized the table.
+print("\n── 11.27: maps on the C backend ──")
+agree("reading a map", 'map<string,int> m = {"b": 2, "a": 1};\nprint(m["a"]);\n',
+      backends=_ALL, expect="1")
+agree("rendering a map", 'map<string,int> m = {"b": 2, "a": 1};\nprint(m);\n',
+      backends=_ALL, expect="{a: 1, b: 2}")
+agree("writing to a map",
+      'map<string,int> m = {"a": 1};\nm["c"] = 3;\nprint(m);\nprint(len(m));\n',
+      backends=_ALL, expect="{a: 1, c: 3}\n2")
+agree("has()", 'map<string,int> m = {"a": 1};\nprint(has(m, "a"));\nprint(has(m, "z"));\n',
+      backends=_ALL, expect="true\nfalse")
+agree("keys()", 'map<string,int> m = {"b": 2, "a": 1};\nstring[] k = keys(m);\nprint(k);\n',
+      backends=_ALL, expect="[a, b]")
+agree("remove()", 'map<string,int> m = {"a": 1, "b": 2};\nremove(m, "a");\nprint(m);\n',
+      backends=_ALL, expect="{b: 2}")
+agree("an empty map", "map<string,int> m = {};\nprint(m);\nprint(len(m));\n",
+      backends=_ALL, expect="{}\n0")
+# Integer keys sort by TEXT, not numerically — 1, 10, 2. That looks wrong at a
+# glance, which is exactly why it is asserted: it is what the VM does, and
+# agreeing with it matters more than being intuitive.
+agree("int keys order by their text, as on the VM",
+      'map<int,string> a = {2: "two", 1: "one", 10: "ten"};\nprint(a);\n',
+      backends=_ALL, expect="{1: one, 10: ten, 2: two}")
+agree("number and bool values",
+      'map<string,number> b = {"pi": 3.14};\nmap<string,bool> c = {"yes": true};\n'
+      'print(b);\nprint(c);\n',
+      backends=_ALL, expect="{pi: 3.14}\n{yes: true}")
+agree("pairs() iteration",
+      'map<string,int> m = {"b": 2, "a": 1};\n'
+      'for (string k, int v in pairs(m)) { print(k); print(v); }\n',
+      backends=_ALL, expect="a\n1\nb\n2")
+# Deletion in an open-addressed table is where these go quietly wrong: leaving
+# a hole breaks lookups for any key that probed PAST the removed slot. 500
+# inserts force several growths, then half are removed.
+agree("500 inserts and 250 removes stay consistent",
+      "map<int,int> m = {};\n"
+      "for (int i = 0; i < 500; i = i + 1) { m[i] = i * 2; }\n"
+      "for (int i = 0; i < 500; i = i + 2) { remove(m, i); }\n"
+      "int total = 0;\nint missing = 0;\n"
+      "for (int i = 0; i < 500; i = i + 1) {\n"
+      "    if (has(m, i)) { total = total + m[i]; }\n"
+      "    else { missing = missing + 1; }\n}\n"
+      "print(len(m));\nprint(total);\nprint(missing);\n",
+      backends=_ALL, expect="250\n125000\n250")
+# Array element assignment had no typed setter either, so it was refused
+# alongside the maps.
+agree("array element assignment",
+      "int[] a = [1, 2, 3];\na[1] = 99;\nprint(a);\n",
+      backends=_ALL, expect="[1, 99, 3]")
 
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))

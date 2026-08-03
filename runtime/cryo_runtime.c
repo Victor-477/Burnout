@@ -772,3 +772,169 @@ char* cryo_exec(const char* cmd) {
 #endif
     return res;
 }
+
+/* ---------- 11.27: maps (map<K,V>) ----------
+   Open addressing with linear probing. Small, and the whole table is one
+   allocation, which matters more here than the theoretical wins of chaining:
+   Cryo maps are usually tens of entries, not millions. */
+
+static uint64_t _cryo_map_hash(CryoMap* m, uint64_t k) {
+    if (m->str_keys) {
+        const char* s = (const char*)(uintptr_t)k;
+        uint64_t h = 1469598103934665603ULL;      /* FNV-1a */
+        if (s) for (; *s; s++) { h ^= (unsigned char)*s; h *= 1099511628211ULL; }
+        return h;
+    }
+    /* integer keys: a mix, so that consecutive ints do not all probe together */
+    uint64_t h = k;
+    h ^= h >> 33; h *= 0xff51afd7ed558ccdULL;
+    h ^= h >> 33; h *= 0xc4ceb9fe1a85ec53ULL;
+    h ^= h >> 33;
+    return h;
+}
+
+static int _cryo_map_keyeq(CryoMap* m, uint64_t a, uint64_t b) {
+    if (!m->str_keys) return a == b;
+    const char* x = (const char*)(uintptr_t)a;
+    const char* y = (const char*)(uintptr_t)b;
+    if (!x || !y) return x == y;
+    return strcmp(x, y) == 0;
+}
+
+CryoMap* cryo_map_new(int str_keys) {
+    CryoMap* m = malloc(sizeof(CryoMap));
+    if (!m) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    m->cap = 16; m->len = 0; m->str_keys = str_keys;
+    m->e = calloc((size_t)m->cap, sizeof(CryoMapEntry));
+    if (!m->e) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    return m;
+}
+
+static int64_t _cryo_map_slot(CryoMap* m, uint64_t k) {
+    int64_t mask = m->cap - 1;
+    int64_t i = (int64_t)(_cryo_map_hash(m, k) & (uint64_t)mask);
+    while (m->e[i].used && !_cryo_map_keyeq(m, m->e[i].key, k)) {
+        i = (i + 1) & mask;
+    }
+    return i;
+}
+
+static void _cryo_map_grow(CryoMap* m) {
+    int64_t oldcap = m->cap;
+    CryoMapEntry* old = m->e;
+    m->cap *= 2;
+    m->e = calloc((size_t)m->cap, sizeof(CryoMapEntry));
+    if (!m->e) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    m->len = 0;
+    for (int64_t i = 0; i < oldcap; i++) {
+        if (old[i].used) {
+            int64_t j = _cryo_map_slot(m, old[i].key);
+            m->e[j] = old[i];
+            m->len++;
+        }
+    }
+    free(old);
+}
+
+void cryo_map_set(CryoMap* m, uint64_t k, uint64_t v) {
+    /* Grown at half full. Linear probing degrades badly past ~70%, and this
+       keeps the probe runs short without much memory. */
+    if ((m->len + 1) * 2 > m->cap) _cryo_map_grow(m);
+    int64_t i = _cryo_map_slot(m, k);
+    if (!m->e[i].used) { m->e[i].used = 1; m->e[i].key = k; m->len++; }
+    m->e[i].val = v;
+}
+
+bool cryo_map_has(CryoMap* m, uint64_t k) {
+    if (!m) return false;
+    int64_t i = _cryo_map_slot(m, k);
+    return m->e[i].used ? true : false;
+}
+
+uint64_t cryo_map_get(CryoMap* m, uint64_t k) {
+    if (!m) return 0;
+    int64_t i = _cryo_map_slot(m, k);
+    return m->e[i].used ? m->e[i].val : 0;
+}
+
+void cryo_map_remove(CryoMap* m, uint64_t k) {
+    if (!m) return;
+    int64_t i = _cryo_map_slot(m, k);
+    if (!m->e[i].used) return;
+    m->e[i].used = 0;
+    m->len--;
+    /* Re-insert the rest of this probe run. A tombstone would be simpler, but
+       leaving a hole here breaks lookups for any key that probed PAST this
+       slot — the classic open-addressing deletion bug. */
+    int64_t mask = m->cap - 1;
+    int64_t j = (i + 1) & mask;
+    while (m->e[j].used) {
+        CryoMapEntry moved = m->e[j];
+        m->e[j].used = 0;
+        m->len--;
+        cryo_map_set(m, moved.key, moved.val);
+        j = (j + 1) & mask;
+    }
+}
+
+int64_t cryo_map_len(CryoMap* m) { return m ? m->len : 0; }
+
+/* Keys as text, for ordering. Both the VM and the go backend order a map by
+   the key's own textual form, so this has to agree with them. */
+static char* _cryo_key_text(CryoMap* m, uint64_t k) {
+    if (m->str_keys) {
+        const char* s = (const char*)(uintptr_t)k;
+        return s ? (char*)s : (char*)"null";
+    }
+    return cryo_i64_to_str((int64_t)k);
+}
+
+static int _cryo_key_cmp(CryoMap* m, uint64_t a, uint64_t b) {
+    char* x = _cryo_key_text(m, a);
+    char* y = _cryo_key_text(m, b);
+    int r = strcmp(x, y);
+    if (!m->str_keys) { free(x); free(y); }
+    return r;
+}
+
+CryoArray* cryo_map_keys(CryoMap* m) {
+    CryoArray* out = cryo_array_new();
+    if (!m) return out;
+    for (int64_t i = 0; i < m->cap; i++) {
+        if (m->e[i].used) cryo_array_push(out, m->e[i].key);
+    }
+    /* insertion sort: key counts here are small, and it keeps the comparator
+       (which may allocate) out of qsort's context-free callback */
+    for (int64_t i = 1; i < out->length; i++) {
+        uint64_t v = out->data[i];
+        int64_t j = i - 1;
+        while (j >= 0 && _cryo_key_cmp(m, out->data[j], v) > 0) {
+            out->data[j + 1] = out->data[j];
+            j--;
+        }
+        out->data[j + 1] = v;
+    }
+    return out;
+}
+
+char* cryo_map_to_str(CryoMap* m, int val_kind) {
+    CryoSb b; cryo_sb_init(&b);
+    cryo_sb_add(&b, "{");
+    CryoArray* ks = cryo_map_keys(m);
+    for (int64_t i = 0; i < ks->length; i++) {
+        if (i) cryo_sb_add(&b, ", ");
+        uint64_t k = ks->data[i];
+        char* kt = _cryo_key_text(m, k);
+        cryo_sb_add(&b, kt);
+        if (!m->str_keys) free(kt);
+        cryo_sb_add(&b, ": ");
+        uint64_t v = cryo_map_get(m, k);
+        if (val_kind == 0) { char* s = cryo_i64_to_str((int64_t)v); cryo_sb_add(&b, s); free(s); }
+        else if (val_kind == 1) { double d; memcpy(&d, &v, 8); char* s = cryo_f64_to_str(d); cryo_sb_add(&b, s); free(s); }
+        else if (val_kind == 2) { const char* s = (const char*)(uintptr_t)v; cryo_sb_add(&b, s ? s : "null"); }
+        else { cryo_sb_add(&b, v ? "true" : "false"); }
+    }
+    cryo_sb_add(&b, "}");
+    cryo_array_free(ks);
+    return b.p;
+}

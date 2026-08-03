@@ -370,7 +370,19 @@ def expect_c_err(src, label):
         gen_c(src); check(label + " (should fail)", False)
     except Exception as e:
         check(label, "backend go" in str(e).lower())
-expect_c_err('map<string,int> m = {};', "c rejeita map")
+# 11.27 — maps are supported on C now, so "c rejects map" was RETIRED rather
+# than relaxed, exactly as the optional assertion below was. What is still
+# refused is a map whose key or value has no C representation.
+check("c aceita map<string,int> (11.27)",
+      'CryoMap*' in gen_c('map<string,int> m = {"a": 1}; print(m["a"]);'))
+check("c aceita map<int,string>",
+      'CryoMap*' in gen_c('map<int,string> m = {1: "a"}; print(m[1]);'))
+try:
+    gen_c('struct S { int a; } map<string,S> m = {}; print(len(m));')
+    check("c rejeita map de struct (should fail)", False)
+except Exception as e:
+    check("c rejeita map de struct, nomeando os tipos suportados",
+          'int, number, string or bool' in str(e))
 # 11.27 — scalar optionals are SUPPORTED on C now (int?/number?/bool?/string?),
 # so the old "c rejects optional" assertion was retired rather than relaxed.
 # What is still refused is an optional of a type with no pointer form, and the
