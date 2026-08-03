@@ -97,10 +97,25 @@ int64_t cryo_imod_chk(int64_t a, int64_t b) {
 /* ---------- Security: assert ---------- */
 
 void cryo_assert(bool cond, const char* msg) {
-    if (!cond) {
-        fprintf(stderr, "[Cryo Assert] %s\n", msg ? msg : "false condition");
-        abort();
+    if (cond) return;
+    const char* m = msg ? msg : "false condition";
+    /* A failed assert is CATCHABLE, matching the VM and the go/node backends:
+       `try { assert(...); } catch (string e)` works there, and aborting here
+       killed the process instead. Found by 12.1, whose per-test isolation
+       depends on exactly this — on C the first failing test ended the run and
+       hid every test after it.
+
+       The UNCAUGHT path is byte-identical to what it printed before, because
+       that text is compared against the other engines. It deliberately does
+       NOT go through CRYO_THROW, which would prefix it with
+       "[Cryo Exception] " and make the two disagree. */
+    if (_cryo_exc.active) {
+        snprintf(_cryo_exc.message, sizeof(_cryo_exc.message),
+                 "[Cryo Assert] %s", m);
+        longjmp(_cryo_exc.buf, 1);
     }
+    fprintf(stderr, "[Cryo Assert] %s\n", m);
+    abort();
 }
 
 /* ---------- Security: null pointer guard ---------- */
