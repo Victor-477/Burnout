@@ -18,8 +18,11 @@
 #     the one a scheduler makes newly reachable.
 #
 #  Where pyro and go DISAGREE is recorded here too rather than
-#  hidden, because the disagreements are the interesting part:
-#  awaiting twice, and the order of interleaved output.
+#  hidden, because the disagreements are the interesting part.
+#  Awaiting twice WAS one of them and is now fixed on the go side
+#  (12.11); the ordering of interleaved output remains, and is
+#  not fixable — go's order is a race, so there is nothing stable
+#  there to agree with.
 # ============================================================
 import os
 import subprocess
@@ -135,6 +138,42 @@ def main():
     check("a future can be passed to a function and awaited there",
           rc == 0 and '7' in out, log[-400:])
 
+    # ── 12.11: a future holds its value ────────────────────
+    #
+    # This was the first divergence 12.5 turned up, and it is now fixed on the
+    # go side rather than papered over. `await f` twice used to kill a go binary
+    # with "all goroutines are asleep" — the future WAS a buffered channel and
+    # the single value had already been taken — while pyro printed it twice. A
+    # crash on one backend and a result on the other is invariant 1 broken, and
+    # pyro had the defensible reading: a future is a value you can look at, not
+    # a queue you drain.
+    print("\n── a future can be awaited more than once ──")
+    TWICE = ('fn t() -> int ={ return 5; }\n'
+             'future<int> f = spawn t();\nprint(await f);\nprint(await f);\n')
+    for b in ('pyro', 'go'):
+        rc, out, log = run(TWICE, b, 'twice_' + b)
+        check(f"{b}: awaiting the same future twice gives the value twice",
+              rc == 0 and out[:2] == ['5', '5'], f"rc={rc} out={out[:3]} {log[-300:]}")
+        check(f"{b}: and does not deadlock",
+              'deadlock' not in log and 'asleep' not in log, log[-300:])
+
+    # Every future in a fan-out awaited twice: 55 collected twice.
+    DOUBLE_FAN = ('fn t(int n) -> int ={ return n * n; }\n'
+                  'int[] ids = [1, 2, 3, 4, 5];\n'
+                  'future<int>[] pend = [];\n'
+                  'for (int id in ids) { pend.push(spawn t(id)); }\n'
+                  'int sum = 0;\n'
+                  'for (future<int> f in pend) { sum += await f; }\n'
+                  'for (future<int> f in pend) { sum += await f; }\n'
+                  'print(sum);\n')
+    outs = {}
+    for b in ('pyro', 'go'):
+        rc, out, log = run(DOUBLE_FAN, b, 'dblfan_' + b)
+        outs[b] = out[:1]
+        check(f"{b}: a whole fan-out collected twice gives 110",
+              rc == 0 and '110' in out, f"rc={rc} out={out[:2]} {log[-300:]}")
+    check("and the two backends agree on it", outs['pyro'] == outs['go'], repr(outs))
+
     # ── the part output cannot prove ───────────────────────
     #
     # A scheduler that simply ran each task to completion at its await would
@@ -199,8 +238,8 @@ def main():
 
     # A spawned task that nobody awaits and nobody yields to never runs here.
     #
-    # This is one of the two places pyro and go genuinely DISAGREE, and it is
-    # not pyro's doing: on go the program is a race between the goroutine and
+    # This is where pyro and go genuinely disagree, and it is not pyro's
+    # doing: on go the program is a race between the goroutine and
     # main returning, so it prints "main" on one run and "main"/"ran" on the
     # next — both were observed while writing this. So the assertion is that
     # pyro is CONSISTENT, not that the two agree: there is nothing stable on

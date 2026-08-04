@@ -398,12 +398,20 @@ except Exception as e:
 
 # ── Phase 2: concurrency (async) + HTTP (backend Go) ────────
 print("[phase2] async: spawn / await / future")
-check("go future<T> -> chan", "chan int64" in gen_go("future<int> f = spawn g(); int r = await f;"))
-check("go spawn -> goroutine+canal",
+# 12.11 — a future is no longer the channel itself. It used to be, and `await`
+# a receive, which made awaiting twice a deadlock on go while pyro returned the
+# value again. These assert the new shape; the BEHAVIOUR they exist to protect
+# (await twice, on both backends) is tested in test_concurrency.py.
+check("go future<T> -> *cryoFuture[T]",
+      "*cryoFuture[int64]" in gen_go("future<int> f = spawn g(); int r = await f;"))
+check("go spawn -> goroutine writing into the future",
       all(s in gen_go("future<int> f = spawn h();")
-          for s in ("make(chan int64, 1)", "go func()", "<-")))
-check("go await -> receber do canal", "(<-f)" in gen_go("future<int> f = spawn h(); int r = await f;"))
-check("go future array", "[]chan int64" in gen_go("future<int>[] ts = [];"))
+          for s in ("cryoSpawn(func() int64", "go func()", "close(fu.done)")))
+check("go await -> cryoAwait, not a receive",
+      "cryoAwait(f)" in gen_go("future<int> f = spawn h(); int r = await f;"))
+check("go await does not consume the value",
+      "return fu.v" in gen_go("future<int> f = spawn h(); int r = await f;"))
+check("go future array", "[]*cryoFuture[int64]" in gen_go("future<int>[] ts = [];"))
 check("go for-each sobre futures",
       "range ts" in gen_go("future<int>[] ts=[]; int s=0; for (future<int> t in ts) { s += await t; }"))
 

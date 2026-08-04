@@ -101,8 +101,10 @@ def go_type(t: str) -> str:
     if t.startswith('map<') and t.endswith('>'):
         k, v = _split_type_pair(t[4:-1])
         return f"map[{go_type(k)}]{go_type(v)}"
-    if t.startswith('future<') and t.endswith('>'):   # future -> channel
-        return f"chan {go_type(t[7:-1])}"
+    if t.startswith('future<') and t.endswith('>'):
+        # 12.11 — a future used to BE the channel, so `await f` was a receive
+        # and awaiting twice blocked forever. It now holds its value.
+        return f"*cryoFuture[{go_type(t[7:-1])}]"
     if t.endswith('[]'):
         return '[]' + go_type(t[:-2])
     return GO_TYPE.get(t, t)   # structs/enums pass straight through
@@ -526,6 +528,40 @@ class CodeGenGo:
         if 'assert' in self._helpers:
             H += ["func cryoAssert(cond bool, msg string) {",
                   "\tif !cond {", '\t\tpanic("[Cryo Assert] " + msg)', "\t}", "}", ""]
+        if 'future' in self._helpers:
+            # 12.11 — a future HOLDS its result; it does not hand it over.
+            #
+            # It used to be a buffered channel, and `await` a receive. That made
+            # `await f` twice a deadlock ("all goroutines are asleep"), because
+            # the single buffered value had already been taken — while the same
+            # program on the pyro backend printed the value twice. A crash on
+            # one backend and a result on another is invariant 1 broken, and
+            # pyro has the defensible reading: a future is a value you can look
+            # at, not a queue you drain.
+            #
+            # `close` rather than a send is what fixes it: a closed channel
+            # makes every receive return immediately, for any number of readers
+            # and any number of times. The write to v happens-before the close
+            # and the read happens-after the receive, so there is no race
+            # despite v carrying no lock.
+            H += ["type cryoFuture[T any] struct {",
+                  "\tdone chan struct{}",
+                  "\tv    T",
+                  "}",
+                  "",
+                  "func cryoSpawn[T any](f func() T) *cryoFuture[T] {",
+                  "\tfu := &cryoFuture[T]{done: make(chan struct{})}",
+                  "\tgo func() {",
+                  "\t\tfu.v = f()",
+                  "\t\tclose(fu.done)",
+                  "\t}()",
+                  "\treturn fu",
+                  "}",
+                  "",
+                  "func cryoAwait[T any](fu *cryoFuture[T]) T {",
+                  "\t<-fu.done",
+                  "\treturn fu.v",
+                  "}", ""]
         if 'anycast' in self._helpers:
             # 11.31 — an `any` reaching a typed slot. go is the only backend
             # where the interface is explicit, so this supplies what pyro and
@@ -2094,7 +2130,8 @@ class CodeGenGo:
             return self._spawn(node)
 
         if isinstance(node, AwaitExpr):
-            return f"(<-{self._expr(node.expr)})"
+            self._helpers.add('future')
+            return f"cryoAwait({self._expr(node.expr)})"
 
         if isinstance(node, Lambda):
             return self._lambda(node)
@@ -2137,12 +2174,12 @@ class CodeGenGo:
         return sig + " {\n" + body + "\n" + ('\t' * self._indent) + "}"
 
     def _spawn(self, node: SpawnExpr, elem: Optional[str] = None) -> str:
-        # spawn and  ->  goroutine + buffered channel (Future<T>)
+        # spawn e  ->  a goroutine writing into a cryoFuture (12.11)
         t = elem or self.te.infer(node.expr)
         gt = go_type(t) if t not in ('unknown', 'null', 'array') else 'any'
         inner = self._expr(node.expr)
-        return (f"func() chan {gt} {{ __ch := make(chan {gt}, 1); "
-                f"go func() {{ __ch <- {inner} }}(); return __ch }}()")
+        self._helpers.add('future')
+        return f"cryoSpawn(func() {gt} {{ return {inner} }})"
 
     def _map_literal(self, node: MapLiteral, map_type: Optional[str]) -> str:
         if map_type and is_map(map_type):
