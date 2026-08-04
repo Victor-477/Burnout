@@ -24,7 +24,7 @@ from compiler import main   # noqa: E402
 if __name__ == '__main__':
     # subcommands: `--lsp` starts the Language Server; `fmt` formats files;
     # `test` runs the file's `test fn` declarations (12.1);
-    # `repl` starts the interactive loop (12.2)
+    # `repl` starts the interactive loop (12.2); `pkg` manages cryo.toml (12.3)
     if len(sys.argv) > 1 and sys.argv[1] == '--lsp':
         import lsp
         lsp.main()
@@ -41,5 +41,9 @@ if __name__ == '__main__':
         # file rather than compiling it differently.
         import testrunner
         sys.exit(testrunner.main(sys.argv[2:]))
+    elif len(sys.argv) > 1 and sys.argv[1] == 'pkg':
+        # 12.3 — cryo.toml / cryo.lock. Not a compile at all, so a subcommand.
+        import pkg as _pkg
+        sys.exit(_pkg.main(sys.argv[2:]))
     else:
         main()
