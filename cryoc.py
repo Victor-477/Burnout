@@ -23,13 +23,18 @@ from compiler import main   # noqa: E402
 
 if __name__ == '__main__':
     # subcommands: `--lsp` starts the Language Server; `fmt` formats files;
-    # `test` runs the file's `test fn` declarations (12.1)
+    # `test` runs the file's `test fn` declarations (12.1);
+    # `repl` starts the interactive loop (12.2)
     if len(sys.argv) > 1 and sys.argv[1] == '--lsp':
         import lsp
         lsp.main()
     elif len(sys.argv) > 1 and sys.argv[1] == 'fmt':
         import format as _fmt
         sys.exit(_fmt.main(sys.argv[1:]))
+    elif len(sys.argv) > 1 and sys.argv[1] == 'repl':
+        # 12.2 — an interactive loop over the Pyro VM
+        import repl as _repl
+        sys.exit(_repl.main(sys.argv[2:]))
     elif len(sys.argv) > 1 and sys.argv[1] == 'test':
         # 12.1 — `cryoc test file.cryo [--backend …]`. A subcommand rather than
         # a flag, matching `fmt`, because it does something different with the
