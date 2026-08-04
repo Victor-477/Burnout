@@ -838,9 +838,17 @@ class CodeGenC:
     def _expr(self, node: Node) -> str:
         if isinstance(node, UnwrapExpr):
             return self._unwrap(node)
-        if isinstance(node, (MapLiteral, CastExpr, TryExpr, SpawnExpr, AwaitExpr)):
+        if isinstance(node, (SpawnExpr, AwaitExpr)):
+            # Named separately from the rest: the suggestion below used to list
+            # every other backend, and for concurrency two of the three refuse
+            # it as well — a message that sends the reader somewhere it also
+            # does not work is worse than no suggestion.
             raise CodeGenError(
-                f"'{type(node).__name__}' (map/JSON/'?' propagation/async) "
+                f"concurrency (spawn/await) is not supported in the C backend; "
+                f"use --backend go or pyro.")
+        if isinstance(node, (MapLiteral, CastExpr, TryExpr)):
+            raise CodeGenError(
+                f"'{type(node).__name__}' (map/JSON/'?' propagation) "
                 f"is not yet supported in the C backend; use --backend go, node "
                 f"or pyro.")
         if isinstance(node, Literal):

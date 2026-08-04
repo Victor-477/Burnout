@@ -85,6 +85,8 @@ OP_GETGLOBAL = 0x76
 OP_SETGLOBAL = 0x77
 OP_COALESCE = 0x74 # pop b, a -> a if a != null, else b  (operator ??)
 OP_UNWRAP  = 0x75 # pop a -> a if a != null, else aborts  (unwrap x!)
+OP_SPAWN   = 0x78 # pop a function value -> starts a task, pushes a future (12.5)
+OP_AWAIT   = 0x79 # pop a future -> its result, yielding until the task is done
 
 # operand size per opcode (bytes after the opcode)
 #  v2: jumps use i32 (formerly i16) -> no limit of ±32KB per function.
@@ -791,6 +793,22 @@ class CodeGenPyro:
                 "declaration, return or expression-statement — not nested.")
         if isinstance(n, Literal):
             self._literal(n); return
+        if isinstance(n, SpawnExpr):
+            # 12.5 — `spawn e` is compiled as a zero-argument closure over `e`,
+            # then OP_SPAWN. Reusing the lambda path rather than inventing a
+            # second capture mechanism is what makes `spawn` work on an
+            # arbitrary expression and not just on a call: the free variables of
+            # `e` are exactly a lambda's, and _captures_of already refuses the
+            # one case where pyro and go would disagree — capturing a variable
+            # that is later reassigned, since pyro captures by value and go by
+            # reference.
+            self._expr(Lambda([], None, [Return(n.expr)], getattr(n, 'line', 0)))
+            self._emit(OP_SPAWN)
+            return
+        if isinstance(n, AwaitExpr):
+            self._expr(n.expr)
+            self._emit(OP_AWAIT)
+            return
         if isinstance(n, Lambda):
             idx, captured = self._compile_lambda(n)
             if not captured:

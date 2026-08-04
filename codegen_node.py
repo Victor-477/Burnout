@@ -636,7 +636,7 @@ class CodeGenNode:
             return self._expr(n.operand)
         if isinstance(n, (SpawnExpr, AwaitExpr)):
             self._err("concurrency (spawn/await) is not supported in the node backend; "
-                      "use --backend go.")
+                      "use --backend go or pyro.")
         if isinstance(n, CallValueExpr):
             callee = self._expr(n.callee)
             args = ", ".join(self._expr(a) for a in n.args)

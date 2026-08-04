@@ -748,16 +748,16 @@ check("auto optional/json -> pyro (agora suportado)",
       _sel('number? x = null; string j = json_encode(x);') == 'pyro')
 check("auto http -> pyro (agora suportado)",
       _sel('string r = http_get("http://x");') == 'pyro')
-check("auto concurrency -> go (pyro not supports spawn/await)",
-      _sel('future<int> f = spawn g(1); int r = await f;') == 'go')
+check("auto concurrency -> pyro (12.5: the VM has a scheduler)",
+      _sel('future<int> f = spawn g(1); int r = await f;') == 'pyro')
 check("auto llm -> go", _sel('string r = agent("m","p");') == 'go')
 check("auto machine (pyro_exec) -> go", _sel('string s = pyro_exec("x");') == 'go')
 check("auto to_string/strings -> pyro (agora suportado)",
       _sel('int n=5; string s = upper(to_string(n));') == 'pyro')
 check("auto try/catch -> pyro (agora suportado)",
       _sel('try { print(1); } catch (string e) { print(e); }') == 'pyro')
-check("auto concurrency -> go (pyro not supports)",
-      _sel('future<int> f = spawn g(1); int r = await f;') == 'go')
+check("auto concurrency -> pyro (12.5)",
+      _sel('future<int> f = spawn g(1); int r = await f;') == 'pyro')
 check("auto bloco Go -> go", _sel('import >go< >Go( fmt.Println(1) )') == 'go')
 check("auto bloco Node -> node", _sel('import >node< >Node( console.log(1); )') == 'node')
 check("auto bloco C -> c", _sel('import >c< >C( printf("x"); )') == 'c')
@@ -768,8 +768,11 @@ from backends import missing_capabilities as _miss
 def _mt(src, b):
     return _miss(ast_of(src), b)
 check("miss: map in c -> {map}", 'map' in _mt('map<string,int> m = {"a":1};', 'c')[0])
-check("miss: concurrency in pyro -> {concurrency}",
-      'concurrency' in _mt('future<int> f = spawn g(1); int r = await f;', 'pyro')[0])
+# 12.5 — pyro covers concurrency now; node is where it is still missing.
+check("miss: concurrency in pyro -> nothing missing",
+      _mt('future<int> f = spawn g(1); int r = await f;', 'pyro') == (set(), set()))
+check("miss: concurrency in node -> {concurrency}",
+      'concurrency' in _mt('future<int> f = spawn g(1); int r = await f;', 'node')[0])
 check("miss: enum/try in pyro agora cobertos",
       _mt('enum and{A} try { print(1); } catch (string e) { print(e); }', 'pyro') == (set(), set()))
 check("miss: bloco C in go -> {c}", 'c' in _mt('import >c< >C( x )', 'go')[1])
