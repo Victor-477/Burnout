@@ -274,6 +274,27 @@ class CodeGenNode:
                   "  }",
                   "  return String(v);",
                   "}", ""]
+        if 'jsonenc' in self._helpers:
+            # 12.10 — JSON.stringify emits an object's keys in INSERTION order,
+            # so `json_encode({"total":3,"cliente":1})` printed a different
+            # string here than on pyro and go, from identical source. That is
+            # invariant 1 broken in the most visible place there is: the
+            # program's output.
+            #
+            # Sorting is the rule the rest of the system already follows —
+            # cryoStr above orders "maps and structs alike" by the key's own
+            # text — and it is the one that makes output reproducible. The only
+            # oddity was that json_encode did not follow it.
+            H += ["function cryoJSONSort(v) {",
+                  "  if (Array.isArray(v)) return v.map(cryoJSONSort);",
+                  '  if (v && typeof v === "object") {',
+                  "    const o = {};",
+                  "    for (const k of Object.keys(v).sort()) o[k] = cryoJSONSort(v[k]);",
+                  "    return o;",
+                  "  }",
+                  "  return v;",
+                  "}",
+                  "function cryoJSONEncode(v) { return JSON.stringify(cryoJSONSort(v)); }", ""]
         if 'len' in self._helpers:
             H += ["function cryoLen(x) {",
                   "  if (x == null) return 0;",
@@ -821,7 +842,8 @@ class CodeGenNode:
         if c == 'remove':
             return f"(delete {A(0)}[{A(1)}])"
         if c == 'json_encode':
-            return f"JSON.stringify({A(0)})"
+            self._helpers.add('jsonenc')
+            return f"cryoJSONEncode({A(0)})"
         if c == 'json_decode':
             return f"JSON.parse({A(0)})"
         # ── Filesystem & process natives (Roadmap 11.7) ──

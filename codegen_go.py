@@ -708,8 +708,48 @@ class CodeGenGo:
                   "\tfor _, v := range a { s += v }",
                   "\treturn s", "}", ""]
         if 'jsonenc' in self._helpers:
-            H += ["func cryoJSONEncode(v any) string {",
-                  "\tb, err := json.Marshal(v)",
+            # 12.10 — json.Marshal sorts MAP keys but emits a struct's fields in
+            # declaration order, so `json_encode(p)` on a struct disagreed with
+            # pyro, where a struct is a map at runtime and every container is
+            # rendered by the key's own text. Normalising structs to maps first
+            # makes Marshal sort them too, so all three backends agree and the
+            # rule is the one cryoStr already states: pairs ordered by key text.
+            self._imports.update(('reflect', 'strings', 'fmt'))
+            H += ["func cryoJSONNorm(v any) any {",
+                  "\trv := reflect.ValueOf(v)",
+                  "\tfor rv.Kind() == reflect.Ptr || rv.Kind() == reflect.Interface {",
+                  "\t\tif rv.IsNil() {", "\t\t\treturn nil", "\t\t}",
+                  "\t\trv = rv.Elem()", "\t}",
+                  "\tswitch rv.Kind() {",
+                  "\tcase reflect.Struct:",
+                  "\t\tm := map[string]any{}",
+                  "\t\tt := rv.Type()",
+                  "\t\tfor i := 0; i < t.NumField(); i++ {",
+                  "\t\t\tf := t.Field(i)",
+                  '\t\t\tif f.PkgPath != "" {', "\t\t\t\tcontinue", "\t\t\t}",
+                  "\t\t\tname := f.Name",
+                  '\t\t\tif tag := f.Tag.Get("json"); tag != "" && tag != "-" {',
+                  '\t\t\t\tif c := strings.Index(tag, ","); c >= 0 {',
+                  "\t\t\t\t\ttag = tag[:c]", "\t\t\t\t}",
+                  '\t\t\t\tif tag != "" {', "\t\t\t\t\tname = tag", "\t\t\t\t}", "\t\t\t}",
+                  "\t\t\tm[name] = cryoJSONNorm(rv.Field(i).Interface())", "\t\t}",
+                  "\t\treturn m",
+                  "\tcase reflect.Slice, reflect.Array:",
+                  "\t\tout := make([]any, rv.Len())",
+                  "\t\tfor i := 0; i < rv.Len(); i++ {",
+                  "\t\t\tout[i] = cryoJSONNorm(rv.Index(i).Interface())", "\t\t}",
+                  "\t\treturn out",
+                  "\tcase reflect.Map:",
+                  "\t\tm := map[string]any{}",
+                  "\t\tfor _, k := range rv.MapKeys() {",
+                  "\t\t\tm[fmt.Sprint(k.Interface())] = cryoJSONNorm(rv.MapIndex(k).Interface())",
+                  "\t\t}",
+                  "\t\treturn m",
+                  "\t}",
+                  "\treturn v", "}",
+                  "",
+                  "func cryoJSONEncode(v any) string {",
+                  "\tb, err := json.Marshal(cryoJSONNorm(v))",
                   "\tif err != nil {", '\t\tpanic("[Cryo] json_encode: " + err.Error())', "\t}",
                   "\treturn string(b)", "}", ""]
         if 'ptr' in self._helpers:

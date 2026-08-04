@@ -756,12 +756,21 @@ class CodeGenPyro:
         self._emit(OP_JMP, self._loop_stack[-1][1])
 
     def _assert(self, n: Assert):
-        if n.message is not None and isinstance(n.message, Literal) \
-                and n.message.kind == 'string':
-            msg = n.message.value
+        # 12.8 — the message is an EXPRESSION, not a string literal.
+        #
+        # It used to be used only when it was a string `Literal`, with a generic
+        # "assert failed (line N)" substituted otherwise — so
+        # `assert(n == 4, "n was " + to_string(n))` reported nothing about n,
+        # while go and node both printed "n was 5". The expression was never
+        # even evaluated. A message that looks dynamic and silently is not is
+        # worse than not supporting one at all.
+        #
+        # OP_ASSERT already stringifies whatever Value it pops, so emitting the
+        # expression is the whole fix; no opcode or VM change is involved.
+        if n.message is None:
+            self._emit(OP_CONST, self._const(TAG_STR, f"assert failed (line {n.line})"))
         else:
-            msg = f"assert failed (line {n.line})"
-        self._emit(OP_CONST, self._const(TAG_STR, msg))   # msg on top
+            self._expr(n.message)                          # msg on top
         self._expr(n.condition)                            # cond above the msg
         self._emit(OP_ASSERT)
 
