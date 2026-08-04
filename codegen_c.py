@@ -336,6 +336,8 @@ class CodeGenC:
                 self._cur = self._global_decls
                 self._indent = 0
                 self._gen(node)
+            elif isinstance(node, VarDecl):
+                self._module_var(node)
             else:
                 self._cur = self._main_stmts
                 self._indent = 1
@@ -358,6 +360,11 @@ class CodeGenC:
                 ) or 'void'
                 self._fwd_decls.append(f"{c_type(ret)} {n.name}({params_c});")
             elif isinstance(n, ConstDecl):
+                self.te.set(n.name, n.var_type)
+            elif isinstance(n, VarDecl):
+                # 11.1 module state. Registered in the FIRST pass because a
+                # function declared above the variable may still refer to it —
+                # declaration order constrains initialisation, not visibility.
                 self.te.set(n.name, n.var_type)
 
     def _assemble(self) -> str:
@@ -489,6 +496,42 @@ class CodeGenC:
             # dangling pointer here would be read as "some value".
             init = ' = NULL' if is_optional(n.var_type) else ''
             self._emit(f"{t} {n.name}{init};")
+
+    def _module_var(self, n: VarDecl):
+        """A top-level `var` is MODULE STATE (11.1), not a local of main.
+
+        It used to be emitted inside main() like any other statement, so a
+        function that referred to it produced C that would not compile —
+        "'counter' undeclared". The declaration goes to file scope and the
+        INITIALISER stays in main, in source order, because an initialiser may
+        call a function or build an array and neither can run before main.
+
+        Found by 12.4's generated capability matrix, which is the point of
+        generating it: the hand-written table had claimed this worked.
+        """
+        self.te.set(n.name, n.var_type)
+        t = c_type(n.var_type)
+        self._global_decls.append(f"static {t} {n.name};")
+
+        if n.value is None:
+            return
+        prev_cur, prev_indent = self._cur, self._indent
+        self._cur, self._indent = self._main_stmts, 1
+        if isinstance(n.value, ArrayLiteral):
+            et = elem_type(n.var_type)
+            self._emit(f"{n.name} = cryo_array_new();")
+            for elem in n.value.elements:
+                fn = _PUSH_FN.get(et, 'cryo_array_push')
+                self._emit(f"{fn}({n.name}, {self._expr(elem)});")
+        elif is_map(n.var_type):
+            kt, vt = map_kv(n.var_type)
+            self._emit(f"{n.name} = cryo_map_new({1 if kt == 'string' else 0});")
+            for k, v in (getattr(n.value, 'pairs', None) or []):
+                self._emit(f"cryo_map_set({n.name}, {_U64_TO[kt]}({self._expr(k)}), "
+                           f"{_U64_TO[vt]}({self._expr(v)}));")
+        else:
+            self._emit(f"{n.name} = {self._opt_value(n.value, n.var_type)};")
+        self._cur, self._indent = prev_cur, prev_indent
 
     def _const(self, n: ConstDecl):
         self.te.set(n.name, n.var_type)
