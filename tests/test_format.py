@@ -193,10 +193,18 @@ def test_c_backend(work):
     print("\n── C backend: precision works, width refuses ──")
     src = ('number x = 3.14159;\nnumber t = 1234567.891;\n'
            'print("${x:.2f}");\nprint("${t:,.2f}");\n')
+    # The work directory is shared by every case in this file, so a binary from
+    # an EARLIER case survives here. Without removing it first, this check runs
+    # that stale program and reports its output as this one's — which is exactly
+    # what happened on a machine with no gcc: no exe was produced, a leftover one
+    # was executed, and C was blamed for printing '3'.
+    exe = os.path.join(work, 'prog.exe' if sys.platform == 'win32' else 'prog')
+    if os.path.isfile(exe):
+        os.remove(exe)
+
     rc, log = compile_to(src, work, 'c', 'prog.c')
     check("precision and grouping compile on C", rc == 0, log[-200:])
     if rc == 0:
-        exe = os.path.join(work, 'prog.exe' if sys.platform == 'win32' else 'prog')
         if os.path.isfile(exe):
             p = subprocess.run([exe], capture_output=True, text=True,
                                timeout=120, errors='replace')
