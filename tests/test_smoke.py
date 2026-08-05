@@ -651,8 +651,14 @@ check("node number/number -> cryoDiv (float)",
 check("node array index bounds-check", "cryoIndex(" in gen_node("int[] a=[1,2]; int v = a[0];"))
 check("node map[k] without bounds-check",
       "cryoIndex(" not in gen_node('map<string,int> m = {"a":1}; int v = m["a"];'))
+# 12.13 — a string index is bounds-checked by its OWN helper. It used to share
+# cryoIndex with arrays, which is why `"ab"[5]` reported an array-shaped message
+# ("index 5 out of bounds (len=2)") where the VM says "string index out of
+# bounds". Same check, different wording, so a different helper.
 check("node string index bounds-check",
-      "cryoIndex(" in gen_node('string s = "abc"; string c = s[1];'))
+      "cryoStrIndex(" in gen_node('string s = "abc"; string c = s[1];'))
+check("node string index does not reuse the array helper",
+      "cryoIndex(" not in gen_node('string s = "abc"; string c = s[1];'))
 check("node write nested bounds-check (inner+outer)",
       "cryoSetIndex(cryoIndex(" in gen_node("int[][] m = [[1]]; m[0][0] = 9;"))
 check("node read nested bounds-check",

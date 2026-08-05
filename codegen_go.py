@@ -530,6 +530,30 @@ class CodeGenGo:
             # call site so the message is not built when the assertion holds.
             H += ["func cryoAssertFail(msg string) {",
                   '\tpanic("[Cryo Assert] " + msg)', "}", ""]
+        if 'index' in self._helpers:
+            # 12.13 — the Pyro VM's text, verbatim, including the asymmetry
+            # that GET reports the length and SET does not, and that a string
+            # index has its own wording with neither. Those are the shapes the
+            # VM and the C VM already produce, so they are what to match rather
+            # than tidy up: a fourth spelling is the problem being fixed.
+            H += ["func cryoIndex[T any](a []T, i int64) T {",
+                  "\tif i < 0 || i >= int64(len(a)) {",
+                  '\t\tpanic(fmt.Sprintf("[Cryo Security] IndexError: index %d out of bounds (len=%d)", i, len(a)))',
+                  "\t}",
+                  "\treturn a[i]", "}",
+                  "",
+                  "func cryoSetIndex[T any](a []T, i int64, v T) {",
+                  "\tif i < 0 || i >= int64(len(a)) {",
+                  '\t\tpanic(fmt.Sprintf("[Cryo Security] IndexError: index %d out of bounds", i))',
+                  "\t}",
+                  "\ta[i] = v", "}",
+                  "",
+                  "func cryoStrIndex(s string, i int64) string {",
+                  "\tif i < 0 || i >= int64(len(s)) {",
+                  '\t\tpanic("[Cryo Security] IndexError: string index out of bounds")',
+                  "\t}",
+                  "\treturn string(s[i])", "}", ""]
+            self._imports.add('fmt')
         if 'future' in self._helpers:
             # 12.11 — a future HOLDS its result; it does not hand it over.
             #
@@ -1760,6 +1784,13 @@ class CodeGenGo:
                    f"{self._expr_typed(n.value, self.te.get(n.name))}")
 
     def _index_assign(self, n: IndexAssignment):
+        # 12.13 — same as the read path; maps are left alone, since assigning a
+        # new key is how a map grows.
+        if self._safe_mode and self.te.infer(n.obj).endswith('[]'):
+            self._helpers.add('index')
+            self._emit(f"cryoSetIndex({self._expr(n.obj)}, "
+                       f"{self._expr(n.index)}, {self._expr(n.value)})")
+            return
         self._emit(f"{self._expr(n.obj)}[{self._expr(n.index)}] = {self._expr(n.value)}")
 
     def _compound(self, n: CompoundAssignment):
@@ -2142,6 +2173,20 @@ class CodeGenGo:
             return f"{obj}.{go_field(node.field)}"
 
         if isinstance(node, IndexAccess):
+            # 12.13 — go had NO bounds check at all. An out-of-range index
+            # surfaced Go's own `panic: runtime error: index out of range [5]
+            # with length 2`, so the same program aborted with a message the
+            # other three engines never produce — and a constant bad index did
+            # not even compile ("must not be negative"), which is a third
+            # failure mode again. Routing through a helper gives all four the
+            # VM's text and turns the compile error into the same abort.
+            ot = self.te.infer(node.obj)
+            if self._safe_mode and ot == 'string':
+                self._helpers.add('index')
+                return f"cryoStrIndex({self._expr(node.obj)}, {self._expr(node.index)})"
+            if self._safe_mode and ot.endswith('[]'):
+                self._helpers.add('index')
+                return f"cryoIndex({self._expr(node.obj)}, {self._expr(node.index)})"
             return f"{self._expr(node.obj)}[{self._expr(node.index)}]"
 
         if isinstance(node, ArrayLiteral):

@@ -312,15 +312,32 @@ class CodeGenNode:
                   "  return Math.trunc(a / b);   // integer division (truncates toward zero)",
                   "}", ""]
         if 'index' in self._helpers:
+            # 12.13 — the VM's text, verbatim. This used to be in Portuguese
+            # ("índice N fora dos limites"), so one program aborted with two
+            # different messages depending on the backend. The VM is canonical
+            # here as it is for every other runtime message.
+            #
+            # A STRING index has its own wording in the VM — no index number and
+            # no length — so it gets its own helper rather than reusing the
+            # array one, which is what made node report an array-shaped message
+            # for `"ab"[5]`.
             H += ["function cryoIndex(a, i) {",
                   "  if (i < 0 || i >= a.length)",
-                  "    throw new Error('[Cryo Security] IndexError: índice ' + i + ' fora dos limites (len=' + a.length + ')');",
+                  "    throw '[Cryo Security] IndexError: index ' + i + ' out of bounds (len=' + a.length + ')';",
                   "  return a[i];",
                   "}", ""]
+        if 'strindex' in self._helpers:
+            H += ["function cryoStrIndex(s, i) {",
+                  "  if (i < 0 || i >= s.length)",
+                  "    throw '[Cryo Security] IndexError: string index out of bounds';",
+                  "  return s[i];",
+                  "}", ""]
         if 'setindex' in self._helpers:
+            # The VM's SET message carries no (len=…); the C VM mirrors that
+            # asymmetry too, so it is the shape to match, not to tidy up.
             H += ["function cryoSetIndex(a, i, v) {",
                   "  if (i < 0 || i >= a.length)",
-                  "    throw new Error('[Cryo Security] IndexError: índice ' + i + ' fora dos limites (len=' + a.length + ')');",
+                  "    throw '[Cryo Security] IndexError: index ' + i + ' out of bounds';",
                   "  a[i] = v;",
                   "}", ""]
         if 'substr' in self._helpers:
@@ -649,7 +666,14 @@ class CodeGenNode:
             ot = self._t.infer(n.obj)
             # bounds-check on arrays AND strings (both have .length and [i]);
             # maps are left out (missing key -> undefined is expected)
-            if self.safe and (ot.endswith('[]') or ot == 'string'):
+            #
+            # 12.13 — a string gets its own helper: the VM words a string index
+            # differently (no index number, no length), and reusing the array
+            # helper made `"ab"[5]` report an array-shaped message here.
+            if self.safe and ot == 'string':
+                self._helpers.add('strindex')
+                return f"cryoStrIndex({self._expr(n.obj)}, {self._expr(n.index)})"
+            if self.safe and ot.endswith('[]'):
                 self._helpers.add('index')
                 return f"cryoIndex({self._expr(n.obj)}, {self._expr(n.index)})"
             return f"{self._expr(n.obj)}[{self._expr(n.index)}]"

@@ -58,8 +58,14 @@ def _compile(work, src, backend, out):
     return r
 
 
-def run_backend(work, src, backend):
-    """The program's stdout on one backend, or None when unavailable."""
+def run_backend(work, src, backend, expect_fail=False):
+    """The program's stdout on one backend, or None when unavailable.
+
+    12.13 — `expect_fail` is for programs that are SUPPOSED to abort: it returns
+    stdout+stderr (every engine writes the abort text to stderr) and does not
+    read a non-zero exit as a build failure, which is otherwise exactly what a
+    successful abort looks like from here.
+    """
     try:
         if backend == 'pyro':
             if not os.path.isfile(VM):
@@ -85,7 +91,7 @@ def run_backend(work, src, backend):
             # that the Go compiler then rejected.
             r = subprocess.run(['go', 'run', out], capture_output=True, text=True,
                                timeout=900, cwd=work)
-            if r.returncode != 0:
+            if r.returncode != 0 and not expect_fail:
                 return '<go build failed> ' + r.stderr.strip()[:160]
         elif backend == 'c':
             if not shutil.which('gcc'):
@@ -100,7 +106,8 @@ def run_backend(work, src, backend):
             return None
     except subprocess.TimeoutExpired:
         return '<timeout>'
-    return r.stdout.replace('\r\n', '\n').strip()
+    out_text = r.stdout + ('\n' + (r.stderr or '') if expect_fail else '')
+    return out_text.replace('\r\n', '\n').strip()
 
 
 def agree(label, src, backends=('pyro', 'node', 'go'), expect=None):
@@ -430,6 +437,69 @@ agree("a caught assert binds the message, not an object",
 agree("an assert that holds falls through",
       'int n = 4;\nassert(n == 4, "unused");\nprint("through");\n',
       expect="through")
+
+# ── 12.13: one out-of-bounds message, not four ───────────────
+#
+# The same program aborted four different ways: the VM's English text, node's
+# Portuguese one, the C runtime's third spelling with a different prefix, and
+# go — which emitted no check at all and surfaced Go's own runtime panic.
+#
+# These run the failing program and compare the ABORT text, so they are written
+# against a caught value where possible. On the VM a bounds abort is fail-fast
+# and cannot be caught, so the comparison is on what reaches the output.
+print("\n── 12.13: the out-of-bounds message ──")
+
+
+def aborts_with(label, src, needle, backends=('pyro', 'node', 'go')):
+    """Every available backend must abort with the same message text."""
+    global _passed, _failed, _skipped
+    work = tempfile.mkdtemp(prefix='cryo_oob_')
+    got = {}
+    for b in backends:
+        o = run_backend(work, src, b, expect_fail=True)
+        if o is None:
+            _skipped += 1
+            continue
+        # The CRYO message, from the marker onwards. Each engine wraps its own
+        # abort — the VM prefixes "[Pyro VM] ", Go prints "panic: ", node prints
+        # nothing — and that envelope is the engine's to choose. What has to
+        # agree is the message itself, which is what 12.13 is about.
+        msg = None
+        for l in o.splitlines():
+            l = l.strip()
+            if '[Cryo Security]' in l and 'throw' not in l:
+                msg = l[l.index('[Cryo Security]'):]
+                break
+        got[b] = msg or f'<no message: {o.strip()[:80]}>'
+    if len(got) < 2:
+        print(f"  skip {label} (fewer than two backends available)")
+        return
+    detail = '; '.join(f"{b}={v!r}" for b, v in got.items())
+    check(label + f"  [{', '.join(got)}]", len(set(got.values())) == 1, detail)
+    check(label + " — and it is the VM's wording",
+          all(needle in v for v in got.values()), detail)
+
+
+aborts_with("array read out of range",
+            'int[] a = [1, 2];\nint i = 5;\nprint(a[i]);\n',
+            "[Cryo Security] IndexError: index 5 out of bounds (len=2)")
+aborts_with("a negative index is out of range too",
+            'int[] a = [1, 2];\nint i = 0 - 1;\nprint(a[i]);\n',
+            "[Cryo Security] IndexError: index -1 out of bounds (len=2)")
+# The VM's SET message carries no (len=…). That asymmetry is the shape to
+# match, not to tidy up — a fourth spelling is the bug being fixed.
+aborts_with("array write out of range",
+            'int[] a = [1, 2];\nint i = 5;\na[i] = 9;\n',
+            "[Cryo Security] IndexError: index 5 out of bounds")
+aborts_with("a string index has its own wording",
+            'string s = "ab";\nint i = 5;\nprint(s[i]);\n',
+            "[Cryo Security] IndexError: string index out of bounds")
+
+# And the checks must not have broken indexing that is in range.
+agree("indexing in range still works",
+      'int[] a = [1, 2, 3];\nint i = 1;\nprint(a[i]);\na[i] = 9;\nprint(a);\n'
+      'string s = "abc";\nprint(s[0]);\n',
+      expect="2\n[1, 9, 3]\na")
 
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))
