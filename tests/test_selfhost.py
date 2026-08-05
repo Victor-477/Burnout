@@ -31,6 +31,9 @@ from ast_nodes import (
     For, ForEach, Break, Continue, CompoundAssignment, Increment,
     ArrayLiteral, IndexAccess, IndexAssignment, FieldAccess,
     StructDecl, StructInit, EnumDecl, MatchStatement, Block,
+    # 12.6 — the desugarings and remaining shapes
+    TryCatch, Switch, SwitchCase, Lambda, MapLiteral, CastExpr,
+    ModuleImport, TraitDecl, SpawnExpr, AwaitExpr,
 )
 
 # Test source on a single line (no internal line breaks/escapes other than quotes),
@@ -140,6 +143,49 @@ def ser(n):
         return f"(match {ser(n.subject)}{cs})"
     if isinstance(n, Block):
         return "(block" + "".join(" " + ser(x) for x in n.body) + ")"
+
+    # ── 12.6 ──────────────────────────────────────────────
+    # The constructs 11.28 left out. Same rule as above: the reference AST is
+    # the oracle and parser.cryo is made to match it.
+    if isinstance(n, TryCatch):
+        tb = "".join(" " + ser(x) for x in n.try_body)
+        cb = "".join(" " + ser(x) for x in (n.catch_body or []))
+        out = (f"(try (body{tb}) (catch {n.catch_type or '-'} "
+               f"{n.catch_name or '-'} (body{cb}))")
+        if n.finally_body is not None:
+            out += "(finally (body" + "".join(" " + ser(x) for x in n.finally_body) + "))"
+            out = out.replace(")(finally", ") (finally")
+        return out + ")"
+    if isinstance(n, Switch):
+        cs = ""
+        for c in n.cases:
+            vs = "".join(" " + ser(v) for v in c.values)
+            body = "".join(" " + ser(x) for x in c.body)
+            cs += f" (case (vals{vs}) (body{body}))"
+        out = f"(switch {ser(n.subject)}{cs}"
+        if n.default_body is not None:
+            out += " (default (body" + "".join(" " + ser(x) for x in n.default_body) + "))"
+        return out + ")"
+    if isinstance(n, Lambda):
+        ps = "".join(f" (p {pt} {pn})" for (pt, pn) in n.params)
+        body = "".join(" " + ser(x) for x in n.body)
+        return f"(lam (params{ps}) (body{body}))"
+    if isinstance(n, MapLiteral):
+        return "(map" + "".join(f" (kv {ser(k)} {ser(v)})" for k, v in n.pairs) + ")"
+    if isinstance(n, CastExpr):
+        return f"(cast {ser(n.expr)} {n.target_type})"
+    if isinstance(n, ModuleImport):
+        return f"(import {n.path} {n.alias or '-'})"
+    if isinstance(n, SpawnExpr):
+        return f"(spawn {ser(n.expr)})"
+    if isinstance(n, AwaitExpr):
+        return f"(await {ser(n.expr)})"
+    if isinstance(n, TraitDecl):
+        ms = ""
+        for m in n.methods:
+            ps = "".join(f" (p {pt} {pn})" for (pt, pn) in m.params)
+            ms += f" (m {m.name} (params{ps}) {m.return_type or 'void'})"
+        return f"(trait {n.name}{ms})"
     return f"(? {type(n).__name__})"
 
 
@@ -369,7 +415,40 @@ SAMPLES_1128 = [
 ]
 
 print("\n[11.28] constructs the self-hosted parser gained")
-for _label, _src in SAMPLES_1128:
+# ── 12.6: the constructs 11.28 deliberately left out ─────────
+#
+# 11.28 stopped at the parser's *shapes* and recorded these as "each is a
+# desugaring, not a parse rule". That was true of one of them — `=> expr`
+# lowers to a body of [Return(expr)], so emitting the bare expression would
+# diverge — and overstated for the rest, which turned out to be ordinary rules
+# once the type grammar could spell `map<K,V>` and `fn(T)->R`.
+SAMPLES_126 = [
+    ("try / catch", 'try { print(1); } catch (string e) { print(e); }'),
+    ("try / catch / finally",
+     'try { print(1); } catch (string e) { print(e); } finally { print(2); }'),
+    ("switch with default",
+     'switch (x) { case 1: print(1); default: print(0); }'),
+    # Stacked labels share ONE case in the reference. Emitting two would parse
+    # the same source into a different tree, and still "work".
+    ("switch with stacked labels",
+     'switch (x) { case 1: case 2: print(1); case 3: print(3); }'),
+    ("lambda, expression body", 'fn(int)->int f = (int n) => n + 1;'),
+    ("lambda, block body", 'fn(int)->int g = (int n) => { return n + 1; };'),
+    ("map literal and map type", 'map<string,int> m = {"a": 1, "b": 2};'),
+    ("nested type arguments", 'map<string,int[]> m = {"a": [1]};'),
+    ("cast", 'int n = x as int;'),
+    # `as` binds LOOSER than ||, so this casts the whole disjunction. A cast
+    # level in the wrong place still parses — only the oracle catches it.
+    ("cast precedence against ||", 'int n = a || b as int;'),
+    ("import", 'import "lib.cryo";'),
+    ("import with alias", 'import "lib.cryo" as geo;'),
+    ("trait with method signatures",
+     'trait Ord { fn cmp(int o) -> int; fn zero() -> int; }'),
+    # 12.5 shipped concurrency and the self-hosted parser had never been told.
+    ("spawn / await", 'future<int> f = spawn g(); int r = await f;'),
+]
+
+for _label, _src in SAMPLES_1128 + SAMPLES_126:
     _exp = reference_ast(_src)
     _got, _res = _selfhost_ast(_src)
     if _got != _exp:
