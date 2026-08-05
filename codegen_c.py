@@ -149,6 +149,7 @@ class TypeEnv:
         self._fns:    Dict[str, str] = {}
         self._structs:Dict[str, Dict[str, str]] = {}
         self._enums:  Set[str] = set()
+        self._enum_members: Dict[str, str] = {}   # 12.9: 'A' -> 'E_A'
 
     def push(self): self._scopes.append({})
     def pop(self):  self._scopes.pop()
@@ -172,6 +173,16 @@ class TypeEnv:
 
     def reg_enum(self, name: str): self._enums.add(name)
     def is_enum(self, name: str) -> bool: return name in self._enums
+
+    # 12.9 — bare member name -> the constant C actually declares.
+    # `typedef enum { E_A, E_B } E;` declares E_A, but `E e = A;` emitted a
+    # bare `A`, so the C did not compile. Registered for both spellings so a
+    # qualified `E.A` resolves through the same table.
+    def reg_enum_member(self, member: str, qualified: str):
+        self._enum_members[member] = qualified
+
+    def enum_member(self, name: str):
+        return self._enum_members.get(name)
 
     def infer(self, node) -> str:
         if node is None: return 'unknown'
@@ -352,6 +363,9 @@ class CodeGenC:
                 self.te.reg_struct(n.name, {f.name: f.field_type for f in n.fields})
             elif isinstance(n, EnumDecl):
                 self.te.reg_enum(n.name)
+                for m in n.members:
+                    self.te.reg_enum_member(m.name, f"{n.name}_{m.name}")
+                    self.te.reg_enum_member(f"{n.name}_{m.name}", f"{n.name}_{m.name}")
             elif isinstance(n, FunctionDecl):
                 ret = n.return_type or 'void'
                 self.te.reg_fn(n.name, ret)
@@ -864,6 +878,13 @@ class CodeGenC:
             return str(node.value)
 
         if isinstance(node, Identifier):
+            # 12.9 — a bare enum member resolves to the declared constant, but
+            # a variable of the same name still shadows it (TypeEnv.get returns
+            # 'unknown' only for names nothing has declared).
+            if self.te.get(node.name) == 'unknown':
+                q = self.te.enum_member(node.name)
+                if q:
+                    return q
             return node.name
 
         if isinstance(node, BinaryExpr):
@@ -885,6 +906,15 @@ class CodeGenC:
             return self._method(node)
 
         if isinstance(node, FieldAccess):
+            # 12.9 — `E.A` is a qualified enum member, not a field read. A
+            # variable of the same name still wins, so a struct called `E` with
+            # a field `A` keeps reading its field.
+            if (isinstance(node.obj, Identifier)
+                    and self.te.is_enum(node.obj.name)
+                    and self.te.get(node.obj.name) == 'unknown'):
+                q = self.te.enum_member(f"{node.obj.name}_{node.field}")
+                if q:
+                    return q
             obj = self._expr(node.obj)
             ot  = self.te.infer(node.obj)
             if node.field == 'length':

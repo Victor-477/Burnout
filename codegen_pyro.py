@@ -918,6 +918,21 @@ class CodeGenPyro:
         if isinstance(n, FieldAccess):
             if n.field == 'length':
                 self._expr(n.obj); self._emit(OP_LEN); return
+            # 12.9 — `Status.ATIVO` is a qualified ENUM MEMBER, not a field
+            # read. Without this it compiled `Status` as a variable and failed
+            # with "variable 'Status' not declared".
+            #
+            # Resolved from the existing table rather than by registering enum
+            # NAMES: the prescan already keys every member under its qualified
+            # spelling, so `Status_ATIVO` is the whole lookup. A variable of the
+            # same name still wins — a struct value called `Status` with a
+            # field `ATIVO` must keep reading its field.
+            if isinstance(n.obj, Identifier) and n.obj.name not in self._cur.locals \
+                    and not self._is_global(n.obj.name):
+                qual = f"{n.obj.name}_{n.field}"
+                if qual in self._enum_consts:
+                    self._emit(OP_CONST, self._const(TAG_INT, self._enum_consts[qual]))
+                    return
             self._expr(n.obj)
             self._emit(OP_CONST, self._const(TAG_STR, n.field))
             self._emit(OP_INDEX); return

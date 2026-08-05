@@ -225,6 +225,13 @@ class CodeGenNode:
         if not has_data:
             for i, m in enumerate(n.members):
                 self._emit(f"const {n.name}_{m.name} = {i};")
+                # 12.9 — the BARE name too. Only the qualified constant was
+                # emitted, so `enum E { A, B } E e = A;` referenced an
+                # undefined `A` — it compiled and then failed at run time,
+                # which is why a compile-only check reported it as supported.
+                # The data-carrying branch below already emits both names;
+                # this branch simply did not.
+                self._emit(f"const {jsid(m.name)} = {n.name}_{m.name};")
         else:
             for m in n.members:
                 params = ', '.join(f"val{idx}" for idx in range(len(m.fields)))
@@ -661,6 +668,13 @@ class CodeGenNode:
         if isinstance(n, FieldAccess):
             if n.field == 'length':
                 return f"{self._expr(n.obj)}.length"
+            # 12.9 — `Status.ATIVO` is a qualified ENUM MEMBER, not a field
+            # read. Resolved here at compile time to the constant the enum
+            # declared, rather than emitting a runtime object for the enum:
+            # an object would need a name at run time and could collide with a
+            # variable, and there is nothing to look up — the value is known.
+            if (isinstance(n.obj, Identifier) and n.obj.name in self._t.enums):
+                return f"{n.obj.name}_{n.field}"
             return f"{self._expr(n.obj)}.{n.field}"
         if isinstance(n, IndexAccess):
             ot = self._t.infer(n.obj)

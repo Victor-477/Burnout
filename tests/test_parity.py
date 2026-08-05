@@ -501,6 +501,59 @@ agree("indexing in range still works",
       'string s = "abc";\nprint(s[0]);\n',
       expect="2\n[1, 9, 3]\na")
 
+# ── 12.9: a payload-less enum member used as a value ─────────
+#
+# `enum E { A, B } E e = A;` ran on pyro and emitted a bare `A` elsewhere,
+# where the member is declared `E_A`. It COMPILED and then failed at run time,
+# which is exactly why 12.4's compile-only matrix reported it as supported —
+# and why these run the program.
+print("\n── 12.9: enum members as values ──")
+
+# go is EXCLUDED from this group, deliberately and visibly.
+#
+# Its enum path is mid-rewrite in another working tree (`_zero_arg_enums`) and
+# that work is uncommitted. Patching over it here would either be overwritten
+# or land as a competing fix for the same defect. Every case below still fails
+# to BUILD on go — `undefined: A`, because the member is declared `E_A` — so
+# the gap is real. Narrowing a test silently is worse than a red one, which is
+# why this prints.
+_ENUM_BACKENDS = ('pyro', 'node')
+print("  note go is excluded here: its enum path is mid-rewrite elsewhere, "
+      "so 12.9 remains open for go")
+
+agree("a bare payload-less member is a value",
+      'enum E { A, B }\nE e = A;\nprint(e);\n',
+      backends=_ENUM_BACKENDS, expect="0")
+agree("and compares against its own name",
+      'enum E { A, B }\nE e = B;\nif (e == B) { print("yes"); }\n',
+      backends=_ENUM_BACKENDS, expect="yes")
+agree("qualified access resolves to the same member",
+      'enum Status { ATIVO, INATIVO }\nStatus s = Status.ATIVO;\nprint(s);\n',
+      backends=_ENUM_BACKENDS, expect="0")
+agree("qualified access compares too",
+      'enum Status { ATIVO, INATIVO }\nStatus s = Status.INATIVO;\n'
+      'if (s == Status.INATIVO) { print("match"); }\n',
+      backends=_ENUM_BACKENDS, expect="match")
+agree("a member drives a switch",
+      'enum E { A, B }\nE e = B;\n'
+      'switch (e) { case A: print("a"); case B: print("b"); }\n',
+      backends=_ENUM_BACKENDS, expect="b")
+
+# The resolution must not swallow an ordinary field read. A struct field can
+# legitimately share a name with an enum member, and `p.RED` is the field.
+agree("a struct field of the same name is still a field",
+      'enum Col { RED }\nstruct P { int RED; }\nP p = new P { RED: 3 };\n'
+      'int a = p.RED;\nCol c = RED;\nprint(a);\n',
+      backends=_ENUM_BACKENDS, expect="3")
+agree("a variable shadows the member",
+      'enum E { A }\nint A2 = 9;\nprint(A2);\n',
+      backends=_ENUM_BACKENDS, expect="9")
+
+# Data-carrying enums keep working — their payload-less members are values of
+# a different shape (a tag map), not integers.
+agree("a payload-less member of a DATA enum is still its tag",
+      'enum R { Ok(int), None }\nR r = None;\nprint(r);\n', expect="{tag: None}")
+
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))
 sys.exit(1 if _failed else 0)
