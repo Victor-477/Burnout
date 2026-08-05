@@ -241,7 +241,17 @@ class TypeEnv:
                        'agent': 'string', 'index_of': 'int', 'count': 'int',
                        'pad_start': 'string', 'pad_end': 'string'}.get(node.callee)
             # these preserve the type of their first argument
-            if node.callee in ('clamp', 'min', 'max', 'sort', 'reverse',
+            #
+            # 13.1 — `abs` belonged here and was in the table above as
+            # 'number' instead. The EMITTER already picks cryoAbsI (int64) for
+            # an int argument, so the inferred type contradicted the code being
+            # generated: `abs(a) > (b - a)` became
+            #     cryoAbsI(a) > float64(cryoSubOvf(b, a))
+            # and the Go compiler rejected it. Even `int b = abs(a) + 1;`
+            # failed. Found by the differential generator on its first real
+            # run, and it had gone unnoticed because a compile-only check never
+            # runs the Go compiler over the result.
+            if node.callee in ('abs', 'clamp', 'min', 'max', 'sort', 'reverse',
                                'slice', 'concat') and node.args:
                 return self.infer(node.args[0])
             return builtin or self.fn_ret(node.callee)
