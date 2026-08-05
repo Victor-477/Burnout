@@ -767,12 +767,27 @@ class CodeGenPyro:
         #
         # OP_ASSERT already stringifies whatever Value it pops, so emitting the
         # expression is the whole fix; no opcode or VM change is involved.
+        # 12.12 — and the message is evaluated ONLY when the assertion fails.
+        #
+        # OP_ASSERT pops cond then msg, so the straightforward encoding has to
+        # push the message FIRST and therefore always evaluates it. An assertion
+        # that holds should cost nothing, and a message that is only valid when
+        # the condition is true (an index, say) must not abort the passing run.
+        #
+        # So: test the condition, jump clear when it holds, and only then build
+        # the message and fail with a constant false. The abort text is
+        # unchanged, which matters because it is compared against the other
+        # engines byte for byte.
+        l_end = self._label()
+        self._expr(n.condition)
+        self._emit(OP_JMPT, l_end)              # holds -> skip everything below
         if n.message is None:
             self._emit(OP_CONST, self._const(TAG_STR, f"assert failed (line {n.line})"))
         else:
-            self._expr(n.message)                          # msg on top
-        self._expr(n.condition)                            # cond above the msg
+            self._expr(n.message)               # msg on top
+        self._emit(OP_FALSE)                    # cond above the msg: always fails
         self._emit(OP_ASSERT)
+        self._place(l_end)
 
     def _try(self, n: TryCatch):
         # TRYPUSH -> catch; <try>; TRYPOP; JMP finally; catch:; <catch>; finally:

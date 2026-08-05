@@ -733,7 +733,11 @@ class CodeGenC:
             msg = self._expr(n.message)
         else:
             msg = f'"assert failed (line {n.line})"'
-        self._emit(f"cryo_assert({cond}, {msg});")
+        # 12.12 — lazy, for the same reason as go: C evaluates arguments
+        # eagerly, so the message was built even when the assertion held.
+        # cryo_assert still does the failing — it longjmps through CRYO_TRY so
+        # an assert stays catchable (12.1) — it is just no longer reached.
+        self._emit(f"if (!({cond})) {{ cryo_assert(false, {msg}); }}")
 
     def _block(self, n: Block):
         """A plain lexical scope: `{ ... }` and a new name scope.

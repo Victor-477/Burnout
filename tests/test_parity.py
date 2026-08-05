@@ -392,6 +392,45 @@ agree("array element assignment",
       "int[] a = [1, 2, 3];\na[1] = 99;\nprint(a);\n",
       backends=_ALL, expect="[1, 99, 3]")
 
+# ── 12.12: assert — when the message runs, and what it says ──
+#
+# Four divergences in one statement, every one found by RUNNING it rather than
+# reading the generated code, which looked reasonable on all four backends.
+print("\n── 12.12: assert ──")
+
+# 1. LAZINESS. pyro, go and c evaluated the message on every assert; node did
+#    not. An assertion that holds should cost nothing, and a message that is
+#    only valid when the condition is true must not run on the passing path.
+#    This case shows it directly: the message prints, and must not.
+agree("a passing assert does not evaluate its message",
+      'fn note() -> string ={ print("EVALUATED"); return "x"; }\n'
+      'int n = 4;\nassert(n == 4, note());\nprint("done");\n',
+      expect="done")
+
+# 2. The failing path still reports the message, dynamically (12.8).
+agree("a failing assert reports a dynamic message",
+      'int n = 5;\ntry { assert(n == 4, "n was " + to_string(n)); }\n'
+      'catch (string e) { print(e); }\n',
+      expect="[Cryo Assert] n was 5")
+
+# 3. The DEFAULT message carries the line number. node said "assert failed"
+#    with no line, where every other backend named one.
+agree("a message-less assert names its line",
+      'int n = 5;\ntry { assert(n == 4); } catch (string e) { print(e); }\n',
+      expect="[Cryo Assert] assert failed (line 2)")
+
+# 4. The caught VALUE is the message string. node threw an Error OBJECT, so
+#    `catch (string e)` bound an Error and printing it gave "{}" — a caught
+#    assert said nothing about why it failed, and said it quietly.
+agree("a caught assert binds the message, not an object",
+      'int n = 5;\ntry { assert(n == 4, "boom"); }\n'
+      'catch (string e) { print("caught: " + e); }\n',
+      expect="caught: [Cryo Assert] boom")
+
+agree("an assert that holds falls through",
+      'int n = 4;\nassert(n == 4, "unused");\nprint("through");\n',
+      expect="through")
+
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))
 sys.exit(1 if _failed else 0)

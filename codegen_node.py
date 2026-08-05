@@ -474,8 +474,21 @@ class CodeGenNode:
         elif isinstance(n, TryCatch):
             self._try(n)
         elif isinstance(n, Assert):
-            msg = self._expr(n.message) if n.message else '"assert failed"'
-            self._emit(f"if (!({self._expr(n.condition)})) throw new Error({msg});")
+            # 12.12 — node was already lazy, and wrong in three other ways.
+            #   * the default message had no line number, so a bare `assert(x)`
+            #     said "assert failed" where every other backend said
+            #     "assert failed (line N)";
+            #   * the "[Cryo Assert] " prefix was missing entirely;
+            #   * it threw an Error OBJECT, while `throw` elsewhere in this
+            #     backend throws the raw value. So `catch (string e)` bound an
+            #     Error, and printing it gave "{}" — a caught assert was
+            #     unusable here and said nothing about why.
+            # cryoStr matches the VM, which stringifies whatever it pops.
+            self._helpers.add('str')
+            msg = (self._expr(n.message) if n.message
+                   else f'"assert failed (line {n.line})"')
+            self._emit(f'if (!({self._expr(n.condition)})) '
+                       f'throw "[Cryo Assert] " + cryoStr({msg});')
         elif isinstance(n, SafetyBlock):
             self._block(n.body)   # JS has no 'unsafe'; emits the body
         elif isinstance(n, Block):

@@ -526,8 +526,10 @@ class CodeGenGo:
                   "\tif a == zero {", "\t\treturn b", "\t}",
                   "\treturn a", "}", ""]
         if 'assert' in self._helpers:
-            H += ["func cryoAssert(cond bool, msg string) {",
-                  "\tif !cond {", '\t\tpanic("[Cryo Assert] " + msg)', "\t}", "}", ""]
+            # 12.12 — takes only the message: the condition is tested at the
+            # call site so the message is not built when the assertion holds.
+            H += ["func cryoAssertFail(msg string) {",
+                  '\tpanic("[Cryo Assert] " + msg)', "}", ""]
         if 'future' in self._helpers:
             # 12.11 — a future HOLDS its result; it does not hand it over.
             #
@@ -1993,7 +1995,9 @@ class CodeGenGo:
         cond = self._expr(n.condition)
         msg = self._expr(n.message) if n.message is not None \
             else f'"assert failed (line {n.line})"'
-        self._emit(f"cryoAssert({cond}, {msg})")
+        # 12.12 — lazy: Go evaluates call arguments eagerly, so handing the
+        # message to cryoAssert built it on every assert, passing or not.
+        self._emit(f"if !({cond}) {{ cryoAssertFail({msg}) }}")
 
     def _safety(self, n: SafetyBlock):
         tag = 'safe' if n.safe else 'unsafe'
