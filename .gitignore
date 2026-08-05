@@ -1,6 +1,12 @@
 __pycache__/
 *.py[cod]
 /build/
+# test runs compile into tests/build/; the rule above is root-anchored
+# and does not reach it, so the artifacts showed up as untracked noise.
+tests/build/
 *.egg-info/
 .eggs/
 dist/
+
+# 11.23 — incremental compilation cache (content-addressed, disposable)
+.cryocache/

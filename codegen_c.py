@@ -21,11 +21,70 @@ C_TYPE: Dict[str, str] = {
     'null':   'void*',
 }
 
+# 11.27 — T? is a POINTER, the same representation the go backend uses.
+# `string?` needs no wrapper: char* is already nullable.
+_OPT_C = {'int': 'int64_t*', 'number': 'double*', 'bool': 'bool*',
+          'string': 'char*'}
+_OPT_WRAP = {'int': 'cryo_opt_i', 'number': 'cryo_opt_f', 'bool': 'cryo_opt_b'}
+_OPT_UNWRAP = {'int': 'cryo_unwrap_i', 'number': 'cryo_unwrap_f',
+               'bool': 'cryo_unwrap_b', 'string': 'cryo_unwrap_s'}
+
+
+# 11.27 — maps. Keys and values travel through the runtime as uint64_t, so
+# each end needs one conversion, picked by the declared type.
+_U64_TO   = {'int': 'cryo_u64_i', 'number': 'cryo_u64_f',
+             'string': 'cryo_u64_s', 'bool': 'cryo_u64_i'}
+_U64_FROM = {'int': 'cryo_of_u64_i', 'number': 'cryo_of_u64_f',
+             'string': 'cryo_of_u64_s', 'bool': 'cryo_of_u64_b'}
+_VAL_KIND = {'int': 0, 'number': 1, 'string': 2, 'bool': 3}
+
+
+def is_map(t: str) -> bool:
+    return bool(t) and t.startswith('map<') and t.endswith('>')
+
+
+def map_kv(t: str):
+    """('string', 'int') for map<string,int>. Split on the FIRST comma only —
+    a nested map<...> value would otherwise be cut in half."""
+    if not is_map(t):
+        return ('unknown', 'unknown')
+    inner = t[4:-1]
+    depth = 0
+    for i, ch in enumerate(inner):
+        if ch == '<':
+            depth += 1
+        elif ch == '>':
+            depth -= 1
+        elif ch == ',' and depth == 0:
+            return (inner[:i].strip(), inner[i + 1:].strip())
+    return (inner.strip(), 'unknown')
+
+
+def is_optional(t: str) -> bool:
+    return bool(t) and t.endswith('?')
+
+
+def opt_base(t: str) -> str:
+    return t[:-1] if is_optional(t) else t
+
+
 def c_type(t: str) -> str:
-    if t and (t.startswith('map<') or t.endswith('?')):
+    if t and t.endswith('?'):
+        base = t[:-1]
+        if base in _OPT_C:
+            return _OPT_C[base]
         raise CodeGenError(
-            f"type '{t}' (map/optional) is not yet supported in the C backend; "
-            f"use --backend go.")
+            f"optional type '{t}' is not supported in the C backend — only "
+            f"int?, number?, bool? and string? are; use --backend go, node or "
+            f"pyro.")
+    if t and t.startswith('map<'):
+        k, v = map_kv(t)
+        if k in _U64_TO and v in _U64_TO:
+            return 'CryoMap*'
+        raise CodeGenError(
+            f"map '{t}' is not supported in the C backend — keys and values "
+            f"must be int, number, string or bool; use --backend go, node or "
+            f"pyro.")
     # function types have no C spelling here: unknown types pass through
     # verbatim, so without this guard `fn(int)->int` leaked into the output and
     # produced invalid C that only failed later, inside gcc.
@@ -33,12 +92,53 @@ def c_type(t: str) -> str:
         raise CodeGenError(
             f"function type '{t}' (first-class functions) is not supported in the C "
             f"backend; use --backend go, node or pyro.")
+    # Same leak, same fix. C has no dynamic type, and `any` fell through the
+    # pass-through below into the output verbatim, so gcc — not the compiler —
+    # reported `unknown type name 'any'` against generated code the programmer
+    # never wrote. A list comprehension reaches here without the word `any`
+    # appearing in the source at all: its synthetic helper is typed `any`, so
+    # the message says where it comes from rather than naming a type the
+    # reader cannot find.
+    if t == 'any':
+        raise CodeGenError(
+            "the dynamic type 'any' has no C representation. It also comes from "
+            "constructs that infer it — a comprehension, or a `for (x in xs)` "
+            "without a declared type. Give the variable an explicit type, or use "
+            "--backend go, node or pyro.")
     if t and t.endswith('[]'):
         return 'CryoArray*'
     return C_TYPE.get(t, t)          # struct types pass directly
 
 def elem_type(arr_t: str) -> str:
     return arr_t[:-2] if arr_t.endswith('[]') else 'unknown'
+
+
+_C_ESCAPES = {'\\': '\\\\', '"': '\\"', '\n': '\\n', '\t': '\\t',
+              '\r': '\\r', '\x00': '\\0'}
+
+
+def _c_string(v: str) -> str:
+    """A Cryo string as a C string literal.
+
+    The value was interpolated verbatim before, so a backslash in the program's
+    data became an ESCAPE in the generated C: `print("a\\\\b")` emitted
+    `"a\\b"`, which C reads as a backspace. A quote or a newline in the value
+    did worse and produced code that would not compile — the C compiler
+    reporting on a string the programmer never wrote.
+
+    Anything outside printable ASCII is left alone: the runtime is UTF-8 and
+    the generated file is compiled with -finput-charset=UTF-8, so the bytes
+    pass through correctly as themselves.
+    """
+    out = []
+    for ch in v:
+        if ch in _C_ESCAPES:
+            out.append(_C_ESCAPES[ch])
+        elif ord(ch) < 0x20:
+            out.append('\\%03o' % ord(ch))
+        else:
+            out.append(ch)
+    return '"' + ''.join(out) + '"'
 
 
 # ── Type Inference ──────────────────────────────────────
@@ -84,6 +184,12 @@ class TypeEnv:
         if isinstance(node, BinaryExpr):
             if node.op in ('==', '!=', '<', '>', '<=', '>=', '&&', '||'):
                 return 'bool'
+            # 11.27 — `a ?? b` yields a PRESENT value, so its type is the
+            # unwrapped one. Reporting 'int?' here made print() try to render
+            # an optional and refuse.
+            if node.op == '??':
+                lt = self.infer(node.left)
+                return lt[:-1] if lt.endswith('?') else lt
             lt = self.infer(node.left)
             rt = self.infer(node.right)
             if lt == 'string' or rt == 'string': return 'string'
@@ -91,6 +197,11 @@ class TypeEnv:
             return lt if lt != 'unknown' else rt
         if isinstance(node, UnaryExpr):
             return 'bool' if node.op == '!' else self.infer(node.operand)
+        # 11.27 — `x!` yields the value, so the type is the unwrapped one.
+        if isinstance(node, UnwrapExpr):
+            inner = getattr(node, 'operand', None) or getattr(node, 'expr', None)
+            t = self.infer(inner)
+            return t[:-1] if t.endswith('?') else t
         if isinstance(node, TernaryExpr):
             t = self.infer(node.then_value)
             return t if t != 'unknown' else self.infer(node.else_value)
@@ -104,6 +215,14 @@ class TypeEnv:
                 return 'int'
             if node.callee in ('file_exists', 'is_dir', 'make_dir', 'delete_file', 'write_file'):
                 return 'bool'
+            # 11.27 — the map builtins. `keys` yields an array of the KEY type,
+            # which is the only way `string[] k = keys(m); print(k);` can pick
+            # the right renderer.
+            if node.callee == 'has':
+                return 'bool'
+            if node.callee == 'keys' and node.args:
+                mt = self.infer(node.args[0])
+                return (map_kv(mt)[0] + '[]') if is_map(mt) else 'unknown'
             if node.callee in ('list_dir', 'split'):
                 return 'string[]'
             # these return a NEW array of the same type as their first argument
@@ -142,6 +261,8 @@ class TypeEnv:
             if node.method == 'contains': return 'bool'
         if isinstance(node, IndexAccess):
             at = self.infer(node.obj)
+            if at.startswith('map<'):
+                return map_kv(at)[1]
             return elem_type(at)
         return 'unknown'
 
@@ -151,6 +272,12 @@ class TypeEnv:
 _PUSH_FN = {
     'int': 'cryo_push_i64', 'number': 'cryo_push_f64',
     'string': 'cryo_push_str', 'bool': 'cryo_push_bool',
+}
+
+# 11.27 — the assignment counterparts, for `a[i] = v`.
+_SET_FN = {
+    'int': 'cryo_set_i64', 'number': 'cryo_set_f64',
+    'string': 'cryo_set_str', 'bool': 'cryo_set_bool',
 }
 _GET_FN = {
     'int': 'cryo_get_i64', 'number': 'cryo_get_f64',
@@ -209,6 +336,8 @@ class CodeGenC:
                 self._cur = self._global_decls
                 self._indent = 0
                 self._gen(node)
+            elif isinstance(node, VarDecl):
+                self._module_var(node)
             else:
                 self._cur = self._main_stmts
                 self._indent = 1
@@ -231,6 +360,11 @@ class CodeGenC:
                 ) or 'void'
                 self._fwd_decls.append(f"{c_type(ret)} {n.name}({params_c});")
             elif isinstance(n, ConstDecl):
+                self.te.set(n.name, n.var_type)
+            elif isinstance(n, VarDecl):
+                # 11.1 module state. Registered in the FIRST pass because a
+                # function declared above the variable may still refer to it —
+                # declaration order constrains initialisation, not visibility.
                 self.te.set(n.name, n.var_type)
 
     def _assemble(self) -> str:
@@ -284,11 +418,13 @@ class CodeGenC:
         elif isinstance(node, Switch):              self._switch(node)
         elif isinstance(node, Assert):              self._assert(node)
         elif isinstance(node, SafetyBlock):         self._safety(node)
-        elif isinstance(node, Block):               self._safety(node)
+        elif isinstance(node, Block):               self._block(node)
         elif isinstance(node, Import):              self._import(node)
         elif isinstance(node, Library):             self._library(node)
         elif isinstance(node, ForeignBlock):        self._foreign(node)
-        elif isinstance(node, (IndexAssignment, MapLiteral, CastExpr, UnwrapExpr, MatchStatement)):
+        elif isinstance(node, IndexAssignment):
+            self._index_assign(node)
+        elif isinstance(node, (MapLiteral, CastExpr, UnwrapExpr, MatchStatement)):
             raise CodeGenError(
                 f"'{type(node).__name__}' (map/JSON/optional/match) is not yet "
                 f"supported in C backend; use --backend go.")
@@ -344,15 +480,76 @@ class CodeGenC:
             for elem in n.value.elements:
                 fn = _PUSH_FN.get(et, 'cryo_array_push')
                 self._emit(f"{fn}({n.name}, {self._expr(elem)});")
+        elif is_map(n.var_type) and (n.value is None
+                                     or isinstance(n.value, MapLiteral)):
+            # 11.27 — a map literal is built with statements, like an array
+            # literal: C has no expression that constructs one.
+            kt, vt = map_kv(n.var_type)
+            self._emit(f"{t} {n.name} = cryo_map_new({1 if kt == 'string' else 0});")
+            for k, v in (getattr(n.value, 'pairs', None) or []):
+                self._emit(f"cryo_map_set({n.name}, {_U64_TO[kt]}({self._expr(k)}), "
+                           f"{_U64_TO[vt]}({self._expr(v)}));")
         elif n.value is not None:
-            self._emit(f"{t} {n.name} = {self._expr(n.value)};")
+            self._emit(f"{t} {n.name} = {self._opt_value(n.value, n.var_type)};")
         else:
-            self._emit(f"{t} {n.name};")
+            # An optional with no initialiser is null, not uninitialised: a
+            # dangling pointer here would be read as "some value".
+            init = ' = NULL' if is_optional(n.var_type) else ''
+            self._emit(f"{t} {n.name}{init};")
+
+    def _module_var(self, n: VarDecl):
+        """A top-level `var` is MODULE STATE (11.1), not a local of main.
+
+        It used to be emitted inside main() like any other statement, so a
+        function that referred to it produced C that would not compile —
+        "'counter' undeclared". The declaration goes to file scope and the
+        INITIALISER stays in main, in source order, because an initialiser may
+        call a function or build an array and neither can run before main.
+
+        Found by 12.4's generated capability matrix, which is the point of
+        generating it: the hand-written table had claimed this worked.
+        """
+        self.te.set(n.name, n.var_type)
+        t = c_type(n.var_type)
+        self._global_decls.append(f"static {t} {n.name};")
+
+        if n.value is None:
+            return
+        prev_cur, prev_indent = self._cur, self._indent
+        self._cur, self._indent = self._main_stmts, 1
+        if isinstance(n.value, ArrayLiteral):
+            et = elem_type(n.var_type)
+            self._emit(f"{n.name} = cryo_array_new();")
+            for elem in n.value.elements:
+                fn = _PUSH_FN.get(et, 'cryo_array_push')
+                self._emit(f"{fn}({n.name}, {self._expr(elem)});")
+        elif is_map(n.var_type):
+            kt, vt = map_kv(n.var_type)
+            self._emit(f"{n.name} = cryo_map_new({1 if kt == 'string' else 0});")
+            for k, v in (getattr(n.value, 'pairs', None) or []):
+                self._emit(f"cryo_map_set({n.name}, {_U64_TO[kt]}({self._expr(k)}), "
+                           f"{_U64_TO[vt]}({self._expr(v)}));")
+        else:
+            self._emit(f"{n.name} = {self._opt_value(n.value, n.var_type)};")
+        self._cur, self._indent = prev_cur, prev_indent
 
     def _const(self, n: ConstDecl):
         self.te.set(n.name, n.var_type)
         t = c_type(n.var_type)
         self._emit(f"static const {t} {n.name} = {self._expr(n.value)};")
+
+    def _index_assign(self, n: IndexAssignment):
+        """`m[k] = v` for a map, `a[i] = v` for an array (11.27)."""
+        ot = self.te.infer(n.obj)
+        obj = self._expr(n.obj)
+        if is_map(ot):
+            kt, vt = map_kv(ot)
+            self._emit(f"cryo_map_set({obj}, {_U64_TO[kt]}({self._expr(n.index)}), "
+                       f"{_U64_TO[vt]}({self._expr(n.value)}));")
+            return
+        et = elem_type(ot)
+        fn = _SET_FN.get(et, 'cryo_array_set')
+        self._emit(f"{fn}({obj}, {self._expr(n.index)}, {self._expr(n.value)});")
 
     def _assign(self, n: Assignment):
         self._emit(f"{n.name} = {self._expr(n.value)};")
@@ -536,7 +733,34 @@ class CodeGenC:
             msg = self._expr(n.message)
         else:
             msg = f'"assert failed (line {n.line})"'
-        self._emit(f"cryo_assert({cond}, {msg});")
+        # 12.12 — lazy, for the same reason as go: C evaluates arguments
+        # eagerly, so the message was built even when the assertion held.
+        # cryo_assert still does the failing — it longjmps through CRYO_TRY so
+        # an assert stays catchable (12.1) — it is just no longer reached.
+        self._emit(f"if (!({cond})) {{ cryo_assert(false, {msg}); }}")
+
+    def _block(self, n: Block):
+        """A plain lexical scope: `{ ... }` and a new name scope.
+
+        Block was routed to _safety, which reads `n.safe` — an attribute a
+        plain Block does not have, so `for (int i, string s in enumerate(a))`
+        on --backend c aborted with a Python AttributeError instead of
+        compiling. Every front-end desugaring that introduces a scope emits one
+        of these: enumerate, pairs, the 11.5 map form, comprehensions and
+        11.17's stream loop, so the C backend could not compile any of them.
+
+        A Block carries NO safety meaning, so it must not touch _safe_stack —
+        doing that would silently change whether the code inside it is
+        instrumented.
+        """
+        self._emit("{")
+        self._indent += 1
+        self.te.push()
+        for s in n.body:
+            self._gen(s)
+        self.te.pop()
+        self._indent -= 1
+        self._emit("}")
 
     def _safety(self, n: SafetyBlock):
         tag = 'safe' if n.safe else 'unsafe'
@@ -616,14 +840,25 @@ class CodeGenC:
     # ── expressions ──────────────────────────────────────────
 
     def _expr(self, node: Node) -> str:
-        if isinstance(node, (MapLiteral, CastExpr, UnwrapExpr, TryExpr, SpawnExpr, AwaitExpr)):
+        if isinstance(node, UnwrapExpr):
+            return self._unwrap(node)
+        if isinstance(node, (SpawnExpr, AwaitExpr)):
+            # Named separately from the rest: the suggestion below used to list
+            # every other backend, and for concurrency two of the three refuse
+            # it as well — a message that sends the reader somewhere it also
+            # does not work is worse than no suggestion.
             raise CodeGenError(
-                f"'{type(node).__name__}' (map/JSON/optional/'?' propagation/async) "
-                f"is not yet supported in the C backend; use --backend go.")
+                f"concurrency (spawn/await) is not supported in the C backend; "
+                f"use --backend go or pyro.")
+        if isinstance(node, (MapLiteral, CastExpr, TryExpr)):
+            raise CodeGenError(
+                f"'{type(node).__name__}' (map/JSON/'?' propagation) "
+                f"is not yet supported in the C backend; use --backend go, node "
+                f"or pyro.")
         if isinstance(node, Literal):
             if node.kind == 'null':   return 'NULL'
             if node.kind == 'bool':   return 'true' if node.value else 'false'
-            if node.kind == 'string': return f'"{node.value}"'
+            if node.kind == 'string': return _c_string(node.value)
             if node.kind == 'int':    return str(node.value)
             if node.kind == 'float':  return repr(float(node.value))
             return str(node.value)
@@ -662,6 +897,10 @@ class CodeGenC:
             obj = self._expr(node.obj)
             idx = self._expr(node.index)
             at  = self.te.infer(node.obj)
+            if is_map(at):
+                kt, vt = map_kv(at)
+                return (f"{_U64_FROM[vt]}(cryo_map_get({obj}, "
+                        f"{_U64_TO[kt]}({idx})))")
             et  = elem_type(at)
             fn  = _GET_FN.get(et, 'cryo_array_get')
             return f"{fn}({obj}, {idx})"
@@ -684,7 +923,18 @@ class CodeGenC:
 
         if node.op == '&&': return f"({l} && {r})"
         if node.op == '||': return f"({l} || {r})"
-        if node.op == '??': return f"(({l}) != NULL ? ({l}) : ({r}))"
+        if node.op == '??':
+            # A scalar optional is a POINTER, so the present branch has to
+            # dereference it; `string?` is already a char* and must not be.
+            # Emitted via a statement expression so `l` is evaluated once —
+            # the obvious `(l != NULL ? *l : r)` evaluates it twice, which
+            # doubles any side effect in it.
+            base = opt_base(lt)
+            if is_optional(lt) and base in _OPT_WRAP:
+                ct = c_type(base)
+                return (f"({{ {c_type(lt)} __o = ({l}); "
+                        f"__o != NULL ? *__o : ({ct})({r}); }})")
+            return f"(({l}) != NULL ? ({l}) : ({r}))"
 
         # String concatenation
         if node.op == '+' and (lt == 'string' or rt == 'string'):
@@ -731,12 +981,22 @@ class CodeGenC:
             raise CodeGenError(
                 f"'{callee}()' is not supported in the C backend; "
                 f"use --backend go, node or pyro.")
-        # `remove(map, key)` needs MAPS, which the C backend does not have at
-        # all (c_type rejects map<...>), so it stays unsupported here.
-        if callee == 'remove':
-            raise CodeGenError(
-                f"'{callee}()' needs maps, which the C backend does not support; "
-                f"use --backend go, node or pyro.")
+        # 11.27 — the map builtins. Each needs the KEY type to convert the
+        # key into the uint64_t the runtime stores, and the generator is the
+        # only place that knows it.
+        if callee in ('remove', 'has', 'keys') and args:
+            mt = self.te.infer(args[0])
+            if not is_map(mt):
+                raise CodeGenError(
+                    f"'{callee}()' expects a map; this is '{mt}'.")
+            kt, _vt = map_kv(mt)
+            m = self._expr(args[0])
+            if callee == 'keys':
+                return f"cryo_map_keys({m})"
+            k = f"{_U64_TO[kt]}({self._expr(args[1])})"
+            if callee == 'has':
+                return f"cryo_map_has({m}, {k})"
+            return f"cryo_map_remove({m}, {k})"
 
         # ── built-ins ──
         if callee == 'print':
@@ -867,6 +1127,8 @@ class CodeGenC:
             t = self.te.infer(a)
             if t == 'string':
                 return f"cryo_str_len({self._expr(a)})"
+            if is_map(t):
+                return f"cryo_map_len({self._expr(a)})"
             return f"(({self._expr(a)})->length)"
         if callee == 'input':
             prompt = self._expr(args[0]) if args else '""'
@@ -942,9 +1204,63 @@ class CodeGenC:
         args_str = ', '.join(args)
         return f"{obj}.{m}({args_str})"
 
+    _ARR_TO_STR = {'int': 'cryo_arr_to_str_i', 'number': 'cryo_arr_to_str_f',
+                   'string': 'cryo_arr_to_str_s', 'bool': 'cryo_arr_to_str_b'}
+
+    def _opt_value(self, value: Node, declared: str) -> str:
+        """A value on its way into a slot of type `declared` (11.27).
+
+        A plain `3` going into an `int?` has to be put somewhere with an
+        address. `null` and something already optional pass straight through —
+        wrapping those would box a pointer inside another pointer.
+        """
+        src = self._expr(value)
+        if not is_optional(declared):
+            return src
+        if isinstance(value, Literal) and value.kind == 'null':
+            return 'NULL'
+        if is_optional(self.te.infer(value)):
+            return src
+        wrap = _OPT_WRAP.get(opt_base(declared))
+        return f"{wrap}({src})" if wrap else src
+
+    def _unwrap(self, node) -> str:
+        """`x!` — the value, or abort if it is null."""
+        inner = getattr(node, 'operand', None) or getattr(node, 'expr', None)
+        t = self.te.infer(inner)
+        fn = _OPT_UNWRAP.get(opt_base(t))
+        if not fn:
+            raise CodeGenError(
+                f"'!' (unwrap) needs an optional; this is '{t}'. Only int?, "
+                f"number?, bool? and string? are supported in the C backend.")
+        return f"{fn}({self._expr(inner)})"
+
     def _to_str(self, expr: str, typ: str) -> str:
         if typ == 'string': return expr
         if typ == 'int':    return f"cryo_i64_to_str({expr})"
         if typ == 'number': return f"cryo_f64_to_str({expr})"
         if typ == 'bool':   return f"cryo_bool_to_str({expr})"
+        # 11.27 — printing an array. CryoArray holds raw uint64_t and does not
+        # know what is in it, so the ELEMENT TYPE picks the function; the
+        # generator is the only place that knows it.
+        if is_map(typ):
+            _kt, vt = map_kv(typ)
+            if vt in _VAL_KIND:
+                return f"cryo_map_to_str({expr}, {_VAL_KIND[vt]})"
+            raise CodeGenError(
+                f"printing a map with '{vt}' values is not supported in the C "
+                f"backend; use --backend go, node or pyro.")
+        if typ and typ.endswith('[]'):
+            el = typ[:-2]
+            fn = self._ARR_TO_STR.get(el)
+            if fn:
+                return f"{fn}({expr})"
+            if el.endswith('[]'):
+                raise CodeGenError(
+                    f"printing a nested array ('{typ}') is not supported in the C "
+                    f"backend; print the inner arrays, or use --backend go, node "
+                    f"or pyro.")
+            raise CodeGenError(
+                f"printing an array of '{el}' is not supported in the C backend; "
+                f"use --backend go, node or pyro.")
         raise CodeGenError(f"cannot convert type '{typ}' to string in C backend")

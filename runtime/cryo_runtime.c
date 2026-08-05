@@ -97,10 +97,25 @@ int64_t cryo_imod_chk(int64_t a, int64_t b) {
 /* ---------- Security: assert ---------- */
 
 void cryo_assert(bool cond, const char* msg) {
-    if (!cond) {
-        fprintf(stderr, "[Cryo Assert] %s\n", msg ? msg : "false condition");
-        abort();
+    if (cond) return;
+    const char* m = msg ? msg : "false condition";
+    /* A failed assert is CATCHABLE, matching the VM and the go/node backends:
+       `try { assert(...); } catch (string e)` works there, and aborting here
+       killed the process instead. Found by 12.1, whose per-test isolation
+       depends on exactly this — on C the first failing test ended the run and
+       hid every test after it.
+
+       The UNCAUGHT path is byte-identical to what it printed before, because
+       that text is compared against the other engines. It deliberately does
+       NOT go through CRYO_THROW, which would prefix it with
+       "[Cryo Exception] " and make the two disagree. */
+    if (_cryo_exc.active) {
+        snprintf(_cryo_exc.message, sizeof(_cryo_exc.message),
+                 "[Cryo Assert] %s", m);
+        longjmp(_cryo_exc.buf, 1);
     }
+    fprintf(stderr, "[Cryo Assert] %s\n", m);
+    abort();
 }
 
 /* ---------- Security: null pointer guard ---------- */
@@ -292,6 +307,98 @@ char* cryo_bool_to_str(bool b) {
     /* Returns a static string — do not free */
     return b ? "true" : "false";
 }
+
+/* ---------- 11.27: rendering an array ----------
+   One growable buffer rather than repeated cryo_str_concat: concatenating in a
+   loop is quadratic and allocates a throwaway string per element, which for a
+   large array is the difference between printing it and appearing to hang. */
+typedef struct { char* p; size_t len, cap; } CryoSb;
+
+static void cryo_sb_init(CryoSb* b) {
+    b->cap = 64; b->len = 0; b->p = malloc(b->cap); if (b->p) b->p[0] = 0;
+}
+
+static void cryo_sb_add(CryoSb* b, const char* s) {
+    if (!b->p || !s) return;
+    size_t n = strlen(s);
+    if (b->len + n + 1 > b->cap) {
+        while (b->len + n + 1 > b->cap) b->cap *= 2;
+        char* np = realloc(b->p, b->cap);
+        if (!np) return;
+        b->p = np;
+    }
+    memcpy(b->p + b->len, s, n + 1);
+    b->len += n;
+}
+
+/* The shared shape. `one` renders element i; `owned` says whether it malloc'd,
+   so a static "true"/"false" is not passed to free(). */
+static char* cryo_arr_join(CryoArray* a, char* (*one)(CryoArray*, int64_t),
+                           bool owned) {
+    CryoSb b; cryo_sb_init(&b);
+    cryo_sb_add(&b, "[");
+    int64_t n = a ? a->length : 0;
+    for (int64_t i = 0; i < n; i++) {
+        if (i) cryo_sb_add(&b, ", ");
+        char* s = one(a, i);
+        cryo_sb_add(&b, s ? s : "null");
+        if (owned && s) free(s);
+    }
+    cryo_sb_add(&b, "]");
+    return b.p;
+}
+
+static char* cryo_arr_el_i(CryoArray* a, int64_t i) {
+    return cryo_i64_to_str((int64_t)cryo_array_get(a, i));
+}
+static char* cryo_arr_el_f(CryoArray* a, int64_t i) {
+    uint64_t u = cryo_array_get(a, i); double d; memcpy(&d, &u, 8);
+    return cryo_f64_to_str(d);
+}
+static char* cryo_arr_el_s(CryoArray* a, int64_t i) {
+    /* Strings are stored as pointers and are NOT quoted in the canonical
+       form — "[a, b]", matching the VM and the go/node backends. */
+    return (char*)(uintptr_t)cryo_array_get(a, i);
+}
+static char* cryo_arr_el_b(CryoArray* a, int64_t i) {
+    return cryo_bool_to_str(cryo_array_get(a, i) != 0);
+}
+
+char* cryo_arr_to_str_i(CryoArray* a) { return cryo_arr_join(a, cryo_arr_el_i, true); }
+char* cryo_arr_to_str_f(CryoArray* a) { return cryo_arr_join(a, cryo_arr_el_f, true); }
+char* cryo_arr_to_str_s(CryoArray* a) { return cryo_arr_join(a, cryo_arr_el_s, false); }
+char* cryo_arr_to_str_b(CryoArray* a) { return cryo_arr_join(a, cryo_arr_el_b, false); }
+
+/* ---------- 11.27: optionals (T?) ---------- */
+
+/* The exact text the Pyro VM prints. Not routed through _cryo_fatal, which
+   formats as "kind: detail" — this message has no kind, and the two runtimes
+   are compared byte for byte by test_c_vm.py. */
+static void _cryo_unwrap_null(void) {
+    fprintf(stderr, "[Cryo Security] unwrap of null value\n");
+    abort();
+}
+
+int64_t* cryo_opt_i(int64_t v) {
+    int64_t* p = malloc(sizeof(int64_t));
+    if (!p) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    *p = v; return p;
+}
+double* cryo_opt_f(double v) {
+    double* p = malloc(sizeof(double));
+    if (!p) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    *p = v; return p;
+}
+bool* cryo_opt_b(bool v) {
+    bool* p = malloc(sizeof(bool));
+    if (!p) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    *p = v; return p;
+}
+
+int64_t cryo_unwrap_i(int64_t* p) { if (!p) _cryo_unwrap_null(); return *p; }
+double  cryo_unwrap_f(double* p)  { if (!p) _cryo_unwrap_null(); return *p; }
+bool    cryo_unwrap_b(bool* p)    { if (!p) _cryo_unwrap_null(); return *p; }
+char*   cryo_unwrap_s(char* p)    { if (!p) _cryo_unwrap_null(); return p; }
 
 int64_t cryo_str_len(const char* s) {
     return s ? (int64_t)strlen(s) : 0;
@@ -679,4 +786,170 @@ char* cryo_exec(const char* cmd) {
     pclose(fp);
 #endif
     return res;
+}
+
+/* ---------- 11.27: maps (map<K,V>) ----------
+   Open addressing with linear probing. Small, and the whole table is one
+   allocation, which matters more here than the theoretical wins of chaining:
+   Cryo maps are usually tens of entries, not millions. */
+
+static uint64_t _cryo_map_hash(CryoMap* m, uint64_t k) {
+    if (m->str_keys) {
+        const char* s = (const char*)(uintptr_t)k;
+        uint64_t h = 1469598103934665603ULL;      /* FNV-1a */
+        if (s) for (; *s; s++) { h ^= (unsigned char)*s; h *= 1099511628211ULL; }
+        return h;
+    }
+    /* integer keys: a mix, so that consecutive ints do not all probe together */
+    uint64_t h = k;
+    h ^= h >> 33; h *= 0xff51afd7ed558ccdULL;
+    h ^= h >> 33; h *= 0xc4ceb9fe1a85ec53ULL;
+    h ^= h >> 33;
+    return h;
+}
+
+static int _cryo_map_keyeq(CryoMap* m, uint64_t a, uint64_t b) {
+    if (!m->str_keys) return a == b;
+    const char* x = (const char*)(uintptr_t)a;
+    const char* y = (const char*)(uintptr_t)b;
+    if (!x || !y) return x == y;
+    return strcmp(x, y) == 0;
+}
+
+CryoMap* cryo_map_new(int str_keys) {
+    CryoMap* m = malloc(sizeof(CryoMap));
+    if (!m) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    m->cap = 16; m->len = 0; m->str_keys = str_keys;
+    m->e = calloc((size_t)m->cap, sizeof(CryoMapEntry));
+    if (!m->e) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    return m;
+}
+
+static int64_t _cryo_map_slot(CryoMap* m, uint64_t k) {
+    int64_t mask = m->cap - 1;
+    int64_t i = (int64_t)(_cryo_map_hash(m, k) & (uint64_t)mask);
+    while (m->e[i].used && !_cryo_map_keyeq(m, m->e[i].key, k)) {
+        i = (i + 1) & mask;
+    }
+    return i;
+}
+
+static void _cryo_map_grow(CryoMap* m) {
+    int64_t oldcap = m->cap;
+    CryoMapEntry* old = m->e;
+    m->cap *= 2;
+    m->e = calloc((size_t)m->cap, sizeof(CryoMapEntry));
+    if (!m->e) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
+    m->len = 0;
+    for (int64_t i = 0; i < oldcap; i++) {
+        if (old[i].used) {
+            int64_t j = _cryo_map_slot(m, old[i].key);
+            m->e[j] = old[i];
+            m->len++;
+        }
+    }
+    free(old);
+}
+
+void cryo_map_set(CryoMap* m, uint64_t k, uint64_t v) {
+    /* Grown at half full. Linear probing degrades badly past ~70%, and this
+       keeps the probe runs short without much memory. */
+    if ((m->len + 1) * 2 > m->cap) _cryo_map_grow(m);
+    int64_t i = _cryo_map_slot(m, k);
+    if (!m->e[i].used) { m->e[i].used = 1; m->e[i].key = k; m->len++; }
+    m->e[i].val = v;
+}
+
+bool cryo_map_has(CryoMap* m, uint64_t k) {
+    if (!m) return false;
+    int64_t i = _cryo_map_slot(m, k);
+    return m->e[i].used ? true : false;
+}
+
+uint64_t cryo_map_get(CryoMap* m, uint64_t k) {
+    if (!m) return 0;
+    int64_t i = _cryo_map_slot(m, k);
+    return m->e[i].used ? m->e[i].val : 0;
+}
+
+void cryo_map_remove(CryoMap* m, uint64_t k) {
+    if (!m) return;
+    int64_t i = _cryo_map_slot(m, k);
+    if (!m->e[i].used) return;
+    m->e[i].used = 0;
+    m->len--;
+    /* Re-insert the rest of this probe run. A tombstone would be simpler, but
+       leaving a hole here breaks lookups for any key that probed PAST this
+       slot — the classic open-addressing deletion bug. */
+    int64_t mask = m->cap - 1;
+    int64_t j = (i + 1) & mask;
+    while (m->e[j].used) {
+        CryoMapEntry moved = m->e[j];
+        m->e[j].used = 0;
+        m->len--;
+        cryo_map_set(m, moved.key, moved.val);
+        j = (j + 1) & mask;
+    }
+}
+
+int64_t cryo_map_len(CryoMap* m) { return m ? m->len : 0; }
+
+/* Keys as text, for ordering. Both the VM and the go backend order a map by
+   the key's own textual form, so this has to agree with them. */
+static char* _cryo_key_text(CryoMap* m, uint64_t k) {
+    if (m->str_keys) {
+        const char* s = (const char*)(uintptr_t)k;
+        return s ? (char*)s : (char*)"null";
+    }
+    return cryo_i64_to_str((int64_t)k);
+}
+
+static int _cryo_key_cmp(CryoMap* m, uint64_t a, uint64_t b) {
+    char* x = _cryo_key_text(m, a);
+    char* y = _cryo_key_text(m, b);
+    int r = strcmp(x, y);
+    if (!m->str_keys) { free(x); free(y); }
+    return r;
+}
+
+CryoArray* cryo_map_keys(CryoMap* m) {
+    CryoArray* out = cryo_array_new();
+    if (!m) return out;
+    for (int64_t i = 0; i < m->cap; i++) {
+        if (m->e[i].used) cryo_array_push(out, m->e[i].key);
+    }
+    /* insertion sort: key counts here are small, and it keeps the comparator
+       (which may allocate) out of qsort's context-free callback */
+    for (int64_t i = 1; i < out->length; i++) {
+        uint64_t v = out->data[i];
+        int64_t j = i - 1;
+        while (j >= 0 && _cryo_key_cmp(m, out->data[j], v) > 0) {
+            out->data[j + 1] = out->data[j];
+            j--;
+        }
+        out->data[j + 1] = v;
+    }
+    return out;
+}
+
+char* cryo_map_to_str(CryoMap* m, int val_kind) {
+    CryoSb b; cryo_sb_init(&b);
+    cryo_sb_add(&b, "{");
+    CryoArray* ks = cryo_map_keys(m);
+    for (int64_t i = 0; i < ks->length; i++) {
+        if (i) cryo_sb_add(&b, ", ");
+        uint64_t k = ks->data[i];
+        char* kt = _cryo_key_text(m, k);
+        cryo_sb_add(&b, kt);
+        if (!m->str_keys) free(kt);
+        cryo_sb_add(&b, ": ");
+        uint64_t v = cryo_map_get(m, k);
+        if (val_kind == 0) { char* s = cryo_i64_to_str((int64_t)v); cryo_sb_add(&b, s); free(s); }
+        else if (val_kind == 1) { double d; memcpy(&d, &v, 8); char* s = cryo_f64_to_str(d); cryo_sb_add(&b, s); free(s); }
+        else if (val_kind == 2) { const char* s = (const char*)(uintptr_t)v; cryo_sb_add(&b, s ? s : "null"); }
+        else { cryo_sb_add(&b, v ? "true" : "false"); }
+    }
+    cryo_sb_add(&b, "}");
+    cryo_array_free(ks);
+    return b.p;
 }

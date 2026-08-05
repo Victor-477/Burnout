@@ -26,7 +26,14 @@ from lexer import Lexer   # reference lexer (oracle)
 from parser import Parser  # reference parser (stage 2 oracle)
 from ast_nodes import (
     FunctionDecl, VarDecl, Assignment, Return, If, While,
-    BinaryExpr, UnaryExpr, CallExpr, Identifier, Literal,
+    BinaryExpr, UnaryExpr, TernaryExpr, CallExpr, Identifier, Literal,
+    # 11.28 — the constructs the self-hosted parser gained
+    For, ForEach, Break, Continue, CompoundAssignment, Increment,
+    ArrayLiteral, IndexAccess, IndexAssignment, FieldAccess,
+    StructDecl, StructInit, EnumDecl, MatchStatement, Block,
+    # 12.6 — the desugarings and remaining shapes
+    TryCatch, Switch, SwitchCase, Lambda, MapLiteral, CastExpr,
+    ModuleImport, TraitDecl, SpawnExpr, AwaitExpr,
 )
 
 # Test source on a single line (no internal line breaks/escapes other than quotes),
@@ -73,6 +80,8 @@ def ser(n):
         return f"(bin {n.op} {ser(n.left)} {ser(n.right)})"
     if isinstance(n, UnaryExpr):
         return f"(un {n.op} {ser(n.operand)})"
+    if isinstance(n, TernaryExpr):
+        return f"(tern {ser(n.condition)} {ser(n.then_value)} {ser(n.else_value)})"
     if isinstance(n, CallExpr):
         return f"(call {n.callee}" + "".join(" " + ser(a) for a in n.args) + ")"
     if isinstance(n, Identifier):
@@ -83,6 +92,100 @@ def ser(n):
         if n.kind == "string": return f"(str {n.value})"
         if n.kind == "bool":   return f"(bool {'true' if n.value else 'false'})"
         if n.kind == "null":   return "(null)"
+
+    # ── 11.28 ──────────────────────────────────────────────
+    # Each shape below is also produced by parser.cryo. They are written here
+    # first, deliberately: the reference AST is the ORACLE, so the Cryo parser
+    # is made to match it rather than the two being defined together.
+    if isinstance(n, For):
+        init = ser(n.init) if n.init is not None else "nil"
+        cond = ser(n.condition) if n.condition is not None else "nil"
+        upd = ser(n.update) if n.update is not None else "nil"
+        body = "".join(" " + ser(x) for x in n.body)
+        return f"(for {init} {cond} {upd} (body{body}))"
+    if isinstance(n, ForEach):
+        vt = n.var_type or "-"
+        body = "".join(" " + ser(x) for x in n.body)
+        return f"(foreach {vt} {n.var_name} {ser(n.iterable)} (body{body}))"
+    if isinstance(n, Break):
+        return "(break)"
+    if isinstance(n, Continue):
+        return "(continue)"
+    if isinstance(n, CompoundAssignment):
+        return f"(cassign {n.op} {n.name} {ser(n.value)})"
+    if isinstance(n, Increment):
+        return f"(incr {n.op} {n.name})"
+    if isinstance(n, IndexAssignment):
+        return f"(setidx {ser(n.obj)} {ser(n.index)} {ser(n.value)})"
+    if isinstance(n, ArrayLiteral):
+        return "(arr" + "".join(" " + ser(e) for e in n.elements) + ")"
+    if isinstance(n, IndexAccess):
+        return f"(idx {ser(n.obj)} {ser(n.index)})"
+    if isinstance(n, FieldAccess):
+        return f"(field {ser(n.obj)} {n.field})"
+    if isinstance(n, StructDecl):
+        fs = "".join(f" (f {f.field_type} {f.name})" for f in n.fields)
+        return f"(struct {n.name} (fields{fs}))"
+    if isinstance(n, StructInit):
+        fs = "".join(f" (fv {k} {ser(v)})" for k, v in n.fields)
+        return f"(new {n.struct_name}{fs})"
+    if isinstance(n, EnumDecl):
+        ms = "".join(" (m " + m.name
+                     + "".join(" " + t for t in (m.fields or [])) + ")"
+                     for m in n.members)
+        return f"(enum {n.name}{ms})"
+    if isinstance(n, MatchStatement):
+        cs = ""
+        for c in n.cases:
+            vs = "".join(" " + v for v in (c.pattern_vars or []))
+            body = "".join(" " + ser(x) for x in c.body)
+            cs += f" (case {c.pattern_name} (vars{vs}) (body{body}))"
+        return f"(match {ser(n.subject)}{cs})"
+    if isinstance(n, Block):
+        return "(block" + "".join(" " + ser(x) for x in n.body) + ")"
+
+    # ── 12.6 ──────────────────────────────────────────────
+    # The constructs 11.28 left out. Same rule as above: the reference AST is
+    # the oracle and parser.cryo is made to match it.
+    if isinstance(n, TryCatch):
+        tb = "".join(" " + ser(x) for x in n.try_body)
+        cb = "".join(" " + ser(x) for x in (n.catch_body or []))
+        out = (f"(try (body{tb}) (catch {n.catch_type or '-'} "
+               f"{n.catch_name or '-'} (body{cb}))")
+        if n.finally_body is not None:
+            out += "(finally (body" + "".join(" " + ser(x) for x in n.finally_body) + "))"
+            out = out.replace(")(finally", ") (finally")
+        return out + ")"
+    if isinstance(n, Switch):
+        cs = ""
+        for c in n.cases:
+            vs = "".join(" " + ser(v) for v in c.values)
+            body = "".join(" " + ser(x) for x in c.body)
+            cs += f" (case (vals{vs}) (body{body}))"
+        out = f"(switch {ser(n.subject)}{cs}"
+        if n.default_body is not None:
+            out += " (default (body" + "".join(" " + ser(x) for x in n.default_body) + "))"
+        return out + ")"
+    if isinstance(n, Lambda):
+        ps = "".join(f" (p {pt} {pn})" for (pt, pn) in n.params)
+        body = "".join(" " + ser(x) for x in n.body)
+        return f"(lam (params{ps}) (body{body}))"
+    if isinstance(n, MapLiteral):
+        return "(map" + "".join(f" (kv {ser(k)} {ser(v)})" for k, v in n.pairs) + ")"
+    if isinstance(n, CastExpr):
+        return f"(cast {ser(n.expr)} {n.target_type})"
+    if isinstance(n, ModuleImport):
+        return f"(import {n.path} {n.alias or '-'})"
+    if isinstance(n, SpawnExpr):
+        return f"(spawn {ser(n.expr)})"
+    if isinstance(n, AwaitExpr):
+        return f"(await {ser(n.expr)})"
+    if isinstance(n, TraitDecl):
+        ms = ""
+        for m in n.methods:
+            ps = "".join(f" (p {pt} {pn})" for (pt, pn) in m.params)
+            ms += f" (m {m.name} (params{ps}) {m.return_type or 'void'})"
+        return f"(trait {n.name}{ms})"
     return f"(? {type(n).__name__})"
 
 
@@ -170,6 +273,45 @@ if got != expected:
 check("token stream identical to the reference lexer", got == expected)
 check("ends with EOF", len(got) > 0 and got[-1] == "EOF ")
 
+# ── 11.28: the tokens the self-hosted lexer used to be missing ──
+#
+# Fifteen kinds the reference lexer produced and this one did not. The failure
+# mode is what makes it worth its own sample: `pub`, `trait`, `impl` and
+# `permissions` lexed as plain IDENT, so the stream stayed the same LENGTH and
+# only a name-by-name comparison sees it. `..=` and `<<=` are the opposite
+# problem — they came out as two tokens each, and the trailing `=` then reads
+# as an assignment, so the divergence surfaces far from its cause.
+#
+# The three-character forms are listed first here because they are the ones an
+# ordering mistake breaks: `..=` must be tried before `..`, `<<=` before `<<`,
+# `::` before `:`.
+SAMPLE3 = ('int a = 0; a &= 1; a |= 2; a ^= 3; a <<= 1; a >>= 1; int b = ~a; '
+           'for (i in 0..5) { } for (j in 0..=5) { } '
+           'pub fn f() -> void ={ } trait T { } impl T for S { } '
+           'permissions { read = "./x"; } ns::name();')
+
+print("\n[11.28] tokens the self-hosted lexer was missing")
+exp_new = reference_tokens(SAMPLE3)
+got_new, res_new = selfhost_tokens(SAMPLE3)
+check("the extended sample compiled and ran", res_new.returncode == 0 and got_new)
+check("same number of tokens", len(got_new) == len(exp_new))
+if got_new != exp_new:
+    for i in range(max(len(got_new), len(exp_new))):
+        g = got_new[i] if i < len(got_new) else "<missing>"
+        e = exp_new[i] if i < len(exp_new) else "<extra>"
+        if g != e:
+            print(f"    divergence at position {i}: expected {e!r}, got {g!r}")
+            break
+check("token stream identical to the reference lexer", got_new == exp_new)
+
+# Each kind named individually: "the streams match" would still pass if a whole
+# construct silently disappeared from the sample during an edit.
+_kinds = {t.split(' ', 1)[0] for t in got_new}
+for _k in ('AMP_ASSIGN', 'PIPE_ASSIGN', 'CARET_ASSIGN', 'SHL_ASSIGN', 'SHR_ASSIGN',
+           'TILDE', 'RANGE', 'RANGE_INCL', 'PUB', 'TRAIT', 'IMPL',
+           'PERMISSIONS', 'COLON_COLON'):
+    check(f"emits {_k}", _k in _kinds)
+
 print("[9.3] self-hosted parser (Cryo on the Pyro VM) vs. reference parser")
 _esc = SAMPLE.replace("\\", "\\\\").replace('"', '\\"')
 res2 = _run_vm('import "parser.cryo"\nparse("' + _esc + '");\n')
@@ -208,6 +350,118 @@ if got3 != exp3:
             print(f"      got:      {g}")
             break
 check("AST identical (source 2: while/else-if/unary/call)", got3 == exp3)
+
+# ── 11.28: the constructs the self-hosted parser gained ──────
+#
+# The reference AST is the ORACLE: each sample is parsed by both and the
+# S-expressions compared statement by statement. That is far sharper than "it
+# did not crash", which is otherwise all a parser can be checked for — a parser
+# that quietly drops a clause still produces output.
+#
+# One sample per group, so a failure names the group rather than the file.
+def _selfhost_ast(src):
+    """The Cryo parser's S-expressions for `src`, run on the VM."""
+    # The '$' must be escaped in the DRIVER's own literal or the reference
+    # compiler interpolates the sample while compiling the driver. That escape
+    # is 11.39, and this harness is what needed it.
+    esc = (src.replace("\\", "\\\\").replace('"', '\\"').replace("$", "\\$"))
+    r = _run_vm('import "parser.cryo"\nparse("' + esc + '");\n')
+    return [ln for ln in (r.stdout or "").replace("\r\n", "\n").split("\n")
+            if ln.startswith("(")], r
+
+
+SAMPLES_1128 = [
+    ("arrays, indexing and element assignment",
+     'int[] a = [1, 2, 3]; int[][] g = [[1, 2], [3]]; '
+     'a[0] = a[1] * 2; print(g[0][1]);'),
+    ("C-style for, compound assignment, increment",
+     'int q = 0; for (int i = 0; i < 3; i++) { q += i; } print(q);'),
+    ("for-in, typed and untyped",
+     'int[] a = [1, 2]; for (v in a) { print(v); } for (int w in a) { print(w); }'),
+    ("break and continue",
+     'int i = 0; while (true) { if (i > 2) { break; } else { continue; } }'),
+    ("struct declaration, construction and field access",
+     'struct P { int x; string s; } P p = new P{x: 1, s: "h"}; print(p.x);'),
+    ("struct-typed arrays and chained postfix",
+     'struct It { string n; } It[] xs = []; print(xs[0].n);'),
+    ("enum declaration, with and without a payload",
+     'enum R { Ok(int), Err(string), None }'),
+    ("match with bound payloads",
+     'enum R { Ok(int), Err(string) } R r = Ok(1); '
+     'match (r) { Ok(v) => { print(v); } Err(e) => { print(e); } }'),
+    ("optional and array types in declarations",
+     'int? o = null; string[] names = [];'),
+    ("ternary, bitwise operators and unary ~",
+     'int x = 1; int y = x > 0 ? 1 : 2; int a = 6 & 3; int b = 6 | 1; '
+     'int c = 6 ^ 1; int d = 1 << 2; int e = ~a;'),
+    # The point of matching the reference's precedence chain, rather than any
+    # chain that happens to work: a level in the wrong place still parses, and
+    # still produces a tree — just a different one. `a & b == c` is the case
+    # that catches it, since & binds LOOSER than == here (as in C).
+    ("precedence across the new levels",
+     'int a = 1; int b = 2; int c = 3; bool r = a & b == c; '
+     'int s = a | b ^ c & a; bool t = a < b == true;'),
+    ("slices lower to the slice native",
+     'int[] a = [1, 2, 3, 4]; int[] m = a[1..3]; int[] h = a[..2];'),
+    ("a range for-loop is a C-style for, not a foreach",
+     'for (int i in 0..3) { print(i); } for (int j in 1..=3) { print(j); }'),
+    # Last because it is the subtlest: an interpolated string is NOT a string in
+    # the reference AST but a CONCATENATION, and the fold has a rule that is
+    # easy to miss — a LEADING interpolation is prefixed with `"" +` to force
+    # string context, so `"${a}${b}"` cannot add two numbers.
+    ("string interpolation is a concatenation, not a string",
+     'int x = 1; int y = 2; print("${x}"); print("a${x}b${y}c"); '
+     'print("sum: ${x + y}"); print("plain");'),
+]
+
+print("\n[11.28] constructs the self-hosted parser gained")
+# ── 12.6: the constructs 11.28 deliberately left out ─────────
+#
+# 11.28 stopped at the parser's *shapes* and recorded these as "each is a
+# desugaring, not a parse rule". That was true of one of them — `=> expr`
+# lowers to a body of [Return(expr)], so emitting the bare expression would
+# diverge — and overstated for the rest, which turned out to be ordinary rules
+# once the type grammar could spell `map<K,V>` and `fn(T)->R`.
+SAMPLES_126 = [
+    ("try / catch", 'try { print(1); } catch (string e) { print(e); }'),
+    ("try / catch / finally",
+     'try { print(1); } catch (string e) { print(e); } finally { print(2); }'),
+    ("switch with default",
+     'switch (x) { case 1: print(1); default: print(0); }'),
+    # Stacked labels share ONE case in the reference. Emitting two would parse
+    # the same source into a different tree, and still "work".
+    ("switch with stacked labels",
+     'switch (x) { case 1: case 2: print(1); case 3: print(3); }'),
+    ("lambda, expression body", 'fn(int)->int f = (int n) => n + 1;'),
+    ("lambda, block body", 'fn(int)->int g = (int n) => { return n + 1; };'),
+    ("map literal and map type", 'map<string,int> m = {"a": 1, "b": 2};'),
+    ("nested type arguments", 'map<string,int[]> m = {"a": [1]};'),
+    ("cast", 'int n = x as int;'),
+    # `as` binds LOOSER than ||, so this casts the whole disjunction. A cast
+    # level in the wrong place still parses — only the oracle catches it.
+    ("cast precedence against ||", 'int n = a || b as int;'),
+    ("import", 'import "lib.cryo";'),
+    ("import with alias", 'import "lib.cryo" as geo;'),
+    ("trait with method signatures",
+     'trait Ord { fn cmp(int o) -> int; fn zero() -> int; }'),
+    # 12.5 shipped concurrency and the self-hosted parser had never been told.
+    ("spawn / await", 'future<int> f = spawn g(); int r = await f;'),
+]
+
+for _label, _src in SAMPLES_1128 + SAMPLES_126:
+    _exp = reference_ast(_src)
+    _got, _res = _selfhost_ast(_src)
+    if _got != _exp:
+        for _i in range(max(len(_got), len(_exp))):
+            _g = _got[_i] if _i < len(_got) else "<missing>"
+            _x = _exp[_i] if _i < len(_exp) else "<extra>"
+            if _g != _x:
+                print(f"    divergence in {_label} at statement {_i}:")
+                print(f"      expected: {_x}")
+                print(f"      got:      {_g}")
+                break
+    check(f"AST identical: {_label}", _got == _exp)
+
 
 # ── stage 3: codegen in Cryo -> executable .pyro ──────────
 print("[9.3] self-hosted codegen (Cryo on the VM emits executable .pyro)")

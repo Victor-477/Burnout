@@ -193,10 +193,18 @@ def test_c_backend(work):
     print("\n── C backend: precision works, width refuses ──")
     src = ('number x = 3.14159;\nnumber t = 1234567.891;\n'
            'print("${x:.2f}");\nprint("${t:,.2f}");\n')
+    # The work directory is shared by every case in this file, so a binary from
+    # an EARLIER case survives here. Without removing it first, this check runs
+    # that stale program and reports its output as this one's — which is exactly
+    # what happened on a machine with no gcc: no exe was produced, a leftover one
+    # was executed, and C was blamed for printing '3'.
+    exe = os.path.join(work, 'prog.exe' if sys.platform == 'win32' else 'prog')
+    if os.path.isfile(exe):
+        os.remove(exe)
+
     rc, log = compile_to(src, work, 'c', 'prog.c')
     check("precision and grouping compile on C", rc == 0, log[-200:])
     if rc == 0:
-        exe = os.path.join(work, 'prog.exe' if sys.platform == 'win32' else 'prog')
         if os.path.isfile(exe):
             p = subprocess.run([exe], capture_output=True, text=True,
                                timeout=120, errors='replace')
@@ -290,6 +298,45 @@ def test_selfhost(work):
               "no artifact")
 
 
+def test_escaped_interp(work):
+    r"""11.39 - a backslash before $ escapes an interpolation.
+
+    There was no way to write a literal `${...}` in a Cryo string. The lexer
+    honoured the escape and turned `\$` into a bare `$`; the parser then
+    re-scanned that value for interpolations and found one. Neither pass was
+    wrong on its own — the fact that it had been escaped was dropped between
+    them, which is why it survived so long.
+
+    Checked on the RUN OUTPUT rather than the generated code: what matters is
+    the text the program prints.
+    """
+    print("\n-- 11.39: escaping an interpolation --")
+    BS1 = chr(92)          # one backslash, kept out of the literals
+    BSBS = BS1 + BS1       # two, i.e. an escaped backslash in Cryo
+    cases = [
+        ("a literal interpolation is left alone",
+         'print("literal: ' + BS1 + '${notavar}");\n',
+         'literal: ${notavar}'),
+        ("a real interpolation still works",
+         'int x = 7;\nprint("real: ${x}");\n', "real: 7"),
+        ("both in one string",
+         'int x = 7;\nprint("${x} and ' + BS1 + '${y}");\n',
+         '7 and ${y}'),
+        ("a bare dollar, no braces",
+         'print("money: ' + BS1 + '$5.00");\n', 'money: $5.00'),
+        # An escaped BACKSLASH followed by a real interpolation. This is the
+        # case a backslash-based marker cannot tell apart from the literal
+        # above — both would unescape to a backslash then "${". The sentinel
+        # stands in for the "$" itself, so they stay distinct.
+        ("an escaped backslash still leaves a live interpolation",
+         'int x = 7;\nprint("esc: ' + BSBS + '${x}");\n',
+         'esc: ' + BS1 + '7'),
+    ]
+    for label, src, want in cases:
+        out = run_pyro(src, work)
+        check(label, out.strip() == want, f"{out.strip()!r} != {want!r}")
+
+
 def main():
     work = tempfile.mkdtemp(prefix='cryo_fmt_')
     try:
@@ -298,6 +345,7 @@ def main():
         test_c_backend(work)
         test_c_conversions(work)
         test_selfhost(work)
+        test_escaped_interp(work)
     finally:
         shutil.rmtree(work, ignore_errors=True)
     print(f"\n{_passed} passed, {_failed} failed")

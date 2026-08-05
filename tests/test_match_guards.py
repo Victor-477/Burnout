@@ -203,6 +203,19 @@ CASES = [
 
     # Guards must not disturb the unguarded path, including `?` propagation
     # (Phase 8.3), which is the other half of Result ergonomics.
+    # Go makes an unused variable a compile error, so an arm that bound a
+    # payload it did not read failed there while running fine on pyro and
+    # node — a parity break for ordinary code.
+    ('a bound payload may go unused',
+     'enum R2 { Ok(int), Err(string, string) }\n'
+     'fn f(R2 r) ={\n'
+     '  match r {\n'
+     '    Ok(v) => print("ok");\n'
+     '    Err(a, b) => print("err ${a}");\n'
+     '  }\n}\n'
+     'f(Ok(1)); f(Err("x", "y"));\n',
+     'ok\nerr x'),
+
     ('an unguarded match is unchanged, and ? still propagates',
      ENUM + 'fn parse(string s) -> R ={\n'
             '  if (s == "bad") { return Err("not a number"); }\n'

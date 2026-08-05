@@ -18,6 +18,8 @@
 #    entryfn  u16   (index of the 'main' function)
 #    codelen  u32   after: code bytes (possibly encoded)
 # ============================================================
+import hashlib
+import hmac
 import struct
 from ast_nodes import *
 from typing import Dict, List, Optional, Set
@@ -83,6 +85,8 @@ OP_GETGLOBAL = 0x76
 OP_SETGLOBAL = 0x77
 OP_COALESCE = 0x74 # pop b, a -> a if a != null, else b  (operator ??)
 OP_UNWRAP  = 0x75 # pop a -> a if a != null, else aborts  (unwrap x!)
+OP_SPAWN   = 0x78 # pop a function value -> starts a task, pushes a future (12.5)
+OP_AWAIT   = 0x79 # pop a future -> its result, yielding until the task is done
 
 # operand size per opcode (bytes after the opcode)
 #  v2: jumps use i32 (formerly i16) -> no limit of ±32KB per function.
@@ -96,6 +100,12 @@ _OPERAND = {
 }
 
 _NO_SLOT = 0xFFFF   # TRYPUSH without catch variable
+
+# The key the synthetic top-level function is registered under in _fnindex.
+# Deliberately unspellable as a Cryo identifier: it used to be registered as
+# 'main', so a user's own `fn main()` was overwritten in the table and
+# `main();` called the top level — which called itself, forever.
+_ENTRY_KEY = '<entry>'
 
 # VM native builtins: name -> (id, argc). The VM mirrors this table.
 NATIVES = {
@@ -168,6 +178,7 @@ _FLAG_DEBUG   = 0x02
 _FLAG_SANDBOX = 0x04
 _FLAG_ASSETS  = 0x08   # 11.9: embedded asset section follows the debug one
 _FLAG_PERMS   = 0x10   # 11.12: declared permissions follow the assets
+_FLAG_SIGNED  = 0x20   # 11.14: HMAC-SHA256 of everything before it, LAST
 
 # 11.12 — the source spelling (short, for the programmer) mapped to the
 # runtime capability name (explicit, for the operator reading a policy).
@@ -202,8 +213,11 @@ class CodeGenPyro:
     def __init__(self, safe: bool = True, encode: bool = True,
                  optimize: bool = True, sandbox: bool = False,
                  extra_natives: Optional[Set[str]] = None,
-                 assets: Optional[Dict[str, bytes]] = None):
+                 assets: Optional[Dict[str, bytes]] = None,
+                 sign_key: Optional[bytes] = None):
         self.safe = safe
+        # 11.14 — when set, the container is signed (see the tail of _assemble)
+        self.sign_key = sign_key
         self.encode = encode
         self.optimize = optimize
         self.sandbox = sandbox
@@ -344,13 +358,24 @@ class CodeGenPyro:
                 self._globals[st.name] = len(self._globals)
                 self._toplevel_vars.add(id(st))
 
-        names = [f.name for f in user_fns] + ['main']
+        # The synthetic top level is registered under a key no Cryo identifier
+        # can spell. It used to be registered as 'main', which a user function
+        # of that name then collided with: `fn main() ... main();` resolved the
+        # call to the TOP LEVEL rather than the function, so the program called
+        # itself and spun forever (it ran correctly on node — an invariant-1
+        # break, on the single likeliest name for a user to pick).
+        #
+        # Only the dictionary KEY changes. The function keeps the name 'main'
+        # in the table, so stack traces read the same, and the index order is
+        # untouched, so a program without a user `main` compiles to identical
+        # bytes and the bootstrap fixed point is unaffected.
+        names = [f.name for f in user_fns] + [_ENTRY_KEY]
         for i, nm in enumerate(names):
             self._fnindex[nm] = i
 
         for fn in user_fns:
             self._compile_fn(fn.name, fn.params, fn.body)
-        self._compile_fn('main', [], top, synthetic=True)
+        self._compile_fn('main', [], top, synthetic=True, index_key=_ENTRY_KEY)
 
         # lambdas discovered while compiling bodies are queued (with their index
         # reserved) and compiled here in index order, so each lands at the
@@ -362,9 +387,11 @@ class CodeGenPyro:
 
         return self._assemble()
 
-    def _compile_fn(self, name, params, body, synthetic=False):
+    def _compile_fn(self, name, params, body, synthetic=False, index_key=None):
         f = _Func(name, len(params))
-        f.index = self._fnindex[name]
+        # index_key separates the table lookup from the emitted NAME, so the
+        # synthetic top level can be called 'main' without owning that key.
+        f.index = self._fnindex[index_key or name]
         self._cur = f
         self._loop_stack = []
         self._cur_line = 0
@@ -729,14 +756,38 @@ class CodeGenPyro:
         self._emit(OP_JMP, self._loop_stack[-1][1])
 
     def _assert(self, n: Assert):
-        if n.message is not None and isinstance(n.message, Literal) \
-                and n.message.kind == 'string':
-            msg = n.message.value
+        # 12.8 — the message is an EXPRESSION, not a string literal.
+        #
+        # It used to be used only when it was a string `Literal`, with a generic
+        # "assert failed (line N)" substituted otherwise — so
+        # `assert(n == 4, "n was " + to_string(n))` reported nothing about n,
+        # while go and node both printed "n was 5". The expression was never
+        # even evaluated. A message that looks dynamic and silently is not is
+        # worse than not supporting one at all.
+        #
+        # OP_ASSERT already stringifies whatever Value it pops, so emitting the
+        # expression is the whole fix; no opcode or VM change is involved.
+        # 12.12 — and the message is evaluated ONLY when the assertion fails.
+        #
+        # OP_ASSERT pops cond then msg, so the straightforward encoding has to
+        # push the message FIRST and therefore always evaluates it. An assertion
+        # that holds should cost nothing, and a message that is only valid when
+        # the condition is true (an index, say) must not abort the passing run.
+        #
+        # So: test the condition, jump clear when it holds, and only then build
+        # the message and fail with a constant false. The abort text is
+        # unchanged, which matters because it is compared against the other
+        # engines byte for byte.
+        l_end = self._label()
+        self._expr(n.condition)
+        self._emit(OP_JMPT, l_end)              # holds -> skip everything below
+        if n.message is None:
+            self._emit(OP_CONST, self._const(TAG_STR, f"assert failed (line {n.line})"))
         else:
-            msg = f"assert failed (line {n.line})"
-        self._emit(OP_CONST, self._const(TAG_STR, msg))   # msg on top
-        self._expr(n.condition)                            # cond above the msg
+            self._expr(n.message)               # msg on top
+        self._emit(OP_FALSE)                    # cond above the msg: always fails
         self._emit(OP_ASSERT)
+        self._place(l_end)
 
     def _try(self, n: TryCatch):
         # TRYPUSH -> catch; <try>; TRYPOP; JMP finally; catch:; <catch>; finally:
@@ -766,6 +817,22 @@ class CodeGenPyro:
                 "declaration, return or expression-statement — not nested.")
         if isinstance(n, Literal):
             self._literal(n); return
+        if isinstance(n, SpawnExpr):
+            # 12.5 — `spawn e` is compiled as a zero-argument closure over `e`,
+            # then OP_SPAWN. Reusing the lambda path rather than inventing a
+            # second capture mechanism is what makes `spawn` work on an
+            # arbitrary expression and not just on a call: the free variables of
+            # `e` are exactly a lambda's, and _captures_of already refuses the
+            # one case where pyro and go would disagree — capturing a variable
+            # that is later reassigned, since pyro captures by value and go by
+            # reference.
+            self._expr(Lambda([], None, [Return(n.expr)], getattr(n, 'line', 0)))
+            self._emit(OP_SPAWN)
+            return
+        if isinstance(n, AwaitExpr):
+            self._expr(n.expr)
+            self._emit(OP_AWAIT)
+            return
         if isinstance(n, Lambda):
             idx, captured = self._compile_lambda(n)
             if not captured:
@@ -1198,6 +1265,8 @@ class CodeGenPyro:
             flags |= _FLAG_ASSETS
         if self._perms:
             flags |= _FLAG_PERMS
+        if self.sign_key:
+            flags |= _FLAG_SIGNED
 
         out = bytearray()
         out += _MAGIC
@@ -1231,7 +1300,7 @@ class CodeGenPyro:
             out.append(f.nparams & 0xFF)
             out += struct.pack('<H', len(f.locals))
         # entry
-        out += struct.pack('<H', self._fnindex['main'])
+        out += struct.pack('<H', self._fnindex[_ENTRY_KEY])
         # code
         out += struct.pack('<I', code_len)
         out += code
@@ -1260,6 +1329,13 @@ class CodeGenPyro:
                 for k, v in sorted(self._perms.items()) if v)
             pb = spec.encode('utf-8')
             out += struct.pack('<I', len(pb)); out += pb
+        # 11.14 — the signature is LAST, and covers every byte before it:
+        # magic, flags, constants, code, debug, assets and permissions.
+        # Anything left outside would be exactly the part worth editing, and
+        # the permissions section (11.12) is the clearest example: widening
+        # `net` costs one byte and produces no error.
+        if self.sign_key:
+            out += hmac.new(self.sign_key, bytes(out), hashlib.sha256).digest()
         return bytes(out)
 
     @staticmethod

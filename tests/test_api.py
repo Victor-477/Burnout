@@ -144,8 +144,18 @@ def test_api():
               isinstance(tasks, list) and len(tasks) == 3, tasks)
         check("each task has the Cryo struct's fields",
               all(set(t) == {'id', 'title', 'done'} for t in tasks), tasks)
-        check("field ORDER follows the Cryo struct declaration",
-              all(list(t) == ['id', 'title', 'done'] for t in tasks), tasks)
+        # 12.10 — field order is now the key's own text, not the declaration.
+        #
+        # This used to assert declaration order, which is what go's json.Marshal
+        # does natively and NOTHING else could reproduce: on pyro a struct is a
+        # map at runtime with no declaration to consult, so the same program
+        # emitted differently ordered JSON on different backends. JSON itself
+        # says key order is insignificant, but invariant 1 needs output to be
+        # byte-identical across backends, and sorted is the only order all four
+        # can produce — it is also the rule cryoStr already applies to "maps and
+        # structs alike".
+        check("field order is deterministic — by key text, on every backend",
+              all(list(t) == ['done', 'id', 'title'] for t in tasks), tasks)
         check("types survive the boundary (int / string / bool)",
               isinstance(tasks[0]['id'], int)
               and isinstance(tasks[0]['title'], str)

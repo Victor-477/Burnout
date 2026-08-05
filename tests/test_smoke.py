@@ -235,7 +235,15 @@ g = gen_go('int x = 40 + 2; print(x);')
 check("go package main",  "package main" in g)
 check("go import fmt",    '"fmt"' in g)
 check("go func main",     "func main() {" in g)
-check("go print->Println", "fmt.Println(x)" in g)
+check("go print->Println", "fmt.Println(cryoStr(x))" in g)
+# print goes through cryoStr, never Println's own formatting: Println renders a
+# slice as "[0 1 2]" and a struct as "{1 ana}", so `print(a)` disagreed with
+# to_string(a) and with the VM (invariant 1, PYRO_RUNTIME.md §3.1).
+_gc = gen_go('int[] a = [1, 2]; print(a); print(to_string(a));')
+check("go print/to_string share cryoStr", _gc.count("cryoStr(") >= 2
+      and "fmt.Sprint(v)" not in _gc.split("func cryoStr")[0])
+check("go cryoStr renders arrays as [a, b]", '"[" + strings.Join(parts, ", ") + "]"' in _gc)
+check("go cryoStr orders map pairs by key text", "cryoStrPairs" in _gc)
 # 11.1 — a top-level `var` is MODULE STATE at Go package scope, where an
 # unused variable is not an error and `_ = x` is an illegal statement. The
 # guard belongs to locals, so that is where it is asserted.
@@ -362,17 +370,48 @@ def expect_c_err(src, label):
         gen_c(src); check(label + " (should fail)", False)
     except Exception as e:
         check(label, "backend go" in str(e).lower())
-expect_c_err('map<string,int> m = {};', "c rejeita map")
-expect_c_err('int? x = null;', "c rejeita optional")
+# 11.27 — maps are supported on C now, so "c rejects map" was RETIRED rather
+# than relaxed, exactly as the optional assertion below was. What is still
+# refused is a map whose key or value has no C representation.
+check("c aceita map<string,int> (11.27)",
+      'CryoMap*' in gen_c('map<string,int> m = {"a": 1}; print(m["a"]);'))
+check("c aceita map<int,string>",
+      'CryoMap*' in gen_c('map<int,string> m = {1: "a"}; print(m[1]);'))
+try:
+    gen_c('struct S { int a; } map<string,S> m = {}; print(len(m));')
+    check("c rejeita map de struct (should fail)", False)
+except Exception as e:
+    check("c rejeita map de struct, nomeando os tipos suportados",
+          'int, number, string or bool' in str(e))
+# 11.27 — scalar optionals are SUPPORTED on C now (int?/number?/bool?/string?),
+# so the old "c rejects optional" assertion was retired rather than relaxed.
+# What is still refused is an optional of a type with no pointer form, and the
+# message has to name the supported ones instead of just pointing at go.
+check("c aceita int? (11.27)", 'int64_t*' in gen_c('int? x = null; print(x ?? 1);'))
+check("c aceita string?", isinstance(gen_c('string? s = null; print(s ?? "d");'), str))
+try:
+    gen_c('struct S { int a; } S? p = null;')
+    check("c rejeita optional de struct (should fail)", False)
+except Exception as e:
+    check("c rejeita optional de struct, nomeando os suportados",
+          'int?' in str(e) and 'string?' in str(e))
 
 # ── Phase 2: concurrency (async) + HTTP (backend Go) ────────
 print("[phase2] async: spawn / await / future")
-check("go future<T> -> chan", "chan int64" in gen_go("future<int> f = spawn g(); int r = await f;"))
-check("go spawn -> goroutine+canal",
+# 12.11 — a future is no longer the channel itself. It used to be, and `await`
+# a receive, which made awaiting twice a deadlock on go while pyro returned the
+# value again. These assert the new shape; the BEHAVIOUR they exist to protect
+# (await twice, on both backends) is tested in test_concurrency.py.
+check("go future<T> -> *cryoFuture[T]",
+      "*cryoFuture[int64]" in gen_go("future<int> f = spawn g(); int r = await f;"))
+check("go spawn -> goroutine writing into the future",
       all(s in gen_go("future<int> f = spawn h();")
-          for s in ("make(chan int64, 1)", "go func()", "<-")))
-check("go await -> receber do canal", "(<-f)" in gen_go("future<int> f = spawn h(); int r = await f;"))
-check("go future array", "[]chan int64" in gen_go("future<int>[] ts = [];"))
+          for s in ("cryoSpawn(func() int64", "go func()", "close(fu.done)")))
+check("go await -> cryoAwait, not a receive",
+      "cryoAwait(f)" in gen_go("future<int> f = spawn h(); int r = await f;"))
+check("go await does not consume the value",
+      "return fu.v" in gen_go("future<int> f = spawn h(); int r = await f;"))
+check("go future array", "[]*cryoFuture[int64]" in gen_go("future<int>[] ts = [];"))
 check("go for-each sobre futures",
       "range ts" in gen_go("future<int>[] ts=[]; int s=0; for (future<int> t in ts) { s += await t; }"))
 
@@ -416,7 +455,13 @@ _po = gen_go('bool ok = pyro_open("build/x.html");')
 check("go pyro_open chama helper", "cryoOpen(" in _po)
 check("go pyro_open emits cryoOpen + start", "func cryoOpen(target string) bool {" in _po
       and 'exec.Command("cmd", "/c", "start"' in _po and 'exec.Command("xdg-open"' in _po)
-check("go dispatcher cryoToolCall", "func cryoToolCall(name, args string) string {" in g)
+# 11.20 — the dispatcher takes the raw arguments (they may arrive as a
+# JSON-encoded string) and returns via a named result so a panicking tool can
+# be recovered into an error value.
+check("go dispatcher cryoToolCall",
+      "func cryoToolCall(name, rawArgs string) (out string) {" in g)
+check("go dispatcher unwraps string-encoded arguments", "cryoToolArgs(" in g)
+check("go dispatcher reports a failing tool as a value", "cryoToolErr(" in g)
 check("go dispatcher chama a tool real", "buscar(_a.Sku)" in g)
 check("go dispatcher desempacota args", 'Sku string `json:"sku"`' in g)
 check("go dispatcher with retorno struct", "json.Marshal(_r)" in gen_go(
@@ -577,7 +622,17 @@ check("pyro for-each generates", isinstance(
 # ── backend Node.js / JavaScript ────────────────────────────
 print("[node] backend JavaScript (CommonJS)")
 check("node use strict + console.log", gen_node('print("oi");').startswith('"use strict"')
-      and 'console.log("oi")' in gen_node('print("oi");'))
+      and 'console.log(cryoStr("oi"))' in gen_node('print("oi");'))
+# Same canonical form as go/pyro. JS offers three native renderings of a
+# container and none is the canonical one — String([0,1,2]) is "0,1,2",
+# console.log's is "[ 0, 1, 2 ]", String({}) is "[object Object]" — so print,
+# to_string and `+` each had a different answer (invariant 1).
+_nc = gen_node('int[] a = [1, 2]; print(a); print(to_string(a)); print("A" + a);')
+check("node print/to_string/concat share cryoStr", _nc.count("cryoStr(") >= 3)
+check("node cryoStr renders arrays as [a, b]",
+      'return "[" + v.map(cryoStr).join(", ") + "]"' in _nc)
+check("node cryoStr orders map pairs by key text", "Object.keys(v).sort()" in _nc)
+check("node to_string no longer bare String()", "String(a)" not in _nc)
 check("node function + return",
       "function quad(n)" in gen_node("fn quad(int n)->int ={ return n*n; }"))
 check("node for-each -> of",
@@ -701,16 +756,16 @@ check("auto optional/json -> pyro (agora suportado)",
       _sel('number? x = null; string j = json_encode(x);') == 'pyro')
 check("auto http -> pyro (agora suportado)",
       _sel('string r = http_get("http://x");') == 'pyro')
-check("auto concurrency -> go (pyro not supports spawn/await)",
-      _sel('future<int> f = spawn g(1); int r = await f;') == 'go')
+check("auto concurrency -> pyro (12.5: the VM has a scheduler)",
+      _sel('future<int> f = spawn g(1); int r = await f;') == 'pyro')
 check("auto llm -> go", _sel('string r = agent("m","p");') == 'go')
 check("auto machine (pyro_exec) -> go", _sel('string s = pyro_exec("x");') == 'go')
 check("auto to_string/strings -> pyro (agora suportado)",
       _sel('int n=5; string s = upper(to_string(n));') == 'pyro')
 check("auto try/catch -> pyro (agora suportado)",
       _sel('try { print(1); } catch (string e) { print(e); }') == 'pyro')
-check("auto concurrency -> go (pyro not supports)",
-      _sel('future<int> f = spawn g(1); int r = await f;') == 'go')
+check("auto concurrency -> pyro (12.5)",
+      _sel('future<int> f = spawn g(1); int r = await f;') == 'pyro')
 check("auto bloco Go -> go", _sel('import >go< >Go( fmt.Println(1) )') == 'go')
 check("auto bloco Node -> node", _sel('import >node< >Node( console.log(1); )') == 'node')
 check("auto bloco C -> c", _sel('import >c< >C( printf("x"); )') == 'c')
@@ -721,8 +776,11 @@ from backends import missing_capabilities as _miss
 def _mt(src, b):
     return _miss(ast_of(src), b)
 check("miss: map in c -> {map}", 'map' in _mt('map<string,int> m = {"a":1};', 'c')[0])
-check("miss: concurrency in pyro -> {concurrency}",
-      'concurrency' in _mt('future<int> f = spawn g(1); int r = await f;', 'pyro')[0])
+# 12.5 — pyro covers concurrency now; node is where it is still missing.
+check("miss: concurrency in pyro -> nothing missing",
+      _mt('future<int> f = spawn g(1); int r = await f;', 'pyro') == (set(), set()))
+check("miss: concurrency in node -> {concurrency}",
+      'concurrency' in _mt('future<int> f = spawn g(1); int r = await f;', 'node')[0])
 check("miss: enum/try in pyro agora cobertos",
       _mt('enum and{A} try { print(1); } catch (string e) { print(e); }', 'pyro') == (set(), set()))
 check("miss: bloco C in go -> {c}", 'c' in _mt('import >c< >C( x )', 'go')[1])
@@ -1568,6 +1626,28 @@ print(ops[0](5));
 check("go: array of function values compiles", "[]func(int64) int64" in gen_go(_fn_arr_src))
 check("node: array of function values compiles", "cryoIndex(ops" in gen_node(_fn_arr_src))
 check("pyro: array of function values compiles", isinstance(gen_pyro(_fn_arr_src), (bytes, bytearray)))
+
+# ── 11.38: a user function named `main` ──────────────────
+# The synthetic top level is ALSO called 'main', and it used to be registered
+# in the function table under that name — overwriting a user's own `fn main()`.
+# `main();` then resolved to the top level, which called itself, forever. It
+# ran correctly on node, so it broke backend parity on the single likeliest
+# name for a user to pick; box_marketplace/cryo_files/box_store.cryo is one of
+# the repo's own examples that hung because of it.
+print("[11.38] a user function named 'main'")
+_main_src = 'fn main() -> void ={ print(7); }\nmain();\n'
+_g = CodeGenPyro(safe=True)
+_blob = _g.generate(parse_ast(_main_src))
+check("pyro: a program with `fn main()` compiles",
+      isinstance(_blob, (bytes, bytearray)))
+# The distinguishing check: 'main' in the lookup table must be the USER's
+# function, not the entry. A program that merely compiles proves nothing here —
+# the broken version compiled too, and then spun.
+check("pyro: the name 'main' resolves to the user's function",
+      _g._fnindex.get('main') == 0)
+check("pyro: the synthetic entry has its own, unspellable key",
+      _g._fnindex.get('<entry>') == 1)
+check("node: the same program still compiles", "7" in gen_node(_main_src))
 
 # ── result ───────────────────────────────────────────────
 print(f"\n{_passed} passed, {_failed} failed")

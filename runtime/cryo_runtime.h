@@ -58,11 +58,82 @@ static inline double  cryo_get_f64(CryoArray* a, int64_t i)  { uint64_t u=cryo_a
 static inline char*   cryo_get_str(CryoArray* a, int64_t i)  { return (char*)(uintptr_t)cryo_array_get(a,i); }
 static inline bool    cryo_get_bool(CryoArray* a, int64_t i) { return (bool)cryo_array_get(a,i); }
 
+/* 11.27 — element ASSIGNMENT, `a[i] = v`. cryo_array_set existed but had no
+   typed wrappers, so the C backend refused IndexAssignment outright. */
+static inline void cryo_set_i64(CryoArray* a, int64_t i, int64_t v)  { cryo_array_set(a,i,(uint64_t)v); }
+static inline void cryo_set_f64(CryoArray* a, int64_t i, double v)   { uint64_t u; memcpy(&u,&v,8); cryo_array_set(a,i,u); }
+static inline void cryo_set_str(CryoArray* a, int64_t i, char* v)    { cryo_array_set(a,i,(uint64_t)(uintptr_t)v); }
+static inline void cryo_set_bool(CryoArray* a, int64_t i, bool v)    { cryo_array_set(a,i,(uint64_t)v); }
+
 /* ---------- Strings ---------- */
 char*   cryo_str_concat(const char* a, const char* b);
 char*   cryo_i64_to_str(int64_t n);
 char*   cryo_f64_to_str(double n);
 char*   cryo_bool_to_str(bool b);
+/* 11.27 — rendering an ARRAY. CryoArray stores raw uint64_t and does not know
+   what its elements are, so the element type comes from the code generator and
+   picks the function. The output is the canonical VM form (PYRO_RUNTIME.md
+   §3.1): "[a, b, c]", elements separated by ", ", strings NOT quoted — so
+   print(a) reads identically on every backend, which is the whole point. The
+   returned buffer is malloc'd. */
+char*   cryo_arr_to_str_i(CryoArray* a);
+char*   cryo_arr_to_str_f(CryoArray* a);
+char*   cryo_arr_to_str_s(CryoArray* a);
+char*   cryo_arr_to_str_b(CryoArray* a);
+
+/* ---------- 11.27: optionals (T?) ----------
+   T? is a POINTER, the same representation the go backend uses: NULL is null,
+   anything else points at the value. `string?` needs no wrapper at all — a
+   char* is already nullable — which is why there is no cryo_opt_s.
+
+   cryo_unwrap_* implements `x!`, and aborts with the SAME message the Pyro VM
+   prints, byte for byte: the two are compared in test_c_vm.py, and a runtime
+   that words its failures differently is a different language. */
+int64_t* cryo_opt_i(int64_t v);
+double*  cryo_opt_f(double v);
+bool*    cryo_opt_b(bool v);
+int64_t  cryo_unwrap_i(int64_t* p);
+double   cryo_unwrap_f(double* p);
+bool     cryo_unwrap_b(bool* p);
+char*    cryo_unwrap_s(char* p);
+
+/* ---------- 11.27: maps (map<K,V>) ----------
+   Open-addressed hash table. Keys and values are uint64_t, as in CryoArray, so
+   int64_t / double / char* all fit; `str_keys` says how to hash and compare
+   them and is fixed at creation, because a map<K,V> has one key type for life.
+
+   cryo_map_keys returns the keys SORTED BY THEIR OWN TEXT, and rendering does
+   the same, because that is what the Pyro VM and the go/node backends do
+   (PYRO_RUNTIME.md §4). Iterating in bucket order would make the same program
+   print its map differently here than everywhere else — and differently again
+   after an insertion resized the table. */
+typedef struct { uint64_t key; uint64_t val; int used; } CryoMapEntry;
+typedef struct CryoMap {
+    CryoMapEntry* e;
+    int64_t cap, len;
+    int     str_keys;
+} CryoMap;
+
+CryoMap*   cryo_map_new(int str_keys);
+void       cryo_map_set(CryoMap* m, uint64_t k, uint64_t v);
+uint64_t   cryo_map_get(CryoMap* m, uint64_t k);
+bool       cryo_map_has(CryoMap* m, uint64_t k);
+void       cryo_map_remove(CryoMap* m, uint64_t k);
+int64_t    cryo_map_len(CryoMap* m);
+CryoArray* cryo_map_keys(CryoMap* m);
+/* val_kind: 0 int, 1 number, 2 string, 3 bool — the generator knows it */
+char*      cryo_map_to_str(CryoMap* m, int val_kind);
+
+/* Keys and values travel as uint64_t, so each end needs one conversion. Six
+   inlines rather than a helper per (key kind x value kind) pair, which would
+   be sixteen functions saying the same thing. */
+static inline uint64_t cryo_u64_i(int64_t v)     { return (uint64_t)v; }
+static inline uint64_t cryo_u64_f(double v)      { uint64_t u; memcpy(&u,&v,8); return u; }
+static inline uint64_t cryo_u64_s(const char* v) { return (uint64_t)(uintptr_t)v; }
+static inline int64_t  cryo_of_u64_i(uint64_t u) { return (int64_t)u; }
+static inline double   cryo_of_u64_f(uint64_t u) { double d; memcpy(&d,&u,8); return d; }
+static inline char*    cryo_of_u64_s(uint64_t u) { return (char*)(uintptr_t)u; }
+static inline bool     cryo_of_u64_b(uint64_t u) { return u != 0; }
 int64_t cryo_str_len(const char* s);
 bool    cryo_str_eq(const char* a, const char* b);
 char*   cryo_str_slice(const char* s, int64_t start, int64_t end);

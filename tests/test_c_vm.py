@@ -2,6 +2,7 @@
 # ============================================================
 #  Burnout — Go VM vs C VM Parity Test (Pyro)
 # ============================================================
+import glob
 import os
 import sys
 import subprocess
@@ -45,7 +46,9 @@ def _c_vm_build_cmd():
 
 def compile_c_vm():
     print("Compiling Go VM...")
-    go_build = ["go", "build", "-o", GO_VM, os.path.join(_root, "Pyro", "vm", "main.go")]
+    # all of them: 11.25 put the debugger and profiler in their own .go files
+    go_build = ["go", "build", "-o", GO_VM] + sorted(
+        glob.glob(os.path.join(_root, "Pyro", "vm", "*.go")))
     res_go = subprocess.run(go_build, capture_output=True, text=True)
     if res_go.returncode != 0:
         print("Go VM compilation error:")
