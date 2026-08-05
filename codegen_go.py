@@ -297,6 +297,11 @@ class CodeGenGo:
         self._tools: List[FunctionDecl] = []
         self._use_tools = False
         self._member_to_enum: Dict[str, str] = {}
+        # 12.9 — member spelling -> the Go constant, for enums with NO data.
+        # Such an enum compiles to `const ( E_A E = iota; E_B )`, so a bare `A`
+        # was simply undefined. Kept separate from the data-carrying path,
+        # whose members are constructor functions, not constants.
+        self._plain_enum_member: Dict[str, str] = {}
         # 11.30 — generated variant struct name -> its Cryo member name, so
         # cryoStr can lead an enum value with `tag:` the way pyro and node do.
         self._enum_tags: Dict[str, str] = {}
@@ -363,6 +368,13 @@ class CodeGenGo:
                 self.te.reg_struct(n.name, {f.name: f.field_type for f in n.fields})
             elif isinstance(n, EnumDecl):
                 self.te.reg_enum(n.name)
+                # 12.9 — an enum with no data at all compiles to plain Go
+                # constants, so its members are VALUES, not constructors.
+                if not any(len(m.fields) > 0 for m in n.members):
+                    for m in n.members:
+                        q = f"{n.name}_{m.name}"
+                        self._plain_enum_member[m.name] = q
+                        self._plain_enum_member[q] = q
                 for m in n.members:
                     self._member_to_enum[m.name] = n.name
                     self._member_to_enum[f"{n.name}_{m.name}"] = n.name
@@ -2143,6 +2155,11 @@ class CodeGenGo:
             return str(node.value)
 
         if isinstance(node, Identifier):
+            # 12.9 — a bare member of a data-less enum is the Go constant it
+            # was declared as. Without this the emitted `A` was undefined: the
+            # program compiled here and failed in the Go compiler.
+            if self.te.get(node.name) == 'unknown' and node.name in self._plain_enum_member:
+                return self._plain_enum_member[node.name]
             return gid(node.name)
 
         if isinstance(node, BinaryExpr):
@@ -2167,6 +2184,15 @@ class CodeGenGo:
             return self._method(node)
 
         if isinstance(node, FieldAccess):
+            # 12.9 — `Status.ATIVO` is a qualified enum member, not a field
+            # read. A variable of the same name still wins, so a struct value
+            # called `Status` keeps reading its own field.
+            if (isinstance(node.obj, Identifier)
+                    and self.te.is_enum(node.obj.name)
+                    and self.te.get(node.obj.name) == 'unknown'):
+                q = self._plain_enum_member.get(f"{node.obj.name}_{node.field}")
+                if q:
+                    return q
             obj = self._expr(node.obj)
             if node.field == 'length':
                 return f"int64(len({obj}))"

@@ -509,17 +509,11 @@ agree("indexing in range still works",
 # and why these run the program.
 print("\n── 12.9: enum members as values ──")
 
-# go is EXCLUDED from this group, deliberately and visibly.
-#
-# Its enum path is mid-rewrite in another working tree (`_zero_arg_enums`) and
-# that work is uncommitted. Patching over it here would either be overwritten
-# or land as a competing fix for the same defect. Every case below still fails
-# to BUILD on go — `undefined: A`, because the member is declared `E_A` — so
-# the gap is real. Narrowing a test silently is worse than a red one, which is
-# why this prints.
-_ENUM_BACKENDS = ('pyro', 'node')
-print("  note go is excluded here: its enum path is mid-rewrite elsewhere, "
-      "so 12.9 remains open for go")
+# All three backends, go included. It was excluded for one round while its enum
+# path was mid-rewrite elsewhere; the fix landed as a separate table for
+# data-LESS enums, so it does not collide with the constructor path that
+# rewrite is about.
+_ENUM_BACKENDS = ('pyro', 'node', 'go')
 
 agree("a bare payload-less member is a value",
       'enum E { A, B }\nE e = A;\nprint(e);\n',
