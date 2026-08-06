@@ -52,13 +52,29 @@ def reference_tokens(src):
     return out
 
 
+def _tparams(n):
+    """13.3 — " (tparams T U)", or "" when the declaration is not generic.
+
+    Emitted only when non-empty so every non-generic declaration keeps the
+    exact shape 11.28 and 12.6 already assert."""
+    tps = getattr(n, 'type_params', None) or []
+    if not tps:
+        return ""
+    bounds = getattr(n, 'type_bounds', None) or {}
+    return " (tparams" + "".join(
+        " " + (f"{t}:{bounds[t]}" if t in bounds else t) for t in tps) + ")"
+
+
 def ser(n):
     """Serializes the reference AST into the SAME S-expression as the Cryo parser."""
     if isinstance(n, FunctionDecl):
         params = "".join(f" (p {pt} {pn})" for (pt, pn) in n.params)
         ret = n.return_type or "void"
         body = "".join(" " + ser(s) for s in n.body)
-        return f"(fn {n.name} (params{params}) {ret} (body{body}))"
+        # 13.3 — a bound travels with its parameter (`T:Ord`); the reference
+        # keeps type_params and type_bounds in step, so splitting them here
+        # would let the two drift without this comparison noticing.
+        return f"(fn {n.name}{_tparams(n)} (params{params}) {ret} (body{body}))"
     if isinstance(n, VarDecl):
         init = ser(n.value) if n.value is not None else "nil"
         return f"(var {n.var_type} {n.name} {init})"
@@ -83,7 +99,9 @@ def ser(n):
     if isinstance(n, TernaryExpr):
         return f"(tern {ser(n.condition)} {ser(n.then_value)} {ser(n.else_value)})"
     if isinstance(n, CallExpr):
-        return f"(call {n.callee}" + "".join(" " + ser(a) for a in n.args) + ")"
+        targs = getattr(n, 'type_args', None) or []
+        ta = (" (targs" + "".join(" " + t for t in targs) + ")") if targs else ""
+        return f"(call {n.callee}{ta}" + "".join(" " + ser(a) for a in n.args) + ")"
     if isinstance(n, Identifier):
         return f"(id {n.name})"
     if isinstance(n, Literal):
@@ -125,7 +143,7 @@ def ser(n):
         return f"(field {ser(n.obj)} {n.field})"
     if isinstance(n, StructDecl):
         fs = "".join(f" (f {f.field_type} {f.name})" for f in n.fields)
-        return f"(struct {n.name} (fields{fs}))"
+        return f"(struct {n.name}{_tparams(n)} (fields{fs}))"
     if isinstance(n, StructInit):
         fs = "".join(f" (fv {k} {ser(v)})" for k, v in n.fields)
         return f"(new {n.struct_name}{fs})"
@@ -448,7 +466,24 @@ SAMPLES_126 = [
     ("spawn / await", 'future<int> f = spawn g(); int r = await f;'),
 ]
 
-for _label, _src in SAMPLES_1128 + SAMPLES_126:
+# ── 13.3: generics ──────────────────────────────────────────
+#
+# 12.6 left these out. The interesting one is the LAST: `a < b` must not be
+# read as a type-argument list, and only the token after the matching `>`
+# tells the two apart — the same shape of lookahead the lambda needed.
+SAMPLES_133 = [
+    ("a generic function declaration", 'fn id<T>(T x) -> T ={ return x; }'),
+    ("a bounded type parameter", 'fn m<T: Ord>(T a) -> T ={ return a; }'),
+    ("a generic struct", 'struct Pair<A, B> { A first; B second; }'),
+    ("an explicit type argument at the call site", 'print(id<int>(42));'),
+    ("two type arguments", 'print(mk<int, string>(1, "a"));'),
+    ("a comparison is NOT a type-argument list",
+     'int a = 1; int b = 2; print(a < b);'),
+    ("a non-generic declaration is unchanged",
+     'fn f(int a) -> int ={ return a; }'),
+]
+
+for _label, _src in SAMPLES_1128 + SAMPLES_126 + SAMPLES_133:
     _exp = reference_ast(_src)
     _got, _res = _selfhost_ast(_src)
     if _got != _exp:
