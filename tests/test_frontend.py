@@ -14,6 +14,7 @@
 #  page in a browser, which is the worst place to debug it.
 # ============================================================
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -235,6 +236,88 @@ def test_cli_end_to_end():
               rc != 0 and 'emit html' in log, log[-300:])
 
 
+def test_node_lowering():
+    """ISSUES/20 — >html< and >CSS< on --backend node.
+
+    They used to be replaced by a comment ("block omitted in Node backend"),
+    so `styles()` and `page()` compiled into functions that returned nothing.
+    The page was silently empty — no error, no output, the failure mode that
+    costs the most to find. They now lower to template literals.
+    """
+    print("[ISSUES/20] >html< and >CSS< on the node backend")
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, 'p.cryo')
+        open(src, 'w', encoding='utf-8').write(PAGE)
+        out = os.path.join(d, 'p.js')
+        rc, log = _run([src, '--backend', 'node', '-o', out, '--no-banner'])
+        check("compiles", rc == 0, log[-400:])
+        if rc != 0:
+            return
+        js = open(out, encoding='utf-8').read()
+        check("nothing is reported as omitted", 'omitted' not in js, js[:400])
+        check("the CSS block became a returned string",
+              'return `body { color: #eee; }`;' in js, js[:600])
+        check("the html block became a returned string",
+              'return `<h1>Hi</h1>`;' in js, js[:600])
+        # A template literal is only useful if it is valid JavaScript, and an
+        # unescaped backtick in the author's markup would not be.
+        if shutil.which('node'):
+            rc2 = subprocess.run(['node', '--check', out],
+                                 capture_output=True, text=True)
+            check("node parses the generated file", rc2.returncode == 0,
+                  (rc2.stdout + rc2.stderr)[-300:])
+
+    # A backtick and a ${ in the author's own markup must survive as text,
+    # not terminate the template or interpolate.
+    with tempfile.TemporaryDirectory() as d:
+        src = os.path.join(d, 'q.cryo')
+        open(src, 'w', encoding='utf-8').write(
+            'import >html<\nfn page() ={ >html( <p>a ` b ${c} d</p> ) }\n')
+        out = os.path.join(d, 'q.js')
+        rc, log = _run([src, '--backend', 'node', '-o', out, '--no-banner'])
+        check("a page whose markup contains ` and ${ compiles", rc == 0, log[-300:])
+        if rc == 0:
+            js = open(out, encoding='utf-8').read()
+            check("the backtick is escaped", '\\`' in js, js[:400])
+            check("the interpolation marker is escaped", '\\${' in js, js[:400])
+            if shutil.which('node'):
+                rc2 = subprocess.run(['node', '--check', out],
+                                     capture_output=True, text=True)
+                check("and node still parses it", rc2.returncode == 0,
+                      (rc2.stdout + rc2.stderr)[-300:])
+
+
+def test_backend_whitelist():
+    """ISSUES/20 — the programmatic entry point accepts the page backends."""
+    print("[ISSUES/20] burnout.BACKENDS")
+    # Loaded by PATH, not by name: `Burnout/__init__.py` is the package entry
+    # point, and these tests run with Cryo/ — not the parent of Burnout/ — on
+    # sys.path, so `import Burnout` is not available here.
+    sys.path.insert(0, os.path.join(ROOT, 'Burnout'))
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        'burnout_pkg', os.path.join(ROOT, 'Burnout', '__init__.py'))
+    burnout = importlib.util.module_from_spec(spec)
+    try:
+        spec.loader.exec_module(burnout)
+    except Exception as e:                      # pragma: no cover
+        check("Burnout/__init__.py imports", False, repr(e))
+        return
+    check("'frontend' is a valid backend", 'frontend' in burnout.BACKENDS,
+          repr(burnout.BACKENDS))
+    check("'html' is a valid backend", 'html' in burnout.BACKENDS,
+          repr(burnout.BACKENDS))
+    # And the whitelist still refuses a name that is not a backend, rather
+    # than having been widened to accept anything.
+    try:
+        burnout.compile_source('print(1);', backend='nope')
+        check("an unknown backend is still refused", False)
+    except ValueError as e:
+        check("an unknown backend is still refused", 'nope' in str(e))
+    except Exception as e:
+        check("an unknown backend is still refused", False, repr(e))
+
+
 def main():
     print("-- front-end structure (10.11 / 10.12 / 10.13) --")
     test_struct_params()
@@ -242,6 +325,8 @@ def main():
     test_render_modes()
     test_strip()
     test_cli_end_to_end()
+    test_node_lowering()
+    test_backend_whitelist()
     print(f"\n{_passed} passed, {_failed} failed")
     sys.exit(1 if _failed else 0)
 

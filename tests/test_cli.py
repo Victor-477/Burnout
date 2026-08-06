@@ -460,6 +460,47 @@ for tag in CROSS_BACKEND:
         check(f"[{tag}] {be} renders identically to {ref_be}", same)
 
 
+# ── 1c. ISSUES/19: privacy is enforced, and says so once ─────
+#
+# The fix made private declarations EXIST (mangled) rather than be deleted, so
+# the thing that now enforces privacy is name resolution — and a test that only
+# proves `c::total()` works would not notice if resolution stopped refusing.
+# Each of these reaches for something the module deliberately does not export.
+#
+# The message is asserted too, because it used to arrive doubled:
+# "[Module Error] [Module Error] '_count' is not pub in module 'c'". The raise
+# sites write the tag into the message and the CLI prefixed it again.
+print("\n-- ISSUES/19: private module items stay unreachable --")
+_priv_lib = os.path.join(TMP, "modlib_priv.cryo")
+with open(_priv_lib, "w", encoding="utf-8") as _f:
+    _f.write('int _count = 7;\n'
+             'fn _helper() -> int ={ return 1; }\n'
+             'pub fn total() -> int ={ return _count + _helper(); }\n')
+
+for _what, _line in (("a private variable", 'print(p::_count);'),
+                     ("a private function", 'print(p::_helper());')):
+    _src = 'import "modlib_priv.cryo" as p;\n' + _line + '\n'
+    _cf = os.path.join(TMP, "cli_priv.cryo")
+    with open(_cf, "w", encoding="utf-8") as _f:
+        _f.write(_src)
+    _r = cryoc([_cf, "--backend", "pyro", "-o",
+                os.path.join(TMP, "cli_priv.pyro"), "--no-banner", "--emit-only"])
+    _msg = (_r.stderr or "") + (_r.stdout or "")
+    check(f"[privacy] {_what} is refused", _r.returncode != 0)
+    check(f"[privacy] {_what}: the message says 'not pub'", "is not pub" in _msg)
+    check(f"[privacy] {_what}: the tag appears exactly once",
+          _msg.count("[Module Error]") == 1)
+
+# And the pub surface of the very same module still works, so the refusals
+# above are resolution doing its job rather than the import being broken.
+with open(os.path.join(TMP, "cli_priv_ok.cryo"), "w", encoding="utf-8") as _f:
+    _f.write('import "modlib_priv.cryo" as p;\nprint(p::total());\n')
+_r = cryoc([os.path.join(TMP, "cli_priv_ok.cryo"), "--backend", "pyro",
+            "--run", "--no-banner"])
+check("[privacy] the pub function that USES both still returns 8",
+      _r.returncode == 0 and "8" in program_output(_r.stdout))
+
+
 # ── 2. static audit: isinstance(n, X) implies X is imported ──
 #
 # This is the check that generalises the two NameError bugs. Any module that

@@ -688,7 +688,12 @@ def main() -> None:
     except ForeignError   as e:
         print(f"\n[Foreign Error] {e}", file=sys.stderr); sys.exit(1)
     except ModuleError    as e:
-        print(f"\n[Module Error] {e}", file=sys.stderr); sys.exit(1)
+        # Every raise site in modules.py already writes the tag into the
+        # message, so prefixing unconditionally printed it twice:
+        # "[Module Error] [Module Error] '_hidden' is not pub in module 'm'".
+        _m = str(e)
+        print("\n" + (_m if _m.startswith('[Module Error]') else f"[Module Error] {_m}"),
+              file=sys.stderr); sys.exit(1)
     except SemanticError  as e:
         print(f"\n[Semantic Error] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenAsmError as e:
