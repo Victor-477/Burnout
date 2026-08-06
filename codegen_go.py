@@ -131,6 +131,16 @@ def is_optional(t: str) -> bool:
     return bool(t) and t.endswith('?')
 
 
+def _is_null(node, t: str) -> bool:
+    """Is this operand the null literal? (ISSUES/18)
+
+    Inference reports `null` for the literal, but a null that reached the
+    generator through a typed slot can arrive as the node alone, so both are
+    checked.
+    """
+    return t == 'null' or (isinstance(node, Literal) and node.kind == 'null')
+
+
 def elem_type(arr_t: str) -> str:
     if not arr_t:
         return 'unknown'
@@ -2398,6 +2408,27 @@ class CodeGenGo:
             if op == '==':
                 return f"cryoSamePtr({l}, {r})"
             return f"(!cryoSamePtr({l}, {r}))"
+
+        # ISSUES/18 — a NON-nilable value compared against null.
+        #
+        # `string s = ""; print(s == null);` is false on both VMs and on node,
+        # and PYRO_RUNTIME.md says so: null is equal only to null. Go is the
+        # only backend where the comparison has to type-check, and falling
+        # through to the generic path emitted `("" == nil)`, which the Go
+        # compiler rejects outright — the program did not build at all.
+        #
+        # An int, a number, a string, a bool and a struct have no nil in Go, so
+        # the answer is a constant and is folded here. Slices, maps, optionals
+        # (*T), function values, futures and `any` are all nilable and are
+        # handled above or by the generic path; `unknown` is left alone rather
+        # than guessed at.
+        if op in ('==', '!=') and (_is_null(node.left, lt) or _is_null(node.right, rt)):
+            other_t = rt if _is_null(node.left, lt) else lt
+            other_n = node.right if _is_null(node.left, lt) else node.left
+            if other_t not in ('unknown', 'any', 'null') and not is_optional(other_t) \
+                    and not is_future(other_t) and not other_t.startswith('fn(') \
+                    and not is_cont(other_t, other_n):
+                return 'false' if op == '==' else 'true'
 
         # int<->number coercion: Go does not mix int64 and float64. If one side is
         # 'number' and the other 'int', converts the integer to float64.

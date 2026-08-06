@@ -271,6 +271,18 @@ PROGRAMS = [
      ["false", "false", "false", "true", "true", "false", "false", "true"],
      ("pyro", "go", "node")),
 
+    # The other half of ISSUES/18. A scalar and a struct have no null to be —
+    # both VMs and node say so — but go emitted `("" == nil)`, which does not
+    # compile, and the C backend emitted `(0 == NULL)`, which the C compiler
+    # folds to TRUE. `c` is in the list because that wrong answer built clean.
+    ("scalar_null_equality",
+     'string s = ""; int z = 0; number f = 0.0; bool b = false; '
+     'print(s == null); print(z == null); print(f == null); print(b == null); '
+     'print(s != null); print(z != null); '
+     'struct P { int x; } P p = new P { x: 1 }; print(p == null);',
+     ["false", "false", "false", "false", "true", "true", "false"],
+     ("pyro", "go", "node", "c")),
+
     ("replace_empty_needle",
      'print(replace("abc", "", "-")); print(replace("", "", "-"));',
      ["-a-b-c-", "-"],

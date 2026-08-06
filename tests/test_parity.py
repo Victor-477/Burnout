@@ -578,6 +578,58 @@ agree("an ordinary needle still replaces every occurrence",
       'print(replace("abab", "b", "-"));\nprint(replace("abc", "z", "-"));\n',
       backends=_R17, expect="a-a-\nabc")
 
+# ── ISSUES/18: `== null` on a value that cannot be null ──────
+#
+# `valueEq` fell through to comparing the integer field, where a map, an array
+# and `null` all carry 0 — so `m == null` was TRUE for a perfectly good map and
+# the obvious guard `if (req == null) { continue; }` skipped every request. The
+# VMs and node have been fixed; PYRO_RUNTIME.md settles the rule: null is equal
+# only to null, and containers compare by REFERENCE identity.
+#
+# What that spec sentence also covers, and what was still broken, is the
+# non-container half of it. `string s = ""; s == null` is false on both VMs and
+# on node; on go the generated `("" == nil)` did not COMPILE, and on the C
+# backend `(0 == NULL)` is folded by the C compiler to the wrong answer, TRUE,
+# in code that builds clean. A by-value struct did not compile there either.
+print("\n── ISSUES/18: container and scalar `== null` ──")
+_N18 = ('pyro', 'node', 'go', 'c')
+
+agree("a populated map is not null",
+      'map<string,int> m = {"a": 1};\nprint(m == null);\nprint(m != null);\n',
+      backends=_N18, expect="false\ntrue")
+# The empty one is the case that reads most like null and is not.
+agree("an empty map is not null either",
+      "map<string,int> e = {};\nprint(e == null);\n", backends=_N18, expect="false")
+agree("an array is not null",
+      "int[] xs = [1];\nint[] ex = [];\nprint(xs == null);\nprint(ex == null);\n",
+      backends=_N18, expect="false\nfalse")
+agree("null is equal to null", "print(null == null);\n", backends=_N18, expect="true")
+
+# The one place `== null` is the documented idiom must keep working.
+agree("an unset optional is null, a set one is not",
+      "int? x = null;\nint? y = 5;\nprint(x == null);\nprint(y == null);\n",
+      backends=_N18, expect="true\nfalse")
+
+# The scalars. Every one of these is a value with no null to be.
+agree("a scalar is never null",
+      'string s = "";\nint z = 0;\nnumber f = 0.0;\nbool b = false;\n'
+      'print(s == null);\nprint(z == null);\nprint(f == null);\nprint(b == null);\n',
+      backends=_N18, expect="false\nfalse\nfalse\nfalse")
+agree("...and `!= null` is its inverse",
+      'string s = "";\nint z = 0;\nprint(s != null);\nprint(z != null);\n',
+      backends=_N18, expect="true\ntrue")
+agree("a struct value is not null",
+      "struct P { int x; }\nP p = new P { x: 1 };\nprint(p == null);\nprint(p != null);\n",
+      backends=_N18, expect="false\ntrue")
+
+# The container semantics PYRO_RUNTIME.md commits to: identity, not structure.
+# Two arrays with equal contents are DIFFERENT arrays, and that is observable —
+# which is exactly why it is written down and asserted rather than left to
+# whichever engine is being read.
+agree("containers compare by identity, not contents",
+      "int[] a1 = [1];\nint[] a2 = [1];\nprint(a1 == a2);\nprint(a1 == a1);\n",
+      backends=('pyro', 'node', 'go'), expect="false\ntrue")
+
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))
 sys.exit(1 if _failed else 0)

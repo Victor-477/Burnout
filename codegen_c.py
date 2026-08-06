@@ -64,6 +64,11 @@ def is_optional(t: str) -> bool:
     return bool(t) and t.endswith('?')
 
 
+def _c_is_null(node, t: str) -> bool:
+    """Is this operand the null literal? (ISSUES/18)"""
+    return t == 'null' or (isinstance(node, Literal) and node.kind == 'null')
+
+
 def opt_base(t: str) -> str:
     return t[:-1] if is_optional(t) else t
 
@@ -965,6 +970,24 @@ class CodeGenC:
                 return (f"({{ {c_type(lt)} __o = ({l}); "
                         f"__o != NULL ? *__o : ({ct})({r}); }})")
             return f"(({l}) != NULL ? ({l}) : ({r}))"
+
+        # ISSUES/18 — a NON-nilable value compared against null.
+        #
+        # Both VMs and node say `int z = 0; z == null` is false, and
+        # PYRO_RUNTIME.md says null is equal only to null. C has no such rule:
+        # the generic path emitted `(0 == NULL)`, which the C compiler folds to
+        # TRUE — the wrong answer, silently, in code that builds clean. A struct
+        # was worse: `(p == NULL)` against a by-value struct does not compile.
+        #
+        # A string, an optional, an array and a map are all pointers here and
+        # keep their real comparison; an int, a number, a bool and a struct
+        # cannot be null, so the answer is a constant.
+        if node.op in ('==', '!=') and (_c_is_null(node.left, lt) != _c_is_null(node.right, rt)):
+            other = rt if _c_is_null(node.left, lt) else lt
+            if other not in ('unknown', 'any', 'string') and not is_optional(other) \
+                    and not other.endswith('[]') and not other.startswith('map<') \
+                    and other not in ('array', 'map'):
+                return 'false' if node.op == '==' else 'true'
 
         # String concatenation
         if node.op == '+' and (lt == 'string' or rt == 'string'):
