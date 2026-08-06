@@ -310,6 +310,18 @@ def test_parity():
                        'print(apply(pick(true), 4));',
                        # expected values, so a bug shared by both engines fails
                        "42\n42\n12\n20\n100\n49\n20\n11\n20\n11\n8"),
+        # ISSUES/17: an EMPTY needle. The C runtime used to special-case
+        # old_len == 0 and hand the input straight back (to dodge the infinite
+        # loop strstr(p, "") invites), where the Go VM inserted the replacement
+        # at every boundary. Both engines answered confidently and differently,
+        # so this carries the expected VALUE — Go == C would have passed on the
+        # old code too, had the C side been the one copied.
+        ("replace-empty-needle",
+         'print(replace("abc", "", "-")); print(replace("", "", "-")); '
+         'print(replace("abc", "", "")); print(replace("ab", "", "xy")); '
+         # and the ordinary needle must still behave
+         'print(replace("abc", "b", "-")); print(replace("abc", "z", "-"));',
+         "-a-b-c-\n-\nabc\nxyaxybxy\na-c\nabc"),
         ("stdlib2", 'print(pad_start("7", 3, "0")); print(pad_start("x", 5, "ab")); '
                     'print(pad_end("x", 5, "ab")); print(pad_start("toolong", 3, " ")); '
                     'int[] a = [1, 2, 3]; int[] b = [4, 5]; int[] c = concat(a, b); '

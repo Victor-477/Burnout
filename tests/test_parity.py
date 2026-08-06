@@ -548,6 +548,36 @@ agree("a variable shadows the member",
 agree("a payload-less member of a DATA enum is still its tag",
       'enum R { Ok(int), None }\nR r = None;\nprint(r);\n', expect="{tag: None}")
 
+# ── ISSUES/17: replace() with an empty needle ────────────────
+#
+# Three engines, three answers: the Go VM inserted the replacement at every
+# boundary (`-a-b-c-`), the C runtime special-cased an empty needle and gave
+# the input back unchanged (`abc`), and node's split("").join(rep) inserted
+# only BETWEEN characters (`a-b-c`). Each was locally reasonable; nobody had
+# picked one, so the program meant three things.
+#
+# The VM's behaviour is canonical for runtime semantics, so `-a-b-c-` wins —
+# which is also what Python's str.replace and Go's strings.ReplaceAll do.
+# PYRO_RUNTIME.md states the rule. The expected values are asserted, not just
+# agreement: node's answer differed from BOTH VMs, and a fix copied from the
+# wrong engine would have made all four agree on the wrong string.
+print("\n── ISSUES/17: replace() with an empty needle ──")
+_R17 = ('pyro', 'node', 'go', 'c')
+agree("an empty needle inserts at every boundary",
+      'print(replace("abc", "", "-"));\n', backends=_R17, expect="-a-b-c-")
+# The empty INPUT is the case the spec has to spell out: the result is the
+# replacement, not "".
+agree("an empty input yields the replacement itself",
+      'print(replace("", "", "-"));\n', backends=_R17, expect="-")
+agree("an empty replacement leaves the input alone",
+      'print(replace("abc", "", ""));\n', backends=_R17, expect="abc")
+agree("a multi-character replacement lands at every boundary",
+      'print(replace("ab", "", "xy"));\n', backends=_R17, expect="xyaxybxy")
+# And the ordinary needle must not have moved.
+agree("an ordinary needle still replaces every occurrence",
+      'print(replace("abab", "b", "-"));\nprint(replace("abc", "z", "-"));\n',
+      backends=_R17, expect="a-a-\nabc")
+
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))
 sys.exit(1 if _failed else 0)
