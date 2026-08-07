@@ -630,6 +630,65 @@ agree("containers compare by identity, not contents",
       "int[] a1 = [1];\nint[] a2 = [1];\nprint(a1 == a2);\nprint(a1 == a1);\n",
       backends=('pyro', 'node', 'go'), expect="false\ntrue")
 
+# ── 13.5: string builtins lowered in the front end ───────────
+#
+# `lines`, `chars`, `title_case`, `trim_start` and `trim_end` add NO native.
+# Each lowers to a synthetic Cryo function, which is why they are tested here
+# rather than in a VM suite: the lowering is the feature, and what has to be
+# true is that all four backends compute the same string from the same source.
+# A new native would have needed six mirrored edits and could disagree; this
+# cannot, because there is only one implementation and every backend compiles
+# it.
+print("\n── 13.5: string builtins with no new native ──")
+_S135 = ('pyro', 'node', 'go', 'c')
+
+# CRLF and a trailing newline are what text read off disk actually looks like.
+# Splitting on "\n" alone leaves a "\r" on every line and a phantom empty line
+# at the end — both are the kind of wrong that only shows up in the output.
+agree("lines() handles CRLF and a trailing newline",
+      'string[] l = lines("a\\r\\nb\\nc\\n");\nprint(l);\nprint(len(l));\n',
+      backends=_S135, expect="[a, b, c]\n3")
+agree("lines() of text without a trailing newline",
+      'print(lines("one"));\n', backends=_S135, expect="[one]")
+agree("lines() of the empty string has no lines",
+      'print(lines(""));\nprint(len(lines("")));\n',
+      backends=_S135, expect="[]\n0")
+agree("chars() splits into single characters",
+      'print(chars("abc"));\nprint(len(chars("")));\n',
+      backends=_S135, expect="[a, b, c]\n0")
+# Python's str.title(): the rest of the word goes DOWN, so "hELLO" is "Hello".
+agree("title_case() upper-cases each word and lowers the rest",
+      'print(title_case("hELLO wORLD"));\n', backends=_S135, expect="Hello World")
+agree("title_case() treats every whitespace as a boundary, and keeps it",
+      'print(title_case("a\\tb  c"));\n', backends=_S135, expect="A\tB  C")
+agree("trim_start / trim_end strip one end each",
+      'print("[" + trim_start("  hi  ") + "]");\n'
+      'print("[" + trim_end("  hi  ") + "]");\n',
+      backends=_S135, expect="[hi  ]\n[  hi]")
+# The one that would rot silently: if these ever strip a different character
+# set than trim(), nothing else in the suite would notice.
+agree("...over the same character set trim() uses",
+      'string s = " \\t\\r\\n x \\t\\r\\n ";\n'
+      'print(trim_start(trim_end(s)) == trim(s));\n',
+      backends=_S135, expect="true")
+agree("an empty and an all-space string are handled",
+      'print("[" + trim_start("") + "]");\nprint("[" + trim_end("   ") + "]");\n',
+      backends=_S135, expect="[]\n[]")
+# The `\r` escape, found by the test above. The lexer's escape table had n, t,
+# \\, " and ', and its fallback turns an unknown escape into the character
+# itself — so `"\r"` was the LETTER r and no literal could hold a carriage
+# return. Both lexers were missing it, so the token streams still agreed and
+# the 9.4 fixed point never noticed.
+agree("\\r is a carriage return, not the letter r",
+      'string s = "a\\rb";\nprint(len(s));\nprint(s == "arb");\nprint(s[1] == "\\r");\n',
+      backends=_S135, expect="3\nfalse\ntrue")
+
+# A program that declares its own must keep it — the lowering only fires for a
+# name the program has not defined.
+agree("a user function of the same name still wins",
+      'fn chars(string s) -> int ={ return len(s); }\nprint(chars("abcd"));\n',
+      backends=_S135, expect="4")
+
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))
 sys.exit(1 if _failed else 0)
