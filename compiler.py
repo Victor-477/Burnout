@@ -683,6 +683,27 @@ def main() -> None:
     except ParseError     as e:
         # 11.24 — these messages already carry "Line N"; showing that line with
         # a caret turns a coordinate into the mistake itself.
+        #
+        # 13.6 — the parser can now report several. Each gets its own rendered
+        # line and caret: joining them into one string would leave `_point_at`
+        # underlining the first error's line under all of them, which is worse
+        # than showing one error properly.
+        errs = getattr(e, 'errors', None)
+        if errs:
+            n = len(errs)
+            # `truncated` is a notice about the LIST, not an entry in it: it
+            # has no source line to point a caret at, and counting it as a
+            # problem is what made a 12-mistake file announce 11.
+            more = getattr(e, 'truncated', False)
+            head = ("the parser found at least %d problem%s:" if more
+                    else "the parser found %d problem%s:") % (
+                        n, '' if n == 1 else 's')
+            parts = ["\n[Syntax Error] " + head]
+            parts += [_point_at(args.input, m, '[Syntax Error]') for m in errs]
+            if more:
+                parts.append("[Syntax Error] " + getattr(
+                    type(e), 'CAP_NOTICE', '... stopping here'))
+            print("\n\n".join(parts), file=sys.stderr); sys.exit(1)
         print("\n" + _point_at(args.input, str(e), '[Syntax Error]'),
               file=sys.stderr); sys.exit(1)
     except ForeignError   as e:
