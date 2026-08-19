@@ -49,6 +49,7 @@ from codegen_go   import CodeGenGo,   CodeGenGoError     # Go backend
 from codegen_asm  import CodeGenAsm,  CodeGenAsmError    # x86-64 backend
 from codegen_pyro import CodeGenPyro, CodeGenPyroError   # Pyro bytecode backend
 from codegen_node import CodeGenNode, CodeGenNodeError   # Node.js/JS backend
+from codegen_csharp import CodeGenCSharp, CodeGenCSharpError  # C# backend
 from codegen_wasm import CodeGenWasm, CodeGenWasmError   # WebAssembly backend
 import frontend                                          # front-end pages (10.11/10.13)
 
@@ -118,6 +119,52 @@ def load_sign_key(spec: str) -> bytes:
         raise ValueError("--sign: the key is shorter than 16 bytes; "
                          "that is almost certainly the wrong file")
     return key
+
+
+_CSPROJ = """<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <InvariantGlobalization>true</InvariantGlobalization>
+    <EnableDefaultCompileItems>false</EnableDefaultCompileItems>
+    <!-- A module variable the program never reads is CS0414 here and
+         nothing at all in Cryo. The warning would land on generated
+         code the programmer never wrote, mixed into their output. -->
+    <NoWarn>CS0414;CS0219;CS0168;CS0162</NoWarn>
+  </PropertyGroup>
+  <ItemGroup><Compile Include="Program.cs" /></ItemGroup>
+</Project>
+"""
+
+
+def _csharp_project(cs_path: str):
+    """A one-file .NET project beside `cs_path`, or None without the SDK.
+
+    `dotnet` needs a project rather than a loose file, and a .csproj globs
+    **/*.cs — which would sweep in every other generated program sitting in the
+    same directory, so the project gets its own subdirectory holding exactly one
+    source file. The .cs the caller asked for is still written where they asked.
+
+    Rebuilt from the .cs on every call, so the project cannot go stale against
+    the file the programmer is looking at.
+
+    `Nullable` is off because Cryo's optionals are its own and .NET's warnings
+    would report on generated code nobody wrote; `InvariantGlobalization` keeps
+    the host's locale out of a `number`'s rendering, which is the difference
+    between "2.5" and "2,5" in the program's OUTPUT.
+    """
+    import shutil
+    if not shutil.which('dotnet'):
+        return None
+    base = os.path.splitext(os.path.abspath(cs_path))[0]
+    proj = base + '_csproj'
+    os.makedirs(proj, exist_ok=True)
+    shutil.copyfile(cs_path, os.path.join(proj, 'Program.cs'))
+    with open(os.path.join(proj, 'app.csproj'), 'w', encoding='utf-8') as f:
+        f.write(_CSPROJ)
+    return proj
 
 
 def default_abi() -> str:
@@ -244,6 +291,8 @@ def _compile_resolved(ast, backend: str, safe: bool, abi: str,
         return CodeGenGo(safe=safe, sandbox=sandbox).generate(ast)
     if backend == 'node':
         return CodeGenNode(safe=safe).generate(ast)
+    if backend == 'csharp':
+        return CodeGenCSharp(safe=safe).generate(ast)
     if backend == 'wasm':
         return CodeGenWasm(safe=safe).generate(ast)   # bytes (.wasm)
     if backend == 'pyro':
@@ -439,7 +488,7 @@ def compile_file(input_path: str,
             raise
 
     ext = {'asm': '.s', 'go': '.go', 'pyro': '.pyro',
-           'node': '.js', 'c': '.c', 'wasm': '.wasm',
+           'node': '.js', 'c': '.c', 'wasm': '.wasm', 'csharp': '.cs',
            'frontend': '.html'}.get(backend, '.c')
     if output_path is None:
         # separates sources (.cryo) from generated artifacts: output goes to build/
@@ -461,6 +510,7 @@ def compile_file(input_path: str,
     if verbose:
         alvo = {'asm': f'x86-64 asm/{abi}', 'go': 'native Go',
                 'pyro': 'Pyro bytecode', 'node': 'JavaScript (Node)',
+                'csharp': 'C# (.NET)',
                 'wasm': 'WebAssembly', 'c': 'native C',
                 'frontend': f'front-end page ({emit})'}.get(backend, 'native C')
         tam = f"  ({len(code)} bytes)" if isinstance(code, (bytes, bytearray)) else ""
@@ -516,6 +566,25 @@ def compile_file(input_path: str,
             except FileNotFoundError:
                 print("⚠ node not found — .js generated but not executed",
                       file=sys.stderr)
+        return output_path
+
+    # ── csharp backend: builds and runs with the .NET SDK ──
+    #
+    # `dotnet` needs a project, not a loose file, and a .csproj globs **/*.cs —
+    # which would sweep in every other generated program sitting in the same
+    # directory. So the project gets its own subdirectory with exactly one
+    # source file in it, and the .cs the user asked for is still written where
+    # they asked for it.
+    if backend == 'csharp':
+        if run:
+            proj = _csharp_project(output_path)
+            if proj is None:
+                print("⚠ dotnet not found — .cs generated but not executed",
+                      file=sys.stderr)
+                return output_path
+            print(f"\n── Running (dotnet): {output_path} ───────────────────")
+            subprocess.run(['dotnet', 'run', '--project', proj,
+                            '-v', 'quiet', '--nologo'])
         return output_path
 
     # ── assemble/compile binary ──
@@ -595,7 +664,7 @@ def main() -> None:
     ap.add_argument('input', nargs='?', help='Input file (.cryo)')
     ap.add_argument('-o', '--output',  help='Output file (.go/.pyro/.s)')
     ap.add_argument('--backend',
-                    choices=('auto', 'go', 'c', 'asm', 'pyro', 'node', 'wasm',
+                    choices=('auto', 'go', 'c', 'asm', 'pyro', 'node', 'wasm', 'csharp',
                              'frontend'),
                     default='go',
                     help='Backend: go (default), c, asm, pyro, node, wasm, '
