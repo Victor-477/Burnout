@@ -50,6 +50,7 @@ from codegen_asm  import CodeGenAsm,  CodeGenAsmError    # x86-64 backend
 from codegen_pyro import CodeGenPyro, CodeGenPyroError   # Pyro bytecode backend
 from codegen_node import CodeGenNode, CodeGenNodeError   # Node.js/JS backend
 from codegen_csharp import CodeGenCSharp, CodeGenCSharpError  # C# backend
+from codegen_cpp    import CodeGenCpp,    CodeGenCppError      # C++ backend
 from codegen_wasm import CodeGenWasm, CodeGenWasmError   # WebAssembly backend
 import frontend                                          # front-end pages (10.11/10.13)
 
@@ -293,6 +294,8 @@ def _compile_resolved(ast, backend: str, safe: bool, abi: str,
         return CodeGenNode(safe=safe).generate(ast)
     if backend == 'csharp':
         return CodeGenCSharp(safe=safe).generate(ast)
+    if backend == 'cpp':
+        return CodeGenCpp(safe=safe).generate(ast)
     if backend == 'wasm':
         return CodeGenWasm(safe=safe).generate(ast)   # bytes (.wasm)
     if backend == 'pyro':
@@ -489,6 +492,7 @@ def compile_file(input_path: str,
 
     ext = {'asm': '.s', 'go': '.go', 'pyro': '.pyro',
            'node': '.js', 'c': '.c', 'wasm': '.wasm', 'csharp': '.cs',
+           'cpp': '.cpp',
            'frontend': '.html'}.get(backend, '.c')
     if output_path is None:
         # separates sources (.cryo) from generated artifacts: output goes to build/
@@ -510,7 +514,7 @@ def compile_file(input_path: str,
     if verbose:
         alvo = {'asm': f'x86-64 asm/{abi}', 'go': 'native Go',
                 'pyro': 'Pyro bytecode', 'node': 'JavaScript (Node)',
-                'csharp': 'C# (.NET)',
+                'csharp': 'C# (.NET)', 'cpp': 'C++ (C++14)',
                 'wasm': 'WebAssembly', 'c': 'native C',
                 'frontend': f'front-end page ({emit})'}.get(backend, 'native C')
         tam = f"  ({len(code)} bytes)" if isinstance(code, (bytes, bytearray)) else ""
@@ -599,6 +603,14 @@ def compile_file(input_path: str,
         cmd, tool = _gcc_asm_flags(output_path, runtime, bin_path, abi), 'gcc'
     elif backend == 'go':
         cmd, tool = ['go', 'build', '-o', bin_path, output_path], 'go'
+    elif backend == 'cpp':
+        # Header-only runtime, so there is nothing to compile alongside — just
+        # the include path. C++14 rather than 17: the runtime is written to it
+        # deliberately, so an older toolchain still builds what this emits.
+        import shutil as _sh
+        cxx = next((c for c in ('g++', 'clang++', 'c++') if _sh.which(c)), 'g++')
+        cmd, tool = ([cxx, '-std=c++14', '-O2', '-I', runtime_dir,
+                      output_path, '-o', bin_path], cxx)
     else:
         cmd, tool = _gcc_c_flags(runtime_dir, output_path, runtime, bin_path, safe), 'gcc'
 
@@ -664,7 +676,7 @@ def main() -> None:
     ap.add_argument('input', nargs='?', help='Input file (.cryo)')
     ap.add_argument('-o', '--output',  help='Output file (.go/.pyro/.s)')
     ap.add_argument('--backend',
-                    choices=('auto', 'go', 'c', 'asm', 'pyro', 'node', 'wasm', 'csharp',
+                    choices=('auto', 'go', 'c', 'asm', 'pyro', 'node', 'wasm', 'csharp', 'cpp',
                              'frontend'),
                     default='go',
                     help='Backend: go (default), c, asm, pyro, node, wasm, '

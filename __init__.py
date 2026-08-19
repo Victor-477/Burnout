@@ -78,7 +78,7 @@ except Exception:                             # pragma: no cover
 __version__ = "1.1.0"
 
 BACKENDS = ("go", "pyro", "c", "asm", "node", "wasm", "frontend", "html",
-            "csharp")
+            "csharp", "cpp")
 
 
 def tokenize(source):

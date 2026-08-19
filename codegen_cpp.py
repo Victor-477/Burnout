@@ -1,54 +1,55 @@
 # ============================================================
-#  Cryo Compiler — C# Code Generator
-#  .cryo  ->  .cs  (compiled and run with the .NET SDK)
+#  Cryo Compiler — C++ Code Generator
+#  .cryo  ->  .cpp  (C++14, buildable with g++/clang++/MSVC)
 #
-#  Modelled on codegen_c.py, which is the closest sibling: both
-#  targets are statically typed and both have to pick a concrete
-#  type for every slot. The difference is the standard library —
-#  .NET already has string, List<T> and Dictionary<K,V>, so this
-#  backend needs no hand-written runtime the way the C one needs
-#  cryo_runtime.c. What it DOES need is rendering that matches the
-#  VM byte for byte, because invariant 1 is checked by comparing
-#  program output, not by compiling.
+#  Sibling of codegen_csharp.py rather than of codegen_c.py, and
+#  deliberately so: C++ has containers, so this backend does not need
+#  the hand-written value model cryo_runtime.c exists for, and the
+#  shape that worked for C# carries over almost line for line.
 #
-#  The two places that costs something:
-#    * a `number` prints as "2", not "2.0" — .NET's default for a
-#      double is "2" but for 2.5 it is culture-dependent, so every
-#      conversion goes through InvariantCulture.
-#    * a map renders sorted by the key's own TEXT ("1, 10, 2"),
-#      which is what the VM does and looks wrong until you know.
+#  Three things C++ forces that C# did not:
+#
+#    * REFERENCE SEMANTICS have to be built. PYRO_RUNTIME.md §2 makes
+#      arrays, maps and structs shared objects; a bare std::vector
+#      copies on assignment, so `int[] b = a; b.push(1);` would leave
+#      `a` alone here and change it everywhere else. Every container
+#      is a shared_ptr, which is why the emitted code is full of them.
+#    * NULLABLE is shared_ptr, not std::optional — the oldest
+#      toolchain this targets is C++14, and it matches how the go
+#      backend represents `T?` anyway.
+#    * DECLARATION ORDER matters. C++ needs a declaration before a
+#      use, so every function is forward-declared in a first pass.
 #
 #  Unsupported constructs are REFUSED here rather than emitted for
-#  the C# compiler to complain about: a message naming a backend
-#  that works beats one naming a type the programmer never wrote.
+#  the C++ compiler to complain about, because its diagnostics for
+#  generated template code are famously unreadable and would be
+#  reporting on code the programmer never wrote.
 # ============================================================
 from ast_nodes import *
 from foreign import collect_imports, resolve_library_lang
 from typing import List, Dict, Set
 
 
-class CodeGenCSharpError(Exception):
+class CodeGenCppError(Exception):
     pass
 
 
-# ── Cryo -> C# type mapping ─────────────────────────────────
-
-CS_TYPE: Dict[str, str] = {
-    'int':    'long',
+CPP_TYPE: Dict[str, str] = {
+    'int':    'int64_t',
     'number': 'double',
-    'string': 'string',
+    'string': 'std::string',
     'bool':   'bool',
     'void':   'void',
-    'null':   'object',
-    'any':    'object',
 }
 
-# `string` is already a reference type, so `string?` needs no wrapper; the
-# value types become Nullable<T>.
-_OPT_CS = {'int': 'long?', 'number': 'double?', 'bool': 'bool?',
-           'string': 'string'}
+_CPP_LANGS = ('c++', 'cpp', 'cxx')
 
-_CS_LANGS = ('c#', 'cs', 'csharp', 'dotnet')
+# Registered per generate(). A Cryo enum is an INTEGER value (12.9), and a
+# struct name has to become a shared handle rather than a bare value, so
+# cpp_type needs to know both — and threading an environment through its forty
+# call sites would cost more than a module global the compiler resets.
+_ENUM_NAMES: Set[str] = set()
+_STRUCT_NAMES: Set[str] = set()
 
 
 def is_map(t: str) -> bool:
@@ -58,8 +59,8 @@ def is_map(t: str) -> bool:
 def map_kv(t: str):
     """('string', 'int') for map<string,int>.
 
-    Split on the FIRST top-level comma: a nested map<...> value would
-    otherwise be cut in half.
+    Split on the FIRST top-level comma: a nested map<...> value would otherwise
+    be cut in half.
     """
     if not is_map(t):
         return ('unknown', 'unknown')
@@ -98,95 +99,84 @@ def _is_null(node, t: str) -> bool:
     return t == 'null' or (isinstance(node, Literal) and node.kind == 'null')
 
 
-# 12.9 — a payload-less enum member is an INTEGER value, so `E e = A;
-# print(e)` is "0" on every backend. A C# `enum` would render as "A", so the
-# type maps to long and the members become constants. Registered per
-# generate(); the compiler is single-threaded, and the alternative is threading
-# the environment through cs_type's forty call sites.
-_ENUM_NAMES: Set[str] = set()
-
-
-def cs_type(t: str) -> str:
+def cpp_type(t: str) -> str:
     if not t:
-        return 'object'
+        return 'auto'
     if t in _ENUM_NAMES:
-        return 'long'
+        return 'int64_t'
+    if t in _STRUCT_NAMES:
+        # A handle, not a value: two Cryo names for one struct see each other's
+        # writes, and a by-value struct would silently stop doing that.
+        return f"std::shared_ptr<{t}>"
     if t.startswith('(') and t.endswith(')'):
-        return cs_type(t[1:-1])
+        return cpp_type(t[1:-1])
     if t.startswith('fn(') and '->' in t:
-        raise CodeGenCSharpError(
+        raise CodeGenCppError(
             f"function type '{t}' (first-class functions) is not yet supported "
-            f"in the C# backend; use --backend go, node or pyro.")
+            f"in the C++ backend; use --backend go, node or pyro.")
     if t.startswith('future<'):
-        raise CodeGenCSharpError(
-            "concurrency (spawn/await) is not supported in the C# backend; "
+        raise CodeGenCppError(
+            "concurrency (spawn/await) is not supported in the C++ backend; "
             "use --backend go or pyro.")
+    if t == 'any':
+        raise CodeGenCppError(
+            "the dynamic type 'any' has no C++ representation. It also comes "
+            "from constructs that infer it — a comprehension, or a "
+            "`for (x in xs)` without a declared type. Give the variable an "
+            "explicit type, or use --backend go, node or pyro.")
     if is_optional(t):
-        base = t[:-1]
-        if base in _OPT_CS:
-            return _OPT_CS[base]
-        # A struct is already a reference type here, so T? is just T.
-        return cs_type(base)
+        return f"std::shared_ptr<{cpp_type(opt_base(t))}>"
     if is_map(t):
         k, v = map_kv(t)
-        return f"Dictionary<{cs_type(k)}, {cs_type(v)}>"
+        return f"cryo::Map<{cpp_type(k)}, {cpp_type(v)}>"
     if t.endswith('[]'):
-        return f"List<{cs_type(t[:-2])}>"
-    return CS_TYPE.get(t, t)      # struct / enum names pass through
+        return f"cryo::Arr<{cpp_type(t[:-2])}>"
+    return CPP_TYPE.get(t, t)
 
 
-_CS_ESCAPES = {'\\': '\\\\', '"': '\\"', '\n': '\\n', '\t': '\\t',
-               '\r': '\\r', '\0': '\\0'}
+_CPP_ESCAPES = {'\\': '\\\\', '"': '\\"', '\n': '\\n', '\t': '\\t',
+                '\r': '\\r', '\0': '\\0'}
 
 
-def cs_string(v: str) -> str:
-    """A Cryo string as a C# string literal.
+def cpp_string(v: str) -> str:
+    """A Cryo string as a C++ string literal.
 
     Interpolating the value verbatim would turn a backslash in the program's
-    DATA into an escape in the generated C#, and a quote or newline would
-    produce code that does not compile — the C# compiler reporting on a string
-    the programmer never wrote. Non-ASCII passes through as itself: the file is
-    written as UTF-8 and the SDK reads it as UTF-8.
+    DATA into an escape in the generated C++, and a quote or newline would
+    produce code that does not compile — the compiler reporting on a string the
+    programmer never wrote. Bytes outside printable ASCII pass through as
+    themselves; the file is written and read as UTF-8.
     """
     out = []
     for ch in v:
-        if ch in _CS_ESCAPES:
-            out.append(_CS_ESCAPES[ch])
+        if ch in _CPP_ESCAPES:
+            out.append(_CPP_ESCAPES[ch])
         elif ord(ch) < 0x20:
-            out.append('\\u%04x' % ord(ch))
+            out.append('\\%03o' % ord(ch))
         else:
             out.append(ch)
     return '"' + ''.join(out) + '"'
 
 
-# C# keywords a Cryo identifier could legitimately collide with. Prefixed with
-# `@` rather than renamed, so the name in the generated code still reads as the
-# one the programmer wrote.
-_CS_KEYWORDS = {
-    'abstract', 'as', 'base', 'bool', 'break', 'byte', 'case', 'catch', 'char',
-    'checked', 'class', 'const', 'continue', 'decimal', 'default', 'delegate',
-    'do', 'double', 'else', 'enum', 'event', 'explicit', 'extern', 'false',
-    'finally', 'fixed', 'float', 'for', 'foreach', 'goto', 'if', 'implicit',
-    'in', 'int', 'interface', 'internal', 'is', 'lock', 'long', 'namespace',
-    'new', 'null', 'object', 'operator', 'out', 'override', 'params',
-    'private', 'protected', 'public', 'readonly', 'ref', 'return', 'sbyte',
-    'sealed', 'short', 'sizeof', 'stackalloc', 'static', 'string', 'struct',
-    'switch', 'this', 'throw', 'true', 'try', 'typeof', 'uint', 'ulong',
-    'unchecked', 'unsafe', 'ushort', 'using', 'virtual', 'void', 'volatile',
-    'while',
+_CPP_KEYWORDS = {
+    'alignas', 'alignof', 'and', 'asm', 'auto', 'bool', 'break', 'case',
+    'catch', 'char', 'class', 'const', 'constexpr', 'continue', 'decltype',
+    'default', 'delete', 'do', 'double', 'else', 'enum', 'explicit', 'export',
+    'extern', 'false', 'float', 'for', 'friend', 'goto', 'if', 'inline', 'int',
+    'long', 'mutable', 'namespace', 'new', 'noexcept', 'not', 'nullptr',
+    'operator', 'or', 'private', 'protected', 'public', 'register',
+    'reinterpret_cast', 'return', 'short', 'signed', 'sizeof', 'static',
+    'static_cast', 'struct', 'switch', 'template', 'this', 'throw', 'true',
+    'try', 'typedef', 'typeid', 'typename', 'union', 'unsigned', 'using',
+    'virtual', 'void', 'volatile', 'while', 'xor',
 }
 
 
-def csid(name: str) -> str:
-    return '@' + name if name in _CS_KEYWORDS else name
+def cppid(name: str) -> str:
+    # Suffixed rather than renamed, so the name still reads as the one the
+    # programmer wrote.
+    return name + '_' if name in _CPP_KEYWORDS else name
 
-
-# ── type inference ──────────────────────────────────────────
-#
-# Deliberately the same shape as codegen_c's TypeEnv. Sharing one would be
-# better, but the two disagree on what they can represent (this one has maps of
-# any key type, that one does not), and a common version that served both would
-# have to be told which backend is asking.
 
 class TypeEnv:
     def __init__(self):
@@ -262,14 +252,12 @@ class TypeEnv:
         if isinstance(node, CallExpr):
             c = node.callee
             if c in ('to_string', 'input', 'upper', 'lower', 'trim', 'substr',
-                     'repeat', 'pad_start', 'pad_end', 'replace', 'join',
-                     'read_file', 'env'):
+                     'repeat', 'pad_start', 'pad_end', 'replace', 'join'):
                 return 'string'
             if c in ('to_int', 'len', 'sign', 'gcd', 'find', 'count',
                      'index_of'):
                 return 'int'
-            if c in ('has', 'starts_with', 'ends_with', 'contains',
-                     'file_exists'):
+            if c in ('has', 'starts_with', 'ends_with', 'contains'):
                 return 'bool'
             if c == 'keys' and node.args:
                 mt = self.infer(node.args[0])
@@ -313,31 +301,16 @@ class TypeEnv:
         return 'unknown'
 
 
-# ── the emitted runtime ─────────────────────────────────────
-#
-# Read from Burnout/runtime/cryo_runtime.cs and embedded in the generated
-# file, so a compiled program is a single self-contained .cs. The C backend
-# ships its runtime as a second file to hand to gcc; here a single file is
-# what `dotnet run` wants, and the runtime is small enough that inlining it
-# costs nothing.
-
-def _runtime_text() -> str:
-    import os
-    path = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                        'runtime', 'cryo_runtime.cs')
-    with open(path, encoding='utf-8') as f:
-        return f.read()
-
-
-class CodeGenCSharp:
+class CodeGenCpp:
     def __init__(self, safe: bool = True):
         self.te = TypeEnv()
         self._indent = 0
         self._types: List[str] = []
-        self._fields: List[str] = []
+        self._fwd: List[str] = []
+        self._globals: List[str] = []
         self._fns: List[str] = []
         self._main: List[str] = []
-        self._usings: Set[str] = set()
+        self._includes: Set[str] = set()
         self._cur: List[str] = self._main
         self._safe_default = safe
         self._safe_stack: List[bool] = []
@@ -351,7 +324,7 @@ class CodeGenCSharp:
         return self._safe_stack[-1] if self._safe_stack else self._safe_default
 
     def _err(self, msg: str):
-        raise CodeGenCSharpError(msg)
+        raise CodeGenCppError(msg)
 
     def _pad(self) -> str:
         return '    ' * self._indent
@@ -361,12 +334,13 @@ class CodeGenCSharp:
 
     def _next_tmp(self) -> str:
         self._tmp += 1
-        return f"__cs{self._tmp}"
+        return f"__cx{self._tmp}"
 
     # ── entry ────────────────────────────────────────────────
 
     def generate(self, program: Program) -> str:
         _ENUM_NAMES.clear()
+        _STRUCT_NAMES.clear()
         self._imported_langs = collect_imports(program)
         self._pre_scan(program.statements)
 
@@ -375,62 +349,66 @@ class CodeGenCSharp:
                 self._cur, self._indent = self._types, 0
                 self._gen(node)
             elif isinstance(node, FunctionDecl):
-                self._cur, self._indent = self._fns, 1
+                self._cur, self._indent = self._fns, 0
                 self._gen(node)
             elif isinstance(node, (ConstDecl, VarDecl)):
-                # Module state is a static field, so a function declared above
-                # the variable can still refer to it (11.1). The INITIALISER
-                # stays in Main, in source order, because it may call a
-                # function or read another module variable.
                 self._module_var(node)
-            elif isinstance(node, (Import, Library)):
-                self._cur, self._indent = self._main, 2
-                self._gen(node)
             else:
-                self._cur, self._indent = self._main, 2
+                self._cur, self._indent = self._main, 1
                 self._gen(node)
 
         return self._assemble()
 
     def _pre_scan(self, stmts: List[Node]):
+        """Register types and forward-declare every function.
+
+        C++ needs a declaration before a use, and Cryo does not — a function
+        may call one declared below it. Without this pass the generated file
+        compiles only when the program happens to be in dependency order.
+        """
         for n in stmts:
             if isinstance(n, StructDecl):
                 self.te.reg_struct(n.name, {f.name: f.field_type for f in n.fields})
+                _STRUCT_NAMES.add(n.name)
             elif isinstance(n, EnumDecl):
                 self.te.reg_enum(n.name)
                 _ENUM_NAMES.add(n.name)
                 for m in n.members:
                     if not m.fields:
-                        self._plain_enum_member[m.name] = f"{n.name}.{m.name}"
-                        self._plain_enum_member[f"{n.name}_{m.name}"] = f"{n.name}.{m.name}"
-                    self.te.reg_enum_member(m.name, f"{n.name}.{m.name}")
-                    self.te.reg_enum_member(f"{n.name}_{m.name}", f"{n.name}.{m.name}")
-            elif isinstance(n, FunctionDecl):
-                self.te.reg_fn(n.name, n.return_type or 'void')
+                        self._plain_enum_member[m.name] = f"{n.name}_{m.name}"
+                        self._plain_enum_member[f"{n.name}_{m.name}"] = f"{n.name}_{m.name}"
+                    self.te.reg_enum_member(m.name, f"{n.name}_{m.name}")
+                    self.te.reg_enum_member(f"{n.name}_{m.name}", f"{n.name}_{m.name}")
             elif isinstance(n, (ConstDecl, VarDecl)):
                 self.te.set(n.name, n.var_type)
+        # Functions after the types, so a signature naming a struct resolves.
+        for n in stmts:
+            if isinstance(n, FunctionDecl):
+                self.te.reg_fn(n.name, n.return_type or 'void')
+                params = ', '.join(f"{cpp_type(pt)} {cppid(pn)}"
+                                   for pt, pn in n.params)
+                self._fwd.append(
+                    f"{cpp_type(n.return_type or 'void')} {cppid(n.name)}({params});")
 
     def _assemble(self) -> str:
-        usings = sorted({'System', 'System.Collections.Generic',
-                         'System.Globalization', 'System.Text'} | self._usings)
         lines = [
             "// ============================================================",
-            "//  Generated from Cryo by Burnout — C# backend",
-            "//  Build & run:  dotnet run     (or: csc program.cs)",
+            "//  Generated from Cryo by Burnout — C++ backend (C++14)",
+            "//  Build: g++ -std=c++14 -O2 -I <burnout>/runtime prog.cpp -o prog",
             "// ============================================================",
+            '#include "cryo_runtime.hpp"',
         ]
-        lines += [f"using {u};" for u in usings]
-        lines.append("")
-        lines.append(_runtime_text().rstrip())
+        lines += [f"#include <{h}>" for h in sorted(self._includes)]
         lines.append("")
         if self._types:
             lines += ["// ── declared types ──", ""] + self._types + [""]
-        lines += ["public static class Program {"]
-        if self._fields:
-            lines += ["    // ── module state ──"] + self._fields + [""]
+        if self._fwd:
+            lines += ["// ── forward declarations ──", ""] + self._fwd + [""]
+        if self._globals:
+            lines += ["// ── module state ──", ""] + self._globals + [""]
         if self._fns:
             lines += self._fns + [""]
-        lines += ["    public static void Main() {"] + self._main + ["    }", "}", ""]
+        lines += ["int main() {"] + self._main + ["    return 0;", "}", ""]
         return '\n'.join(lines)
 
     # ── statements ───────────────────────────────────────────
@@ -462,59 +440,55 @@ class CodeGenCSharp:
         elif isinstance(node, ForeignBlock):        self._foreign(node)
         elif isinstance(node, IndexAssignment):     self._index_assign(node)
         elif isinstance(node, SkillDecl):
-            self._err("'skill' (the LLM layer) is not supported in the C# "
+            self._err("'skill' (the LLM layer) is not supported in the C++ "
                       "backend; use --backend go.")
         elif isinstance(node, MatchStatement):
             self._err("'match' on a data-carrying enum is not yet supported in "
-                      "the C# backend; use --backend go, node or pyro.")
+                      "the C++ backend; use --backend go, node or pyro.")
         elif isinstance(node, (CallExpr, MethodCallExpr, CallValueExpr)):
             self._emit(self._expr(node) + ';')
         else:
-            self._err(f"'{type(node).__name__}' is not supported in the C# "
+            self._err(f"'{type(node).__name__}' is not supported in the C++ "
                       f"backend; use --backend go, node or pyro.")
 
     def _struct(self, n: StructDecl):
-        # A class rather than a C# struct: Cryo structs are reference values
-        # (two names for one object see each other's writes), and a C# struct
-        # would copy on every assignment and silently diverge from the VM.
-        self._emit(f"public class {n.name} {{")
+        self._emit(f"struct {n.name} {{")
         for f in n.fields:
-            self._emit(f"    public {cs_type(f.field_type)} {csid(f.name)};")
-        # A struct renders as a MAP of its field names (PYRO_RUNTIME §3.1), so
-        # `print(p)` is "{x: 1, y: 2}". Without this the fallback in Cryo.Str
-        # reached Convert.ToString, which gives the TYPE NAME — the same class
-        # of bug as Go's fmt.Sprint printing "[0 1 2]" for an array.
+            self._emit(f"    {cpp_type(f.field_type)} {cppid(f.name)};")
+        self._emit("};")
+        # Its own str(), because a struct renders as a MAP of its field names
+        # (PYRO_RUNTIME §3.1) and the generic shared_ptr overload cannot know
+        # them. More specialised than the template, so it wins overload
+        # resolution.
+        self._emit(f"namespace cryo {{ inline std::string str(const {n.name}& v) {{")
         parts = ' + ", " + '.join(
-            f'"{f.name}: " + Cryo.Str({csid(f.name)})' for f in n.fields)
-        self._emit("    public override string ToString() {")
-        self._emit(f'        return "{{" + {parts or '""'} + "}}";')
-        self._emit("    }")
-        self._emit("}")
+            f'std::string({cpp_string(f.name)}) + ": " + cryo::str(v.{cppid(f.name)})'
+            for f in n.fields)
+        self._emit(f'    return std::string("{{") + {parts or "std::string()"} + "}}";')
+        self._emit("} }")
         self._emit()
 
     def _enum(self, n: EnumDecl):
         if any(m.fields for m in n.members):
             self._err(
                 "enums with data (algebraic data types) are not yet supported "
-                "in the C# backend; use --backend go, node or pyro.")
-        # Constants in a holder class, not a C# `enum`: the member is an
-        # integer VALUE in Cryo (12.9), and a C# enum would render as its name.
-        self._emit(f"public static class {n.name} {{")
+                "in the C++ backend; use --backend go, node or pyro.")
+        # Constants, not an `enum class`: the member is an integer VALUE in
+        # Cryo (12.9), so `print(e)` is "0" and not "A".
         for i, m in enumerate(n.members):
-            self._emit(f"    public const long {m.name} = {i};")
-        self._emit("}")
+            self._emit(f"static const int64_t {n.name}_{m.name} = {i};")
         self._emit()
 
     def _fn(self, n: FunctionDecl):
         if n.type_params:
-            self._err(f"generic function '{n.name}' reached the C# backend "
+            self._err(f"generic function '{n.name}' reached the C++ backend "
                       f"un-monomorphised; this is a compiler bug.")
         self.te.push()
         for pt, pn in n.params:
             self.te.set(pn, pt)
-        params = ', '.join(f"{cs_type(pt)} {csid(pn)}" for pt, pn in n.params)
-        ret = cs_type(n.return_type or 'void')
-        self._emit(f"public static {ret} {csid(n.name)}({params}) {{")
+        params = ', '.join(f"{cpp_type(pt)} {cppid(pn)}" for pt, pn in n.params)
+        ret = cpp_type(n.return_type or 'void')
+        self._emit(f"{ret} {cppid(n.name)}({params}) {{")
         self._indent += 1
         for s in n.body:
             self._gen(s)
@@ -526,48 +500,61 @@ class CodeGenCSharp:
     def _module_var(self, n: VarDecl):
         t = n.var_type or self.te.infer(n.value)
         self.te.set(n.name, t)
-        self._fields.append(f"    static {cs_type(t)} {csid(n.name)};")
+        self._globals.append(f"static {cpp_type(t)} {cppid(n.name)};")
         if n.value is not None:
-            self._cur, self._indent = self._main, 2
-            self._emit(f"{csid(n.name)} = {self._expr_typed(n.value, t)};")
+            # The initialiser runs in main, in source order: it may call a
+            # function or read another module variable, and a static
+            # initialiser's order across translation units is not something to
+            # depend on even in one file.
+            self._cur, self._indent = self._main, 1
+            self._emit(f"{cppid(n.name)} = {self._expr_typed(n.value, t)};")
 
     def _var(self, n: VarDecl):
         t = n.var_type or self.te.infer(n.value)
         self.te.set(n.name, t)
         if n.value is None:
-            self._emit(f"{cs_type(t)} {csid(n.name)};")
+            self._emit(f"{cpp_type(t)} {cppid(n.name)} = {self._zero(t)};")
         else:
-            self._emit(f"{cs_type(t)} {csid(n.name)} = {self._expr_typed(n.value, t)};")
+            self._emit(f"{cpp_type(t)} {cppid(n.name)} = "
+                       f"{self._expr_typed(n.value, t)};")
+
+    def _zero(self, t: str) -> str:
+        if t == 'int':
+            return '0'
+        if t == 'number':
+            return '0.0'
+        if t == 'bool':
+            return 'false'
+        if t == 'string':
+            return 'std::string()'
+        return f"{cpp_type(t)}()"
 
     def _const(self, n: ConstDecl):
         t = n.var_type or self.te.infer(n.value)
         self.te.set(n.name, t)
-        self._fields.append(
-            f"    static readonly {cs_type(t)} {csid(n.name)} = "
+        self._globals.append(
+            f"static const {cpp_type(t)} {cppid(n.name)} = "
             f"{self._expr_typed(n.value, t)};")
 
     def _assign(self, n: Assignment):
         t = self.te.get(n.name)
-        self._emit(f"{csid(n.name)} = {self._expr_typed(n.value, t)};")
+        self._emit(f"{cppid(n.name)} = {self._expr_typed(n.value, t)};")
 
     def _compound(self, n: CompoundAssignment):
-        # `/=` and `%=` on ints have to go through the checked helpers, or a
-        # zero divisor throws a .NET exception instead of the VM's abort.
         t = self.te.get(n.name)
         if t == 'int' and n.op in ('/=', '%='):
-            fn = 'Cryo.IDiv' if n.op == '/=' else 'Cryo.IMod'
-            self._emit(f"{csid(n.name)} = {fn}({csid(n.name)}, {self._expr(n.value)});")
+            fn = 'cryo::idiv' if n.op == '/=' else 'cryo::imod'
+            self._emit(f"{cppid(n.name)} = {fn}({cppid(n.name)}, "
+                       f"{self._expr(n.value)});")
             return
-        self._emit(f"{csid(n.name)} {n.op} {self._expr(n.value)};")
+        self._emit(f"{cppid(n.name)} {n.op} {self._expr(n.value)};")
 
     def _incr(self, n: Increment):
-        self._emit(f"{csid(n.name)}{n.op};")
+        self._emit(f"{cppid(n.name)}{n.op};")
 
     def _return(self, n: Return):
-        if n.value is None:
-            self._emit("return;")
-        else:
-            self._emit(f"return {self._expr(n.value)};")
+        self._emit("return;" if n.value is None
+                   else f"return {self._expr(n.value)};")
 
     def _if(self, n: If):
         self._emit(f"if ({self._truthy(n.condition)}) {{")
@@ -630,14 +617,14 @@ class CodeGenCSharp:
         if isinstance(node, VarDecl):
             t = node.var_type or self.te.infer(node.value)
             self.te.set(node.name, t)
-            return (f"{cs_type(t)} {csid(node.name)} = "
+            return (f"{cpp_type(t)} {cppid(node.name)} = "
                     f"{self._expr_typed(node.value, t)}")
         if isinstance(node, Assignment):
-            return f"{csid(node.name)} = {self._expr(node.value)}"
+            return f"{cppid(node.name)} = {self._expr(node.value)}"
         if isinstance(node, CompoundAssignment):
-            return f"{csid(node.name)} {node.op} {self._expr(node.value)}"
+            return f"{cppid(node.name)} {node.op} {self._expr(node.value)}"
         if isinstance(node, Increment):
-            return f"{csid(node.name)}{node.op}"
+            return f"{cppid(node.name)}{node.op}"
         return self._expr(node)
 
     def _foreach(self, n: ForEach):
@@ -645,17 +632,19 @@ class CodeGenCSharp:
         vt = n.var_type or (elem_type(it) if it != 'string' else 'string')
         self.te.push()
         self.te.set(n.var_name, vt)
+        tmp = self._next_tmp()
         if it == 'string':
             # A Cryo string iterates by CHARACTER as a one-character string;
-            # C# would hand back a `char`, which renders as the character but
-            # is a different type everywhere else.
-            tmp = self._next_tmp()
-            self._emit(f"foreach (var {tmp} in {self._expr(n.iterable)}) {{")
+            # C++ would hand back a char, which prints as a number through
+            # ostream in some contexts and is a different type everywhere.
+            self._emit(f"for (char {tmp} : {self._expr(n.iterable)}) {{")
             self._indent += 1
-            self._emit(f"string {csid(n.var_name)} = {tmp}.ToString();")
+            self._emit(f"std::string {cppid(n.var_name)} = std::string(1, {tmp});")
         else:
-            self._emit(f"foreach ({cs_type(vt)} {csid(n.var_name)} in "
-                       f"{self._expr(n.iterable)}) {{")
+            # By const reference: the container is shared, and copying every
+            # element would be both slower and a different object.
+            self._emit(f"for (const {cpp_type(vt)}& {cppid(n.var_name)} : "
+                       f"*({self._expr(n.iterable)})) {{")
             self._indent += 1
         self._loop_depth += 1
         for s in n.body:
@@ -676,18 +665,17 @@ class CodeGenCSharp:
         self._emit("continue;")
 
     def _switch(self, n: Switch):
+        # An if/else chain, not a C++ `switch`: Cryo has no fall-through, and a
+        # case label must be a compile-time constant in C++ while a Cryo case
+        # value can be a variable.
         subj = self._expr(n.subject)
         st = self.te.infer(n.subject)
         tmp = self._next_tmp()
-        self._emit(f"{cs_type(st if st != 'unknown' else 'int')} {tmp} = {subj};")
+        self._emit(f"{cpp_type(st if st != 'unknown' else 'int')} {tmp} = {subj};")
         first = True
         for case in n.cases:
-            # Cryo has no fall-through, so each arm is an if/else — a C#
-            # `switch` would need a `break` per arm and reject a non-constant
-            # label, which an enum member reached through a variable is.
             cond = ' || '.join(f"{tmp} == {self._expr(v)}" for v in case.values)
-            self._emit(f"{'if' if first else '} else if'} ({cond}) {{"
-                       if first else f"}} else if ({cond}) {{")
+            self._emit(f"if ({cond}) {{" if first else f"}} else if ({cond}) {{")
             first = False
             self._indent += 1
             self.te.push()
@@ -696,10 +684,7 @@ class CodeGenCSharp:
             self.te.pop()
             self._indent -= 1
         if n.default_body:
-            if first:
-                self._emit("{")
-            else:
-                self._emit("} else {")
+            self._emit("{" if first else "} else {")
             self._indent += 1
             self.te.push()
             for s in n.default_body:
@@ -711,12 +696,12 @@ class CodeGenCSharp:
             self._emit("}")
 
     def _assert(self, n: Assert):
-        # 12.12 — the message is evaluated ONLY on the failing path, and the
-        # value a catch binds is the message string, not an exception object.
+        # 12.12 — the message is evaluated ONLY on the failing path, and what a
+        # catch binds is the message string.
         msg = (self._to_str(n.message) if getattr(n, 'message', None) is not None
-               else cs_string(f"assert failed (line {getattr(n, 'line', 0)})"))
+               else cpp_string(f"assert failed (line {getattr(n, 'line', 0)})"))
         self._emit(f"if (!({self._truthy(n.condition)}))")
-        self._emit(f"    throw new CryoThrow(\"[Cryo Assert] \" + ({msg}));")
+        self._emit(f'    throw cryo::Thrown(std::string("[Cryo Assert] ") + ({msg}));')
 
     def _safety(self, n: SafetyBlock):
         self._safe_stack.append(bool(getattr(n, 'safe', True)))
@@ -745,70 +730,73 @@ class CodeGenCSharp:
         self.te.pop()
         self._indent -= 1
         tmp = self._next_tmp()
-        self._emit(f"}} catch (CryoThrow {tmp}) {{")
+        self._emit(f"}} catch (const cryo::Thrown& {tmp}) {{")
         self._indent += 1
         self.te.push()
-        if n.catch_name:
+        if getattr(n, 'catch_name', None):
             self.te.set(n.catch_name, 'string')
-            self._emit(f"string {csid(n.catch_name)} = {tmp}.Value;")
-        for s in n.catch_body:
+            self._emit(f"std::string {cppid(n.catch_name)} = {tmp}.value;")
+        for s in (n.catch_body or []):
             self._gen(s)
         self.te.pop()
         self._indent -= 1
+        self._emit("}")
         if getattr(n, 'finally_body', None):
-            self._emit("} finally {")
+            # C++ has no `finally`. The body is emitted after the try/catch,
+            # which is the same thing here because a Cryo catch does not
+            # rethrow and there is no early return out of a try in this subset.
+            self._emit("{")
             self._indent += 1
             self.te.push()
             for s in n.finally_body:
                 self._gen(s)
             self.te.pop()
             self._indent -= 1
-        self._emit("}")
+            self._emit("}")
 
     def _index_assign(self, n: IndexAssignment):
         ot = self.te.infer(n.obj)
         obj, idx, val = self._expr(n.obj), self._expr(n.index), self._expr(n.value)
         if is_map(ot):
-            self._emit(f"{obj}[{idx}] = {val};")
+            self._emit(f"cryo::map_set({obj}, {idx}, {val});")
         else:
-            self._emit(f"Cryo.SetAt({obj}, {idx}, {val});")
+            self._emit(f"cryo::set_at({obj}, {idx}, {val});")
 
     def _import(self, n: Import):
         self._emit(f"// [Cryo] import >{n.lang}<")
 
     def _library(self, n: Library):
         lang = resolve_library_lang(n, self._imported_langs)
-        if lang in _CS_LANGS:
-            # `library >C# System.Text.Json<` -> `using System.Text.Json;`
-            self._usings.add(n.name)
-            self._emit(f"// [Cryo] library >{n.lang or 'C#'} {n.name}< -> using")
+        if lang in _CPP_LANGS:
+            # `library >C++ vector<` -> `#include <vector>`
+            self._includes.add(n.name)
+            self._emit(f"// [Cryo] library >{n.lang or 'C++'} {n.name}< -> #include")
         else:
             self._emit(f"// [Cryo] library >{n.name}< (language {lang or '?'}) "
-                       f"ignored in the C# backend")
+                       f"ignored in the C++ backend")
 
     def _foreign(self, n: ForeignBlock):
         lang = (n.lang or '').strip().lower()
-        if lang in _CS_LANGS:
+        if lang in _CPP_LANGS:
             self._emit(f"// -- [{n.lang} block] --")
             for line in n.code.strip().split('\n'):
                 self._emit(line.strip())
             self._emit(f"// -- [/{n.lang} block] --")
         elif lang in ('html', 'css'):
             self._err(
-                f"'>{n.lang}(' blocks build a page and the C# backend does not "
+                f"'>{n.lang}(' blocks build a page and the C++ backend does not "
                 f"render one. Use --backend frontend (or --backend auto).")
         else:
-            self._emit(f"// [Cryo] >{n.lang}< block omitted in the C# backend "
-                       f"(use >C#( ... ))")
+            self._emit(f"// [Cryo] >{n.lang}< block omitted in the C++ backend "
+                       f"(use >C++( ... ))")
 
     # ── expressions ──────────────────────────────────────────
 
     def _truthy(self, node: Node) -> str:
-        """A condition as a C# bool.
+        """A condition as a C++ bool.
 
-        Cryo's truthiness is wider than C#'s: 0, "" and null are falsy. A
-        condition that is already a comparison needs none of that, so the
-        wrapper is only applied where the type says it could matter.
+        Cryo's truthiness is wider than C++'s for strings and containers: "" is
+        falsy, and a shared_ptr is truthy only when it holds something.
         """
         t = self.te.infer(node)
         e = self._expr(node)
@@ -819,46 +807,48 @@ class CodeGenCSharp:
         if t == 'number':
             return f"(({e}) != 0.0)"
         if t == 'string':
-            return f"(!string.IsNullOrEmpty({e}))"
-        if is_optional(t) or t in ('null',):
-            return f"(({e}) != null)"
+            return f"(!({e}).empty())"
+        if is_optional(t) or t == 'null':
+            return f"((bool)({e}))"
         return e
 
     def _to_str(self, node: Node) -> str:
         t = self.te.infer(node)
         e = self._expr(node)
-        if t == 'string':
-            return e
-        return f"Cryo.Str({e})"
+        return e if t == 'string' else f"cryo::str({e})"
 
     def _expr_typed(self, node: Node, target: str) -> str:
         """An expression with the target type in hand.
 
-        Two things need it. A bare `null` has no type of its own, and an empty
-        `[]` or `{}` has no element type — both would otherwise reach C# as
-        something it cannot infer, and `var` is not available in a field
-        declaration.
+        A bare `null` and an empty `[]` / `{}` have no type of their own, and
+        C++ will not deduce one from the assignment target the way a dynamic
+        backend does.
         """
         if isinstance(node, Literal) and node.kind == 'null':
-            if target and is_optional(target) and opt_base(target) == 'string':
-                return "(string)null"
-            return "null"
-        if isinstance(node, ArrayLiteral) and not node.elements and target:
-            return f"new {cs_type(target)}()"
-        if isinstance(node, MapLiteral) and not node.pairs and target:
-            return f"new {cs_type(target)}()"
+            return f"{cpp_type(target)}()" if target else "nullptr"
+        if isinstance(node, ArrayLiteral) and not node.elements:
+            et = elem_type(target) if target else 'int'
+            return f"cryo::arr<{cpp_type(et)}>()"
+        if isinstance(node, MapLiteral) and not node.pairs:
+            k, v = map_kv(target) if is_map(target) else ('string', 'int')
+            return f"cryo::mapof<{cpp_type(k)}, {cpp_type(v)}>()"
         if isinstance(node, ArrayLiteral) and target and target.endswith('[]'):
             et = target[:-2]
             items = ', '.join(self._expr_typed(x, et) for x in node.elements)
-            return f"new {cs_type(target)} {{ {items} }}"
+            return (f"cryo::arr<{cpp_type(et)}>(std::vector<{cpp_type(et)}>"
+                    f"{{ {items} }})")
         if isinstance(node, MapLiteral) and target and is_map(target):
             kt, vt = map_kv(target)
             parts = ', '.join(
                 f"{{ {self._expr_typed(k, kt)}, {self._expr_typed(v, vt)} }}"
                 for k, v in node.pairs)
-            return f"new {cs_type(target)} {{ {parts} }}"
-        # An int literal landing in a `number` slot has to become a double, or
-        # C# picks integer division for `1 / 2` inside it.
+            return (f"cryo::mapof<{cpp_type(kt)}, {cpp_type(vt)}>("
+                    f"std::map<{cpp_type(kt)}, {cpp_type(vt)}>{{ {parts} }})")
+        # An optional slot taking a present value has to be wrapped.
+        if target and is_optional(target) and not _is_null(node, self.te.infer(node)):
+            it = self.te.infer(node)
+            if not is_optional(it):
+                return f"cryo::opt<{cpp_type(opt_base(target))}>({self._expr(node)})"
         if target == 'number' and self.te.infer(node) == 'int':
             return f"(double)({self._expr(node)})"
         return self._expr(node)
@@ -866,17 +856,16 @@ class CodeGenCSharp:
     def _expr(self, node: Node) -> str:
         if isinstance(node, Literal):
             if node.kind == 'null':
-                return "null"
+                return "nullptr"
             if node.kind == 'bool':
                 return 'true' if node.value else 'false'
             if node.kind == 'string':
-                return cs_string(node.value)
+                return f"std::string({cpp_string(node.value)})"
             if node.kind == 'int':
-                return f"{node.value}L"
+                # INT64_C-style suffix: a bare literal is `int` in C++ and
+                # would overflow silently in 64-bit arithmetic.
+                return f"(int64_t){node.value}"
             if node.kind == 'float':
-                # An integral double still has to be spelled with a decimal
-                # point, or C# types the literal as an int and `2 / 4` in a
-                # number context truncates.
                 v = repr(float(node.value))
                 return v if ('.' in v or 'e' in v or 'E' in v) else v + '.0'
             return str(node.value)
@@ -885,7 +874,7 @@ class CodeGenCSharp:
             m = self._plain_enum_member.get(node.name)
             if m and self.te.get(node.name) == 'unknown':
                 return m
-            return csid(node.name)
+            return cppid(node.name)
 
         if isinstance(node, BinaryExpr):
             return self._binary(node)
@@ -902,52 +891,56 @@ class CodeGenCSharp:
 
         if isinstance(node, UnwrapExpr):
             inner = getattr(node, 'operand', None) or getattr(node, 'expr', None)
-            t = self.te.infer(inner)
-            base = opt_base(t)
-            if base == 'string' or not is_optional(t):
-                return f"Cryo.UnwrapS({self._expr(inner)})"
-            return f"Cryo.Unwrap({self._expr(inner)})"
+            return f"cryo::unwrap({self._expr(inner)})"
 
         if isinstance(node, FieldAccess):
             if node.field == 'length':
-                return f"Cryo.Str({self._expr(node.obj)}).Length"
-            # `Enum.MEMBER` resolves to the C# member; a struct field does not.
-            ot = self.te.infer(node.obj)
-            if isinstance(node.obj, Identifier) and self.te.is_enum(node.obj.name) \
-                    and not self.te.is_struct(ot):
-                return f"{node.obj.name}.{node.field}"
-            return f"{self._expr(node.obj)}.{csid(node.field)}"
+                return f"cryo::len({self._expr(node.obj)})"
+            if isinstance(node.obj, Identifier) and self.te.is_enum(node.obj.name):
+                return f"{node.obj.name}_{node.field}"
+            # A struct is a handle, so field access goes through ->
+            return f"{self._expr(node.obj)}->{cppid(node.field)}"
 
         if isinstance(node, IndexAccess):
             ot = self.te.infer(node.obj)
             obj, idx = self._expr(node.obj), self._expr(node.index)
             if is_map(ot):
-                return f"Cryo.Get({obj}, {idx})"
+                return f"cryo::map_get({obj}, {idx})"
             if ot == 'string':
-                return f"Cryo.CharAt({obj}, {idx})"
-            return f"Cryo.At({obj}, {idx})"
+                return f"cryo::char_at({obj}, {idx})"
+            return f"cryo::at({obj}, {idx})"
 
         if isinstance(node, ArrayLiteral):
             if not node.elements:
-                return "new List<object>()"
+                return "cryo::arr<int64_t>()"
             et = self.te.infer(node.elements[0])
-            items = ', '.join(self._expr(x) for x in node.elements)
-            return f"new List<{cs_type(et)}> {{ {items} }}"
+            items = ', '.join(self._expr_typed(x, et) for x in node.elements)
+            return (f"cryo::arr<{cpp_type(et)}>(std::vector<{cpp_type(et)}>"
+                    f"{{ {items} }})")
 
         if isinstance(node, MapLiteral):
             if not node.pairs:
-                return "new Dictionary<string, object>()"
+                return "cryo::mapof<std::string, int64_t>()"
             kt = self.te.infer(node.pairs[0][0])
             vt = self.te.infer(node.pairs[0][1])
             parts = ', '.join(f"{{ {self._expr(k)}, {self._expr(v)} }}"
                               for k, v in node.pairs)
-            return (f"new Dictionary<{cs_type(kt)}, {cs_type(vt)}> "
-                    f"{{ {parts} }}")
+            return (f"cryo::mapof<{cpp_type(kt)}, {cpp_type(vt)}>("
+                    f"std::map<{cpp_type(kt)}, {cpp_type(vt)}>{{ {parts} }})")
 
         if isinstance(node, StructInit):
-            fields = ', '.join(f"{csid(k)} = {self._expr(v)}"
-                               for k, v in node.fields)
-            return f"new {node.struct_name} {{ {fields} }}"
+            # Field order follows the DECLARATION, not the initialiser, because
+            # a brace-init list in C++ is positional.
+            decl = self.te._structs.get(node.struct_name, {})
+            given = dict(node.fields)
+            vals = []
+            for fname, ftype in decl.items():
+                v = given.get(fname)
+                vals.append(self._expr_typed(v, ftype) if v is not None
+                            else self._zero(ftype))
+            inner = ', '.join(vals)
+            return (f"std::make_shared<{node.struct_name}>("
+                    f"{node.struct_name}{{ {inner} }})")
 
         if isinstance(node, CallExpr):
             return self._call(node)
@@ -956,23 +949,20 @@ class CodeGenCSharp:
             return self._method(node)
 
         if isinstance(node, (SpawnExpr, AwaitExpr)):
-            self._err("concurrency (spawn/await) is not supported in the C# "
+            self._err("concurrency (spawn/await) is not supported in the C++ "
                       "backend; use --backend go or pyro.")
-
         if isinstance(node, (Lambda, CallValueExpr)):
-            self._err("first-class functions are not yet supported in the C# "
+            self._err("first-class functions are not yet supported in the C++ "
                       "backend; use --backend go, node or pyro.")
-
         if isinstance(node, CastExpr):
-            self._err("'as T' (JSON casting) is not yet supported in the C# "
+            self._err("'as T' (JSON casting) is not yet supported in the C++ "
+                      "backend; use --backend go, node or pyro.")
+        if isinstance(node, TryExpr):
+            self._err("propagation '?' is not yet supported in the C++ "
                       "backend; use --backend go, node or pyro.")
 
-        if isinstance(node, TryExpr):
-            self._err("propagation '?' is not yet supported in the C# backend; "
-                      "use --backend go, node or pyro.")
-
-        self._err(f"'{type(node).__name__}' is not supported in the C# backend; "
-                  f"use --backend go, node or pyro.")
+        self._err(f"'{type(node).__name__}' is not supported in the C++ "
+                  f"backend; use --backend go, node or pyro.")
 
     def _binary(self, node: BinaryExpr) -> str:
         op = node.op
@@ -982,17 +972,13 @@ class CodeGenCSharp:
             return f"({self._truthy(node.left)} && {self._truthy(node.right)})"
         if op == '||':
             return f"({self._truthy(node.left)} || {self._truthy(node.right)})"
-
         if op == '??':
-            # C#'s own `??` has the same meaning, and it evaluates its left
-            # side once — which is what 11.27 needed a statement expression for
-            # in C.
-            return f"({self._expr(node.left)} ?? {self._expr(node.right)})"
+            # Evaluates its left side ONCE, which a plain conditional would not
+            # (11.27 hit exactly this in C).
+            return f"cryo::or_else({self._expr(node.left)}, {self._expr(node.right)})"
 
         l, r = self._expr(node.left), self._expr(node.right)
 
-        # String concatenation: the non-string side is rendered, so `"n: " + 2`
-        # gives "n: 2" and not whatever C#'s ToString does with a double.
         if op == '+' and (lt == 'string' or rt == 'string'):
             ls = l if lt == 'string' else self._to_str(node.left)
             rs = r if rt == 'string' else self._to_str(node.right)
@@ -1005,43 +991,36 @@ class CodeGenCSharp:
                     and not is_optional(other) and not other.endswith('[]') \
                     and not is_map(other) and not self.te.is_struct(other):
                 return 'false' if op == '==' else 'true'
+        # A container or optional against null is a pointer test.
+        if op in ('==', '!=') and (_is_null(node.left, lt) or _is_null(node.right, rt)):
+            live = r if _is_null(node.left, lt) else l
+            return f"(({live}) {op} nullptr)"
 
         if op in ('/', '%') and lt == 'int' and rt == 'int':
-            fn = 'Cryo.IDiv' if op == '/' else 'Cryo.IMod'
+            fn = 'cryo::idiv' if op == '/' else 'cryo::imod'
             return f"{fn}({l}, {r})"
+        # C++ has no % for doubles.
+        if op == '%' and (lt == 'number' or rt == 'number'):
+            return f"std::fmod((double)({l}), (double)({r}))"
 
-        # int/number mixing: C# promotes, but an int literal on both sides of
-        # `/` would do integer division inside a number context.
-        if op in ('+', '-', '*', '/', '%') and {lt, rt} == {'int', 'number'}:
+        if op in ('+', '-', '*', '/') and {lt, rt} == {'int', 'number'}:
             if lt == 'int':
                 l = f"(double)({l})"
             if rt == 'int':
                 r = f"(double)({r})"
             return f"({l} {op} {r})"
 
-        # Containers compare by identity, and a struct does too — Cryo's rule
-        # (PYRO_RUNTIME.md), and C#'s default for a class, so nothing to add.
-        if op in ('==', '!=') and lt == 'string' and rt == 'string':
-            eq = "string.Equals(" + l + ", " + r + ", StringComparison.Ordinal)"
-            return eq if op == '==' else f"(!{eq})"
-
         return f"({l} {op} {r})"
 
     def _method(self, node: MethodCallExpr) -> str:
         obj = self._expr(node.obj)
         if node.method == 'push':
-            return f"{obj}.Add({self._expr(node.args[0])})"
+            return f"cryo::push({obj}, {self._expr(node.args[0])})"
         ot = self.te.infer(node.obj)
         self._err(f"method '.{node.method}()' on a value of type '{ot}' is not "
-                  f"supported in the C# backend; use --backend go, node or pyro.")
+                  f"supported in the C++ backend; use --backend go, node or pyro.")
 
     # ── builtin calls ────────────────────────────────────────
-    #
-    # Mapped one at a time rather than through a table, because most need the
-    # ARGUMENT'S TYPE to pick the right form: `sum` over ints and over numbers
-    # are different methods, `slice` is polymorphic over array and string, and
-    # `abs` must not return a long for a double. codegen_c learned the same
-    # lesson the hard way (abs typed 'int' unconditionally truncated -2.5).
 
     def _call(self, node: CallExpr) -> str:
         c = node.callee
@@ -1050,146 +1029,113 @@ class CodeGenCSharp:
         T = lambda i: self.te.infer(a[i])
 
         if c == 'print':
-            if not a:
-                return "Console.WriteLine()"
-            return f"Cryo.Print({E(0)})"
+            return "std::cout << std::endl" if not a else f"cryo::print({E(0)})"
         if c == 'throw' and len(a) == 1:
-            # Modelled as an exception so try/catch works; the VALUE a catch
-            # binds is the message string (12.12), not the exception object.
-            return f"throw new CryoThrow({self._to_str(a[0])})"
+            return f"throw cryo::Thrown({self._to_str(a[0])})"
         if c == 'to_string' and len(a) == 1:
             return self._to_str(a[0])
         if c == 'to_int' and len(a) == 1:
             t = T(0)
             if t == 'string':
-                return f"Cryo.ToInt({E(0)})"
-            return E(0) if t == 'int' else f"((long)({E(0)}))"
+                return f"cryo::to_int({E(0)})"
+            return E(0) if t == 'int' else f"((int64_t)({E(0)}))"
         if c == 'to_number' and len(a) == 1:
             t = T(0)
             if t == 'string':
-                return f"Cryo.ToNum({E(0)})"
+                return f"cryo::to_num({E(0)})"
             return E(0) if t == 'number' else f"((double)({E(0)}))"
-
         if c == 'len' and len(a) == 1:
-            t = T(0)
-            if t == 'string':
-                return f"((long){E(0)}.Length)"
-            if is_map(t):
-                return f"((long){E(0)}.Count)"
-            return f"((long){E(0)}.Count)"
+            return f"cryo::len({E(0)})"
 
         # ── math ──
         if c == 'abs' and len(a) == 1:
-            return (f"System.Math.Abs({E(0)})")
+            return (f"std::llabs({E(0)})" if T(0) == 'int'
+                    else f"std::fabs({E(0)})")
         if c in ('min', 'max') and len(a) == 2:
-            fn = 'System.Math.Min' if c == 'min' else 'System.Math.Max'
+            fn = 'std::min' if c == 'min' else 'std::max'
             if {T(0), T(1)} == {'int', 'number'}:
                 return f"{fn}((double)({E(0)}), (double)({E(1)}))"
             return f"{fn}({E(0)}, {E(1)})"
         if c == 'sqrt' and len(a) == 1:
-            return f"System.Math.Sqrt({E(0)})"
+            return f"std::sqrt((double)({E(0)}))"
         if c == 'pow' and len(a) == 2:
-            return f"System.Math.Pow({E(0)}, {E(1)})"
+            return f"std::pow((double)({E(0)}), (double)({E(1)}))"
         if c == 'hypot' and len(a) == 2:
-            return f"System.Math.Sqrt(({E(0)})*({E(0)}) + ({E(1)})*({E(1)}))"
-        if c in ('floor', 'ceil', 'round') and len(a) == 1:
-            fn = {'floor': 'Floor', 'ceil': 'Ceiling', 'round': 'Round'}[c]
-            if c == 'round':
-                # Away-from-zero, not .NET's banker's rounding: round(2.5) is
-                # 3 on every other backend and would be 2 by default here.
-                return (f"System.Math.Round((double)({E(0)}), "
-                        f"MidpointRounding.AwayFromZero)")
-            return f"System.Math.{fn}((double)({E(0)}))"
+            return f"std::sqrt((double)({E(0)})*(double)({E(0)}) + (double)({E(1)})*(double)({E(1)}))"
+        if c == 'floor' and len(a) == 1:
+            return f"std::floor((double)({E(0)}))"
+        if c == 'ceil' and len(a) == 1:
+            return f"std::ceil((double)({E(0)}))"
+        if c == 'round' and len(a) == 1:
+            return f"cryo::round_half_up((double)({E(0)}))"
         if c == 'sign' and len(a) == 1:
-            return f"Cryo.SignI({E(0)})"
+            return f"cryo::sign_i({E(0)})"
         if c == 'gcd' and len(a) == 2:
-            return f"Cryo.Gcd({E(0)}, {E(1)})"
+            return f"cryo::gcd({E(0)}, {E(1)})"
         if c == 'clamp' and len(a) == 3:
             allint = all(T(i) == 'int' for i in range(3))
-            fn = 'Cryo.ClampI' if allint else 'Cryo.ClampF'
             if allint:
-                return f"{fn}({E(0)}, {E(1)}, {E(2)})"
-            return (f"{fn}((double)({E(0)}), (double)({E(1)}), "
+                return f"cryo::clamp_i({E(0)}, {E(1)}, {E(2)})"
+            return (f"cryo::clamp_f((double)({E(0)}), (double)({E(1)}), "
                     f"(double)({E(2)}))")
 
         # ── strings ──
-        if c == 'upper' and len(a) == 1:
-            return f"{E(0)}.ToUpperInvariant()"
-        if c == 'lower' and len(a) == 1:
-            return f"{E(0)}.ToLowerInvariant()"
-        if c == 'trim' and len(a) == 1:
-            return f"{E(0)}.Trim()"
+        _S1 = {'upper': 'upper', 'lower': 'lower', 'trim': 'trim'}
+        if c in _S1 and len(a) == 1:
+            return f"cryo::{_S1[c]}({E(0)})"
+        _S2 = {'find': 'find', 'starts_with': 'starts_with',
+               'ends_with': 'ends_with', 'repeat': 'repeat', 'split': 'split',
+               'join': 'join'}
+        if c in _S2 and len(a) == 2:
+            return f"cryo::{_S2[c]}({E(0)}, {E(1)})"
         if c == 'contains' and len(a) == 2:
             if T(0) == 'string':
-                return f"{E(0)}.Contains({E(1)})"
-            return f"(Cryo.IndexOf({E(0)}, {E(1)}) >= 0)"
-        if c == 'find' and len(a) == 2:
-            return f"Cryo.Find({E(0)}, {E(1)})"
-        if c == 'starts_with' and len(a) == 2:
-            return f"{E(0)}.StartsWith({E(1)}, StringComparison.Ordinal)"
-        if c == 'ends_with' and len(a) == 2:
-            return f"{E(0)}.EndsWith({E(1)}, StringComparison.Ordinal)"
-        if c == 'repeat' and len(a) == 2:
-            return f"Cryo.Repeat({E(0)}, {E(1)})"
-        if c == 'pad_start' and len(a) == 3:
-            return f"Cryo.PadStart({E(0)}, {E(1)}, {E(2)})"
-        if c == 'pad_end' and len(a) == 3:
-            return f"Cryo.PadEnd({E(0)}, {E(1)}, {E(2)})"
+                return f"cryo::contains({E(0)}, {E(1)})"
+            return f"(cryo::index_of({E(0)}, {E(1)}) >= 0)"
+        if c in ('pad_start', 'pad_end') and len(a) == 3:
+            return f"cryo::{c}({E(0)}, {E(1)}, {E(2)})"
         if c == 'replace' and len(a) == 3:
-            return f"Cryo.ReplaceAll({E(0)}, {E(1)}, {E(2)})"
-        if c == 'split' and len(a) == 2:
-            return f"Cryo.Split({E(0)}, {E(1)})"
-        if c == 'join' and len(a) == 2:
-            return f"Cryo.Join({E(0)}, {E(1)})"
+            return f"cryo::replace_all({E(0)}, {E(1)}, {E(2)})"
         if c == 'substr' and len(a) == 3:
-            return f"Cryo.Substr({E(0)}, {E(1)}, {E(2)})"
+            return f"cryo::substr({E(0)}, {E(1)}, {E(2)})"
 
         # ── collections ──
         if c == 'sort' and len(a) == 1:
-            return f"Cryo.Sorted({E(0)})"
+            return f"cryo::sorted({E(0)})"
         if c == 'reverse' and len(a) == 1:
-            return f"Cryo.Reversed({E(0)})"
+            return f"cryo::reversed({E(0)})"
         if c == 'slice' and len(a) == 3:
-            # Polymorphic over array and string (10.9), and C# is not, so the
-            # inferred operand type picks the helper.
-            fn = 'Cryo.SliceStr' if T(0) == 'string' else 'Cryo.Slice'
+            fn = 'cryo::slice_str' if T(0) == 'string' else 'cryo::slice'
             return f"{fn}({E(0)}, {E(1)}, {E(2)})"
         if c == 'index_of' and len(a) == 2:
-            return f"Cryo.IndexOf({E(0)}, {E(1)})"
+            return f"cryo::index_of({E(0)}, {E(1)})"
         if c == 'count' and len(a) == 2:
-            return f"Cryo.CountOf({E(0)}, {E(1)})"
+            return f"cryo::count_of({E(0)}, {E(1)})"
         if c == 'concat' and len(a) == 2:
-            return f"Cryo.Concat({E(0)}, {E(1)})"
+            return f"cryo::concat({E(0)}, {E(1)})"
         if c == 'sum' and len(a) == 1:
             et = elem_type(T(0))
-            if et == 'number':
-                return f"Cryo.SumF({E(0)})"
-            if et == 'int':
-                return f"Cryo.SumI({E(0)})"
-            self._err(f"'sum()' needs a numeric array in the C# backend "
-                      f"(element type is '{et}').")
+            if et not in ('int', 'number'):
+                self._err(f"'sum()' needs a numeric array in the C++ backend "
+                          f"(element type is '{et}').")
+            return f"cryo::sum({E(0)})"
 
         # ── maps ──
         if c == 'has' and len(a) == 2:
-            return f"Cryo.Has({E(0)}, {E(1)})"
+            return f"cryo::has({E(0)}, {E(1)})"
         if c == 'keys' and len(a) == 1:
-            return f"Cryo.Keys({E(0)})"
+            return f"cryo::keys({E(0)})"
         if c == 'remove' and len(a) == 2:
-            return f"Cryo.Remove({E(0)}, {E(1)})"
-
-        # ── I/O the C# backend can honestly do ──
-        if c == 'input' and not a:
-            return "(Console.ReadLine() ?? \"\")"
+            return f"cryo::remove({E(0)}, {E(1)})"
 
         if c in ('llm', 'agent', 'llm_call', 'llm_try', 'agent_call',
                  'agent_try', 'llm_stream', 'skills', 'skill_get'):
             self._err(f"'{c}()' is part of the LLM layer and is not available "
-                      f"in the C# backend; use --backend go.")
+                      f"in the C++ backend; use --backend go.")
         if c in ('http_get', 'http_post', 'http_serve', 'http_listen',
-                 'http_accept', 'http_respond', 'spawn', 'sleep'):
-            self._err(f"'{c}()' is not yet available in the C# backend; "
+                 'http_accept', 'http_respond', 'sleep', 'input'):
+            self._err(f"'{c}()' is not yet available in the C++ backend; "
                       f"use --backend go or pyro.")
 
-        # a user function
         args = ', '.join(self._expr(x) for x in a)
-        return f"{csid(c)}({args})"
+        return f"{cppid(c)}({args})"
