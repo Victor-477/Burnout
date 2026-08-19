@@ -172,6 +172,8 @@ class TypeEnv:
         self._fns:    Dict[str, str] = {}
         self._fn_params: Dict[str, List[str]] = {}
         self._structs: Dict[str, Dict[str, str]] = {}
+        self._member_to_enum: Dict[str, str] = {}
+        self._zero_arg_enums: Set[str] = set()
         self._enums:  Set[str] = set()
 
     def push(self): self._scopes.append({})
@@ -398,13 +400,9 @@ class CodeGenGo:
                 for m in n.members:
                     self._member_to_enum[m.name] = n.name
                     self._member_to_enum[f"{n.name}_{m.name}"] = n.name
-                    # A variant with data compiles to a constructor function, so
-                    # register its RETURN TYPE (the enum). Without this,
-                    # infer(Ok(x)) is 'unknown' and every context that needs a
-                    # concrete Go type falls back to `any` â€” which does not
-                    # satisfy the enum interface. That is what made
-                    #     Res r = cond ? Ok(x) : Err("e");
-                    # emit `func() any {â€¦}()` and fail to compile.
+                    if not m.fields:
+                        self.te._zero_arg_enums.add(m.name)
+                        self.te._zero_arg_enums.add(f"{n.name}_{m.name}")
                     self.te.reg_fn(m.name, n.name)
                     self.te.reg_fn(f"{n.name}_{m.name}", n.name)
             elif isinstance(n, FunctionDecl):
@@ -2175,11 +2173,14 @@ class CodeGenGo:
             return str(node.value)
 
         if isinstance(node, Identifier):
-            # 12.9 — a bare member of a data-less enum is the Go constant it
-            # was declared as. Without this the emitted `A` was undefined: the
-            # program compiled here and failed in the Go compiler.
+            # 12.9 — a bare member of a data-less enum is the Go constant.
+            # Checked FIRST: such a member is a value, and must not fall into
+            # the constructor path below, which would emit `A()` — a call
+            # against an int constant.
             if self.te.get(node.name) == 'unknown' and node.name in self._plain_enum_member:
                 return self._plain_enum_member[node.name]
+            if node.name in self.te._zero_arg_enums and self.te.get(node.name) == 'unknown':
+                return f"{gid(node.name)}()"
             return gid(node.name)
 
         if isinstance(node, BinaryExpr):

@@ -165,6 +165,7 @@ class CodeGenNode:
         self._indent = 0
         self._ntmp = 0                 # fresh temporaries ('?' propagation)
         self._imported_langs: Set[str] = set()
+        self._zero_arg_enums: Set[str] = set()
 
     # ── util ────────────────────────────────────────────────
     def _emit(self, line: str):
@@ -182,6 +183,12 @@ class CodeGenNode:
                 self._t.structs[n.name] = {f.name: f.field_type for f in n.fields}
             elif isinstance(n, EnumDecl):
                 self._t.enums.add(n.name)
+                has_data = any(len(m.fields) > 0 for m in n.members)
+                if has_data:
+                    for m in n.members:
+                        if not m.fields:
+                            self._zero_arg_enums.add(m.name)
+                            self._zero_arg_enums.add(f"{n.name}_{m.name}")
 
     def generate(self, program: Program) -> str:
         self._imported_langs = collect_imports(program)
@@ -648,6 +655,8 @@ class CodeGenNode:
         if isinstance(n, Literal):
             return self._literal(n)
         if isinstance(n, Identifier):
+            if n.name in self._zero_arg_enums:
+                return f"{jsid(n.name)}()"
             return jsid(n.name)
         if isinstance(n, BinaryExpr):
             return self._binary(n)

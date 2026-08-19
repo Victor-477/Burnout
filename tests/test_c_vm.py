@@ -173,6 +173,34 @@ def test_parity():
         ("catch-throw",  'try { throw("x"); } catch (string e) { print("cap: " + e); }', []),
         ("catch-assert", 'try { assert(false, "boom"); } catch (string e) { print(e); }', []),
         ("catch-unwrap", 'try { int? z = null; int y = z!; print(y); } catch (string e) { print(e); }', []),
+        # Runaway recursion (13.4 / 14.1). Written for 14.1's parity test and
+        # it FAILED, on a real divergence: the C VM bounds the CALL stack and
+        # the Go VM did not bound it at all.
+        #
+        #   C VM   `static Frame frames[4096]` (main.c:57) guarded at
+        #          `fp > 4094` (main.c:574, main.c:632) ->
+        #          "call stack overflow (runaway recursion?)" at 4095 frames
+        #   Go VM  had NO call-stack guard; `frames` was an unbounded append,
+        #          so it ran on to the VALUE stack ceiling and aborted at
+        #          65531 frames with "value stack overflow" instead.
+        #
+        # A different message, a 16x different depth, and traces of ~4095 vs
+        # 65531 lines — which this suite compares byte for byte.
+        #
+        # FIXED in the Go VM (main.go): checkFrames/checkHandlers now mirror
+        # main.c's two guards, in main.c's `> max-2` shape so both engines
+        # abort while pushing the SAME call and print the same number of trace
+        # lines. Measured on the Go side afterwards: 4095 frames, exit 1,
+        # "malformed .pyro: call stack overflow (runaway recursion?)" — the C
+        # VM's exact wording.
+        #
+        # The C side of this row is still UNVERIFIED: there is no C toolchain
+        # on the machine it was written on, so the 4095 above is derived by
+        # reading main.c's guard, not by running it. That is precisely what
+        # 14.1's CI exists to settle, and this row is one of the things it
+        # settles.
+        ("deep-recursion", 'fn deep(int n) -> int ={ if (n <= 0) { return 0; } '
+                           'return 1 + deep(n - 1); } print(deep(100000));', []),
     ]
     print("\n-- abort parity (stdout+stderr+exit) --")
     for name, src, extra in aborts:
