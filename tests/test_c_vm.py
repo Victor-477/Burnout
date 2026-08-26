@@ -160,6 +160,16 @@ def test_parity():
     # Programs that abort must produce identical messages/stack traces
     # in both VMs — the loop above only covers clean executions.
     C_VM = os.path.join(_root, "Pyro", "vm", "pyrovm.exe")
+    # 30 chained locals, built rather than written out: the count is the whole
+    # point and thirty near-identical declarations would bury it. Each depends
+    # on the one before so the optimizer cannot drop them — a first attempt used
+    # twenty independent `int vN = N;` and the optimizer folded every one away,
+    # leaving locals=1 and a program that proved nothing.
+    _deep_locals = ("fn deep(int n) -> int ={ int v0 = n; "
+                    + " ".join(f"int v{i} = v{i-1} + 1;" for i in range(1, 30))
+                    + " if (n <= 0) { return 0; } "
+                      "return 1 + deep(n - 1) + (v29 - v29); } "
+                      "print(deep(100000));")
     aborts = [
         ("div-zero",     'int x = 10; int y = 0; print(x / y);', []),
         ("array-oob",    'int[] a = [1, 2]; print(a[5]);', []),
@@ -201,6 +211,24 @@ def test_parity():
         # settles.
         ("deep-recursion", 'fn deep(int n) -> int ={ if (n <= 0) { return 0; } '
                            'return 1 + deep(n - 1); } print(deep(100000));', []),
+        # The same recursion with 31 slots per frame, which trips a DIFFERENT
+        # limit — and one that, until this was written, existed in neither VM.
+        #
+        # The C VM carves every frame's locals out of one
+        # `static Value locals_stack[65536]` (main.c:63) and bounded none of the
+        # writes. Capping the frame stack at 4095 is what made this reachable:
+        # 4095 frames only fit inside 65536 slots while a frame stays under ~16
+        # locals, and a function with 31 puts `next_base` past the end at ~2114
+        # deep. Not malformed bytecode — an ordinary recursive function with
+        # thirty variables, silently writing past a static array.
+        #
+        # Both VMs now check before the writes, at `base + nlocals > 65534`, and
+        # before their frame guard, so whichever limit a recursion reaches first
+        # is the one that reports. Go measured afterwards: 2115 frames, exit 1,
+        # "malformed .pyro: locals stack overflow (runaway recursion?)". The C
+        # side is again derived from main.c rather than run, which is what 14.1's
+        # runner is for.
+        ("deep-recursion-locals", _deep_locals, []),
     ]
     print("\n-- abort parity (stdout+stderr+exit) --")
     for name, src, extra in aborts:
