@@ -93,6 +93,36 @@ def run_backend(work, src, backend, expect_fail=False):
                                timeout=900, cwd=work)
             if r.returncode != 0 and not expect_fail:
                 return '<go build failed> ' + r.stderr.strip()[:160]
+        elif backend == 'csharp':
+            # The .NET SDK needs a project rather than a loose file; the
+            # compiler builds one beside the .cs, and reusing that helper keeps
+            # the test and the CLI on a single code path.
+            if not shutil.which('dotnet'):
+                return None
+            out = os.path.join(work, 'p.cs')
+            if _compile(work, src, 'csharp', out).returncode != 0:
+                return '<compile failed>'
+            sys.path.insert(0, os.path.join(ROOT, 'Burnout'))
+            sys.path.insert(0, os.path.join(ROOT, 'Cryo'))
+            import compiler as _c
+            proj = _c._csharp_project(out)
+            if proj is None:
+                return None
+            r = subprocess.run(['dotnet', 'run', '--project', proj,
+                                '-v', 'quiet', '--nologo'],
+                               capture_output=True, text=True, timeout=600)
+        elif backend == 'cpp':
+            cxx = next((c for c in ('g++', 'clang++', 'c++')
+                        if shutil.which(c)), None)
+            if cxx is None:
+                return None
+            out = os.path.join(work, 'p.cpp')
+            if _compile(work, src, 'cpp', out).returncode != 0:
+                return '<compile failed>'
+            exe = os.path.splitext(out)[0] + EXE
+            if not os.path.isfile(exe):
+                return '<compile failed>'
+            r = subprocess.run([exe], capture_output=True, text=True, timeout=300)
         elif backend == 'c':
             if not shutil.which('gcc'):
                 return None
@@ -688,6 +718,74 @@ agree("\\r is a carriage return, not the letter r",
 agree("a user function of the same name still wins",
       'fn chars(string s) -> int ={ return len(s); }\nprint(chars("abcd"));\n',
       backends=_S135, expect="4")
+
+
+# ── C# and C++ backends: the two newest targets ──────────────
+#
+# `csharp` joins the runnable backends here, so every case above that lists it
+# is a real output comparison. `cpp` cannot be run on a machine without a C++
+# compiler, and `agree()` skips a backend it cannot run rather than failing —
+# which is the right behaviour and also means a cpp entry proves nothing on
+# such a machine. Its coverage is the generation checks further down instead.
+print("\n── C# / C++ backends ──")
+_NEW = ('pyro', 'node', 'go', 'csharp')
+
+agree("scalars render identically",
+      'int a = 5;\nnumber f = 2.5;\nstring s = "hi";\nbool b = true;\n'
+      'print(a);\nprint(f);\nprint(s);\nprint(b);\n',
+      backends=_NEW, expect="5\n2.5\nhi\ntrue")
+# A float with no fractional part prints as an integer, and a locale with a
+# comma decimal separator must not change that — the C# project pins
+# InvariantGlobalization for exactly this line.
+agree("a whole number prints without a fraction",
+      "number[] f = [1.5, 2.0];\nprint(f);\nnumber g = 4.0;\nprint(g);\n",
+      backends=_NEW, expect="[1.5, 2]\n4")
+agree("containers render in the VM's notation",
+      'int[] a = [0, 1, 2];\nstring[] s = ["x", "y"];\n'
+      'map<string,int> m = {"b": 2, "a": 1};\n'
+      'print(a);\nprint(s);\nprint(m);\nprint(keys(m));\n',
+      backends=_NEW, expect="[0, 1, 2]\n[x, y]\n{a: 1, b: 2}\n[a, b]")
+# Int keys order by TEXT, not numerically. It looks wrong and it is what the
+# VM does; a Dictionary iterated in its own order would print 1, 2, 10.
+agree("map keys order by their text",
+      'map<int,string> m = {2: "two", 1: "one", 10: "ten"};\nprint(m);\n',
+      backends=_NEW, expect="{1: one, 10: ten, 2: two}")
+# A struct renders as a map of its field names (PYRO_RUNTIME 3.1). C# printed
+# the TYPE NAME here until it was given a ToString — the same class of bug as
+# Go's fmt.Sprint giving "[0 1 2]" for an array.
+agree("a struct renders as a map of its fields",
+      "struct P { int x; int y; }\nP p = new P { x: 1, y: 2 };\n"
+      "print(p);\nprint(p.x);\n",
+      backends=_NEW, expect="{x: 1, y: 2}\n1")
+# 12.9 — a payload-less member is an INTEGER. A C# `enum` would have rendered
+# "A", which is why they lower to constants.
+agree("a payload-less enum member is its integer",
+      "enum E { A, B }\nE e = A;\nprint(e);\nE f = B;\nprint(f);\n",
+      backends=_NEW, expect="0\n1")
+agree("optionals and ?? behave",
+      'int? a = null;\nint? b = 3;\nprint(a ?? 7);\nprint(b ?? 7);\nprint(b!);\n'
+      'print(a == null);\nprint(b == null);\n',
+      backends=_NEW, expect="7\n3\n3\ntrue\nfalse")
+agree("ISSUES/18 holds on the new backends too",
+      'map<string,int> m = {"a": 1};\nint[] xs = [1];\nstring s = "";\nint z = 0;\n'
+      'print(m == null);\nprint(xs == null);\nprint(s == null);\nprint(z == null);\n'
+      'print(null == null);\n',
+      backends=_NEW, expect="false\nfalse\nfalse\nfalse\ntrue")
+agree("ISSUES/17 holds on the new backends too",
+      'print(replace("abc", "", "-"));\nprint(replace("", "", "-"));\n',
+      backends=_NEW, expect="-a-b-c-\n-")
+agree("13.5's string builtins reach them as well",
+      'print(lines("a\\r\\nb\\n"));\nprint(chars("abc"));\n'
+      'print(title_case("hELLO wORLD"));\nprint("[" + trim_start("  hi") + "]");\n',
+      backends=_NEW, expect="[a, b]\n[a, b, c]\nHello World\n[hi]")
+agree("integer division truncates and modulo agrees",
+      "int a = 7;\nint b = 2;\nprint(a / b);\nprint(a % b);\n"
+      "print((0 - 7) / 2);\n",
+      backends=_NEW, expect="3\n1\n-3")
+agree("try/catch binds the message string",
+      'try { throw("boom"); } catch (string e) { print("caught: " + e); }\n',
+      backends=_NEW, expect="caught: boom")
+
 
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))

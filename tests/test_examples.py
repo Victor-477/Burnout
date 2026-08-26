@@ -91,6 +91,10 @@ def available(backend):
         return shutil.which('go') is not None
     if backend == 'c':
         return any(shutil.which(c) for c in ('gcc', 'clang', 'cc'))
+    if backend == 'csharp':
+        return shutil.which('dotnet') is not None
+    if backend == 'cpp':
+        return any(shutil.which(c) for c in ('g++', 'clang++', 'c++'))
     return False
 
 
@@ -130,11 +134,22 @@ def run_artifact(out, backend, work, timeout=120):
             cmd = ['node', out]
         elif backend == 'go':
             cmd = ['go', 'run', out]
-        elif backend == 'c':
+        elif backend in ('c', 'cpp'):
             exe = os.path.splitext(out)[0] + EXE
             if not os.path.isfile(exe):
                 return False, '<no binary>'
             cmd = [exe]
+        elif backend == 'csharp':
+            # The SDK wants a project, not a loose file; the compiler builds one
+            # beside the .cs and this reuses that helper rather than repeating
+            # the .csproj here, where it would drift.
+            sys.path.insert(0, os.path.join(ROOT, 'Burnout'))
+            sys.path.insert(0, os.path.join(ROOT, 'Cryo'))
+            import compiler as _c
+            proj = _c._csharp_project(out)
+            if proj is None:
+                return False, '<no dotnet>'
+            cmd = ['dotnet', 'run', '--project', proj, '-v', 'quiet', '--nologo']
         else:
             return False, '<not runnable>'
         r = subprocess.run(cmd, capture_output=True, text=True, encoding='utf-8',
@@ -148,7 +163,8 @@ def run_artifact(out, backend, work, timeout=120):
 
 def ext_for(backend):
     return {'pyro': '.pyro', 'node': '.js', 'go': '.go', 'c': '.c',
-            'asm': '.s', 'wasm': '.wasm'}[backend]
+            'asm': '.s', 'wasm': '.wasm', 'csharp': '.cs',
+            'cpp': '.cpp'}[backend]
 
 
 def runnable_source(path):
@@ -308,7 +324,7 @@ def main():
     ap.add_argument('--only', help='limit to examples whose name contains this')
     args = ap.parse_args()
 
-    backends = ['pyro', 'node', 'go', 'c'] if args.full else \
+    backends = ['pyro', 'node', 'go', 'c', 'csharp', 'cpp'] if args.full else \
         [b.strip() for b in args.backends.split(',') if b.strip()]
     missing = [b for b in backends if not available(b)]
     backends = [b for b in backends if available(b)]
