@@ -457,15 +457,23 @@ class CodeGenCpp:
             self._emit(f"    {cpp_type(f.field_type)} {cppid(f.name)};")
         self._emit("};")
         # Its own str(), because a struct renders as a MAP of its field names
-        # (PYRO_RUNTIME §3.1) and the generic shared_ptr overload cannot know
-        # them. More specialised than the template, so it wins overload
-        # resolution.
-        self._emit(f"namespace cryo {{ inline std::string str(const {n.name}& v) {{")
+        # (PYRO_RUNTIME 3.1) and the generic shared_ptr overload cannot know
+        # them.
+        #
+        # In the GLOBAL namespace, NOT in cryo. The header's
+        # `str(shared_ptr<T>)` calls `str(*p)` unqualified, and unqualified
+        # lookup for that runs at the template's DEFINITION point — where a
+        # struct declared later in the generated file does not exist yet.
+        # What does reach it is ADL, and ADL searches the ARGUMENT's
+        # namespace, which for a generated struct is the global one. Put this
+        # inside namespace cryo and every `print(aStruct)` fails to compile
+        # with "no matching function for call to str(P&)".
+        self._emit(f"inline std::string str(const {n.name}& v) {{")
         parts = ' + ", " + '.join(
             f'std::string({cpp_string(f.name)}) + ": " + cryo::str(v.{cppid(f.name)})'
             for f in n.fields)
         self._emit(f'    return std::string("{{") + {parts or "std::string()"} + "}}";')
-        self._emit("} }")
+        self._emit("}")
         self._emit()
 
     def _enum(self, n: EnumDecl):
@@ -987,7 +995,11 @@ class CodeGenCpp:
         # ISSUES/18 — a value with no null to be, compared against null.
         if op in ('==', '!=') and (_is_null(node.left, lt) != _is_null(node.right, rt)):
             other = rt if _is_null(node.left, lt) else lt
-            if other not in ('unknown', 'any', 'null', 'string') \
+            # 'string' is absent here on purpose, and present in the C#
+            # backend's list: a std::string cannot be null, so `s == null`
+            # folds to false like any other value with no null to be,
+            # whereas a C# string is a nullable reference.
+            if other not in ('unknown', 'any', 'null') \
                     and not is_optional(other) and not other.endswith('[]') \
                     and not is_map(other) and not self.te.is_struct(other):
                 return 'false' if op == '==' else 'true'

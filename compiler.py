@@ -168,6 +168,42 @@ def _csharp_project(cs_path: str):
     return proj
 
 
+_CXX_DIRS = (
+    r'C:\MinGW\bin',
+    r'C:\msys64\mingw64\bin',
+    r'C:\msys64\ucrt64\bin',
+    r'C:\mingw64\bin',
+    r'C:\Program Files\LLVM\bin',
+)
+
+
+def find_cxx():
+    """(compiler, extra_path_dir) for the C++ backend, or (None, None).
+
+    PATH first. Failing that, the handful of places a Windows C++ toolchain
+    actually installs itself — a MinGW that is present but not on PATH is the
+    normal state of a Windows box, and refusing to build there sends the user
+    off to fix their environment for something this can just find.
+
+    The directory is returned as well as the compiler, because it has to go on
+    PATH for the CHILD process: gcc's real front end (cc1plus) lives in
+    libexec/ and loads its DLLs from bin/, so without bin/ on PATH it exits 127
+    with no diagnostic at all — the failure looks like a broken compiler rather
+    than a missing directory, which cost an afternoon to work out once.
+    """
+    import shutil
+    for c in ('g++', 'clang++', 'c++'):
+        found = shutil.which(c)
+        if found:
+            return found, None
+    for d in _CXX_DIRS:
+        for c in ('g++.exe', 'clang++.exe'):
+            p = os.path.join(d, c)
+            if os.path.isfile(p):
+                return p, d
+    return None, None
+
+
 def default_abi() -> str:
     """Default ABI of the asm backend depending on the platform."""
     return 'win64' if sys.platform == 'win32' else 'sysv'
@@ -592,6 +628,7 @@ def compile_file(input_path: str,
         return output_path
 
     # ── assemble/compile binary ──
+    build_env = None      # only the cpp branch needs a widened PATH
     bin_path     = os.path.abspath(os.path.splitext(output_path)[0])
     if sys.platform == 'win32':
         bin_path += '.exe'
@@ -607,17 +644,29 @@ def compile_file(input_path: str,
         # Header-only runtime, so there is nothing to compile alongside — just
         # the include path. C++14 rather than 17: the runtime is written to it
         # deliberately, so an older toolchain still builds what this emits.
-        import shutil as _sh
-        cxx = next((c for c in ('g++', 'clang++', 'c++') if _sh.which(c)), 'g++')
-        cmd, tool = ([cxx, '-std=c++14', '-O2', '-I', runtime_dir,
-                      output_path, '-o', bin_path], cxx)
+        cxx, cxx_dir = find_cxx()
+        if cxx is None:
+            cxx, cxx_dir = 'g++', None
+        # Statically linked, so the produced binary runs on a machine without
+        # the compiler's DLLs. A dynamically linked MinGW build silently
+        # produces NO OUTPUT when libstdc++-6.dll is not found, which reads as
+        # a program that printed nothing rather than one that never started.
+        cmd = [cxx, '-std=c++14', '-O2', '-I', runtime_dir,
+               output_path, '-o', bin_path]
+        if 'clang' not in os.path.basename(cxx).lower():
+            cmd += ['-static-libgcc', '-static-libstdc++']
+        cmd, tool = cmd, cxx
+        if cxx_dir:
+            build_env = dict(os.environ)
+            build_env['PATH'] = cxx_dir + os.pathsep + build_env.get('PATH', '')
     else:
         cmd, tool = _gcc_c_flags(runtime_dir, output_path, runtime, bin_path, safe), 'gcc'
 
     if verbose:
         print(f"→ Compiling: {' '.join(cmd)}")
     try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
+        result = subprocess.run(cmd, capture_output=True, text=True,
+                                env=build_env)
         if result.returncode == 0:
             if verbose:
                 print(f"✓ Binary: {bin_path}")

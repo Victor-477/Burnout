@@ -94,7 +94,10 @@ def available(backend):
     if backend == 'csharp':
         return shutil.which('dotnet') is not None
     if backend == 'cpp':
-        return any(shutil.which(c) for c in ('g++', 'clang++', 'c++'))
+        sys.path.insert(0, os.path.join(ROOT, 'Burnout'))
+        sys.path.insert(0, os.path.join(ROOT, 'Cryo'))
+        import compiler as _cc
+        return _cc.find_cxx()[0] is not None
     return False
 
 

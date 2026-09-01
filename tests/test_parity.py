@@ -112,9 +112,14 @@ def run_backend(work, src, backend, expect_fail=False):
                                 '-v', 'quiet', '--nologo'],
                                capture_output=True, text=True, timeout=600)
         elif backend == 'cpp':
-            cxx = next((c for c in ('g++', 'clang++', 'c++')
-                        if shutil.which(c)), None)
-            if cxx is None:
+            # find_cxx, not shutil.which: a MinGW that is installed but not on
+            # PATH is the normal state of a Windows box, and the compiler
+            # already knows where to look. Using which() here made the suite
+            # skip cpp silently on a machine that can build it perfectly well.
+            sys.path.insert(0, os.path.join(ROOT, 'Burnout'))
+            sys.path.insert(0, os.path.join(ROOT, 'Cryo'))
+            import compiler as _cc
+            if _cc.find_cxx()[0] is None:
                 return None
             out = os.path.join(work, 'p.cpp')
             if _compile(work, src, 'cpp', out).returncode != 0:
@@ -722,13 +727,12 @@ agree("a user function of the same name still wins",
 
 # ── C# and C++ backends: the two newest targets ──────────────
 #
-# `csharp` joins the runnable backends here, so every case above that lists it
-# is a real output comparison. `cpp` cannot be run on a machine without a C++
-# compiler, and `agree()` skips a backend it cannot run rather than failing —
-# which is the right behaviour and also means a cpp entry proves nothing on
-# such a machine. Its coverage is the generation checks further down instead.
+# Both are real output comparisons wherever their toolchain exists: `csharp`
+# needs the .NET SDK, `cpp` a C++ compiler, and `agree()` skips a backend it
+# cannot run rather than failing. On a machine with neither, these cases prove
+# nothing — so read a green run together with the backend list each line prints.
 print("\n── C# / C++ backends ──")
-_NEW = ('pyro', 'node', 'go', 'csharp')
+_NEW = ('pyro', 'node', 'go', 'csharp', 'cpp')
 
 agree("scalars render identically",
       'int a = 5;\nnumber f = 2.5;\nstring s = "hi";\nbool b = true;\n'
