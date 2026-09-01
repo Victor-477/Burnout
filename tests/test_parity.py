@@ -58,8 +58,14 @@ def _compile(work, src, backend, out):
     return r
 
 
-def run_backend(work, src, backend):
-    """The program's stdout on one backend, or None when unavailable."""
+def run_backend(work, src, backend, expect_fail=False):
+    """The program's stdout on one backend, or None when unavailable.
+
+    12.13 — `expect_fail` is for programs that are SUPPOSED to abort: it returns
+    stdout+stderr (every engine writes the abort text to stderr) and does not
+    read a non-zero exit as a build failure, which is otherwise exactly what a
+    successful abort looks like from here.
+    """
     try:
         if backend == 'pyro':
             if not os.path.isfile(VM):
@@ -85,8 +91,43 @@ def run_backend(work, src, backend):
             # that the Go compiler then rejected.
             r = subprocess.run(['go', 'run', out], capture_output=True, text=True,
                                timeout=900, cwd=work)
-            if r.returncode != 0:
+            if r.returncode != 0 and not expect_fail:
                 return '<go build failed> ' + r.stderr.strip()[:160]
+        elif backend == 'csharp':
+            # The .NET SDK needs a project rather than a loose file; the
+            # compiler builds one beside the .cs, and reusing that helper keeps
+            # the test and the CLI on a single code path.
+            if not shutil.which('dotnet'):
+                return None
+            out = os.path.join(work, 'p.cs')
+            if _compile(work, src, 'csharp', out).returncode != 0:
+                return '<compile failed>'
+            sys.path.insert(0, os.path.join(ROOT, 'Burnout'))
+            sys.path.insert(0, os.path.join(ROOT, 'Cryo'))
+            import compiler as _c
+            proj = _c._csharp_project(out)
+            if proj is None:
+                return None
+            r = subprocess.run(['dotnet', 'run', '--project', proj,
+                                '-v', 'quiet', '--nologo'],
+                               capture_output=True, text=True, timeout=600)
+        elif backend == 'cpp':
+            # find_cxx, not shutil.which: a MinGW that is installed but not on
+            # PATH is the normal state of a Windows box, and the compiler
+            # already knows where to look. Using which() here made the suite
+            # skip cpp silently on a machine that can build it perfectly well.
+            sys.path.insert(0, os.path.join(ROOT, 'Burnout'))
+            sys.path.insert(0, os.path.join(ROOT, 'Cryo'))
+            import compiler as _cc
+            if _cc.find_cxx()[0] is None:
+                return None
+            out = os.path.join(work, 'p.cpp')
+            if _compile(work, src, 'cpp', out).returncode != 0:
+                return '<compile failed>'
+            exe = os.path.splitext(out)[0] + EXE
+            if not os.path.isfile(exe):
+                return '<compile failed>'
+            r = subprocess.run([exe], capture_output=True, text=True, timeout=300)
         elif backend == 'c':
             if not shutil.which('gcc'):
                 return None
@@ -100,7 +141,8 @@ def run_backend(work, src, backend):
             return None
     except subprocess.TimeoutExpired:
         return '<timeout>'
-    return r.stdout.replace('\r\n', '\n').strip()
+    out_text = r.stdout + ('\n' + (r.stderr or '') if expect_fail else '')
+    return out_text.replace('\r\n', '\n').strip()
 
 
 def agree(label, src, backends=('pyro', 'node', 'go'), expect=None):
@@ -430,6 +472,324 @@ agree("a caught assert binds the message, not an object",
 agree("an assert that holds falls through",
       'int n = 4;\nassert(n == 4, "unused");\nprint("through");\n',
       expect="through")
+
+# ── 12.13: one out-of-bounds message, not four ───────────────
+#
+# The same program aborted four different ways: the VM's English text, node's
+# Portuguese one, the C runtime's third spelling with a different prefix, and
+# go — which emitted no check at all and surfaced Go's own runtime panic.
+#
+# These run the failing program and compare the ABORT text, so they are written
+# against a caught value where possible. On the VM a bounds abort is fail-fast
+# and cannot be caught, so the comparison is on what reaches the output.
+print("\n── 12.13: the out-of-bounds message ──")
+
+
+def aborts_with(label, src, needle, backends=('pyro', 'node', 'go')):
+    """Every available backend must abort with the same message text."""
+    global _passed, _failed, _skipped
+    work = tempfile.mkdtemp(prefix='cryo_oob_')
+    got = {}
+    for b in backends:
+        o = run_backend(work, src, b, expect_fail=True)
+        if o is None:
+            _skipped += 1
+            continue
+        # The CRYO message, from the marker onwards. Each engine wraps its own
+        # abort — the VM prefixes "[Pyro VM] ", Go prints "panic: ", node prints
+        # nothing — and that envelope is the engine's to choose. What has to
+        # agree is the message itself, which is what 12.13 is about.
+        msg = None
+        for l in o.splitlines():
+            l = l.strip()
+            if '[Cryo Security]' in l and 'throw' not in l:
+                msg = l[l.index('[Cryo Security]'):]
+                break
+        got[b] = msg or f'<no message: {o.strip()[:80]}>'
+    if len(got) < 2:
+        print(f"  skip {label} (fewer than two backends available)")
+        return
+    detail = '; '.join(f"{b}={v!r}" for b, v in got.items())
+    check(label + f"  [{', '.join(got)}]", len(set(got.values())) == 1, detail)
+    check(label + " — and it is the VM's wording",
+          all(needle in v for v in got.values()), detail)
+
+
+aborts_with("array read out of range",
+            'int[] a = [1, 2];\nint i = 5;\nprint(a[i]);\n',
+            "[Cryo Security] IndexError: index 5 out of bounds (len=2)")
+aborts_with("a negative index is out of range too",
+            'int[] a = [1, 2];\nint i = 0 - 1;\nprint(a[i]);\n',
+            "[Cryo Security] IndexError: index -1 out of bounds (len=2)")
+# The VM's SET message carries no (len=…). That asymmetry is the shape to
+# match, not to tidy up — a fourth spelling is the bug being fixed.
+aborts_with("array write out of range",
+            'int[] a = [1, 2];\nint i = 5;\na[i] = 9;\n',
+            "[Cryo Security] IndexError: index 5 out of bounds")
+aborts_with("a string index has its own wording",
+            'string s = "ab";\nint i = 5;\nprint(s[i]);\n',
+            "[Cryo Security] IndexError: string index out of bounds")
+
+# And the checks must not have broken indexing that is in range.
+agree("indexing in range still works",
+      'int[] a = [1, 2, 3];\nint i = 1;\nprint(a[i]);\na[i] = 9;\nprint(a);\n'
+      'string s = "abc";\nprint(s[0]);\n',
+      expect="2\n[1, 9, 3]\na")
+
+# ── 12.9: a payload-less enum member used as a value ─────────
+#
+# `enum E { A, B } E e = A;` ran on pyro and emitted a bare `A` elsewhere,
+# where the member is declared `E_A`. It COMPILED and then failed at run time,
+# which is exactly why 12.4's compile-only matrix reported it as supported —
+# and why these run the program.
+print("\n── 12.9: enum members as values ──")
+
+# All three backends, go included. It was excluded for one round while its enum
+# path was mid-rewrite elsewhere; the fix landed as a separate table for
+# data-LESS enums, so it does not collide with the constructor path that
+# rewrite is about.
+_ENUM_BACKENDS = ('pyro', 'node', 'go')
+
+agree("a bare payload-less member is a value",
+      'enum E { A, B }\nE e = A;\nprint(e);\n',
+      backends=_ENUM_BACKENDS, expect="0")
+agree("and compares against its own name",
+      'enum E { A, B }\nE e = B;\nif (e == B) { print("yes"); }\n',
+      backends=_ENUM_BACKENDS, expect="yes")
+agree("qualified access resolves to the same member",
+      'enum Status { ATIVO, INATIVO }\nStatus s = Status.ATIVO;\nprint(s);\n',
+      backends=_ENUM_BACKENDS, expect="0")
+agree("qualified access compares too",
+      'enum Status { ATIVO, INATIVO }\nStatus s = Status.INATIVO;\n'
+      'if (s == Status.INATIVO) { print("match"); }\n',
+      backends=_ENUM_BACKENDS, expect="match")
+agree("a member drives a switch",
+      'enum E { A, B }\nE e = B;\n'
+      'switch (e) { case A: print("a"); case B: print("b"); }\n',
+      backends=_ENUM_BACKENDS, expect="b")
+
+# The resolution must not swallow an ordinary field read. A struct field can
+# legitimately share a name with an enum member, and `p.RED` is the field.
+agree("a struct field of the same name is still a field",
+      'enum Col { RED }\nstruct P { int RED; }\nP p = new P { RED: 3 };\n'
+      'int a = p.RED;\nCol c = RED;\nprint(a);\n',
+      backends=_ENUM_BACKENDS, expect="3")
+agree("a variable shadows the member",
+      'enum E { A }\nint A2 = 9;\nprint(A2);\n',
+      backends=_ENUM_BACKENDS, expect="9")
+
+# Data-carrying enums keep working — their payload-less members are values of
+# a different shape (a tag map), not integers.
+agree("a payload-less member of a DATA enum is still its tag",
+      'enum R { Ok(int), None }\nR r = None;\nprint(r);\n', expect="{tag: None}")
+
+# ── ISSUES/17: replace() with an empty needle ────────────────
+#
+# Three engines, three answers: the Go VM inserted the replacement at every
+# boundary (`-a-b-c-`), the C runtime special-cased an empty needle and gave
+# the input back unchanged (`abc`), and node's split("").join(rep) inserted
+# only BETWEEN characters (`a-b-c`). Each was locally reasonable; nobody had
+# picked one, so the program meant three things.
+#
+# The VM's behaviour is canonical for runtime semantics, so `-a-b-c-` wins —
+# which is also what Python's str.replace and Go's strings.ReplaceAll do.
+# PYRO_RUNTIME.md states the rule. The expected values are asserted, not just
+# agreement: node's answer differed from BOTH VMs, and a fix copied from the
+# wrong engine would have made all four agree on the wrong string.
+print("\n── ISSUES/17: replace() with an empty needle ──")
+_R17 = ('pyro', 'node', 'go', 'c')
+agree("an empty needle inserts at every boundary",
+      'print(replace("abc", "", "-"));\n', backends=_R17, expect="-a-b-c-")
+# The empty INPUT is the case the spec has to spell out: the result is the
+# replacement, not "".
+agree("an empty input yields the replacement itself",
+      'print(replace("", "", "-"));\n', backends=_R17, expect="-")
+agree("an empty replacement leaves the input alone",
+      'print(replace("abc", "", ""));\n', backends=_R17, expect="abc")
+agree("a multi-character replacement lands at every boundary",
+      'print(replace("ab", "", "xy"));\n', backends=_R17, expect="xyaxybxy")
+# And the ordinary needle must not have moved.
+agree("an ordinary needle still replaces every occurrence",
+      'print(replace("abab", "b", "-"));\nprint(replace("abc", "z", "-"));\n',
+      backends=_R17, expect="a-a-\nabc")
+
+# ── ISSUES/18: `== null` on a value that cannot be null ──────
+#
+# `valueEq` fell through to comparing the integer field, where a map, an array
+# and `null` all carry 0 — so `m == null` was TRUE for a perfectly good map and
+# the obvious guard `if (req == null) { continue; }` skipped every request. The
+# VMs and node have been fixed; PYRO_RUNTIME.md settles the rule: null is equal
+# only to null, and containers compare by REFERENCE identity.
+#
+# What that spec sentence also covers, and what was still broken, is the
+# non-container half of it. `string s = ""; s == null` is false on both VMs and
+# on node; on go the generated `("" == nil)` did not COMPILE, and on the C
+# backend `(0 == NULL)` is folded by the C compiler to the wrong answer, TRUE,
+# in code that builds clean. A by-value struct did not compile there either.
+print("\n── ISSUES/18: container and scalar `== null` ──")
+_N18 = ('pyro', 'node', 'go', 'c')
+
+agree("a populated map is not null",
+      'map<string,int> m = {"a": 1};\nprint(m == null);\nprint(m != null);\n',
+      backends=_N18, expect="false\ntrue")
+# The empty one is the case that reads most like null and is not.
+agree("an empty map is not null either",
+      "map<string,int> e = {};\nprint(e == null);\n", backends=_N18, expect="false")
+agree("an array is not null",
+      "int[] xs = [1];\nint[] ex = [];\nprint(xs == null);\nprint(ex == null);\n",
+      backends=_N18, expect="false\nfalse")
+agree("null is equal to null", "print(null == null);\n", backends=_N18, expect="true")
+
+# The one place `== null` is the documented idiom must keep working.
+agree("an unset optional is null, a set one is not",
+      "int? x = null;\nint? y = 5;\nprint(x == null);\nprint(y == null);\n",
+      backends=_N18, expect="true\nfalse")
+
+# The scalars. Every one of these is a value with no null to be.
+agree("a scalar is never null",
+      'string s = "";\nint z = 0;\nnumber f = 0.0;\nbool b = false;\n'
+      'print(s == null);\nprint(z == null);\nprint(f == null);\nprint(b == null);\n',
+      backends=_N18, expect="false\nfalse\nfalse\nfalse")
+agree("...and `!= null` is its inverse",
+      'string s = "";\nint z = 0;\nprint(s != null);\nprint(z != null);\n',
+      backends=_N18, expect="true\ntrue")
+agree("a struct value is not null",
+      "struct P { int x; }\nP p = new P { x: 1 };\nprint(p == null);\nprint(p != null);\n",
+      backends=_N18, expect="false\ntrue")
+
+# The container semantics PYRO_RUNTIME.md commits to: identity, not structure.
+# Two arrays with equal contents are DIFFERENT arrays, and that is observable —
+# which is exactly why it is written down and asserted rather than left to
+# whichever engine is being read.
+agree("containers compare by identity, not contents",
+      "int[] a1 = [1];\nint[] a2 = [1];\nprint(a1 == a2);\nprint(a1 == a1);\n",
+      backends=('pyro', 'node', 'go'), expect="false\ntrue")
+
+# ── 13.5: string builtins lowered in the front end ───────────
+#
+# `lines`, `chars`, `title_case`, `trim_start` and `trim_end` add NO native.
+# Each lowers to a synthetic Cryo function, which is why they are tested here
+# rather than in a VM suite: the lowering is the feature, and what has to be
+# true is that all four backends compute the same string from the same source.
+# A new native would have needed six mirrored edits and could disagree; this
+# cannot, because there is only one implementation and every backend compiles
+# it.
+print("\n── 13.5: string builtins with no new native ──")
+_S135 = ('pyro', 'node', 'go', 'c')
+
+# CRLF and a trailing newline are what text read off disk actually looks like.
+# Splitting on "\n" alone leaves a "\r" on every line and a phantom empty line
+# at the end — both are the kind of wrong that only shows up in the output.
+agree("lines() handles CRLF and a trailing newline",
+      'string[] l = lines("a\\r\\nb\\nc\\n");\nprint(l);\nprint(len(l));\n',
+      backends=_S135, expect="[a, b, c]\n3")
+agree("lines() of text without a trailing newline",
+      'print(lines("one"));\n', backends=_S135, expect="[one]")
+agree("lines() of the empty string has no lines",
+      'print(lines(""));\nprint(len(lines("")));\n',
+      backends=_S135, expect="[]\n0")
+agree("chars() splits into single characters",
+      'print(chars("abc"));\nprint(len(chars("")));\n',
+      backends=_S135, expect="[a, b, c]\n0")
+# Python's str.title(): the rest of the word goes DOWN, so "hELLO" is "Hello".
+agree("title_case() upper-cases each word and lowers the rest",
+      'print(title_case("hELLO wORLD"));\n', backends=_S135, expect="Hello World")
+agree("title_case() treats every whitespace as a boundary, and keeps it",
+      'print(title_case("a\\tb  c"));\n', backends=_S135, expect="A\tB  C")
+agree("trim_start / trim_end strip one end each",
+      'print("[" + trim_start("  hi  ") + "]");\n'
+      'print("[" + trim_end("  hi  ") + "]");\n',
+      backends=_S135, expect="[hi  ]\n[  hi]")
+# The one that would rot silently: if these ever strip a different character
+# set than trim(), nothing else in the suite would notice.
+agree("...over the same character set trim() uses",
+      'string s = " \\t\\r\\n x \\t\\r\\n ";\n'
+      'print(trim_start(trim_end(s)) == trim(s));\n',
+      backends=_S135, expect="true")
+agree("an empty and an all-space string are handled",
+      'print("[" + trim_start("") + "]");\nprint("[" + trim_end("   ") + "]");\n',
+      backends=_S135, expect="[]\n[]")
+# The `\r` escape, found by the test above. The lexer's escape table had n, t,
+# \\, " and ', and its fallback turns an unknown escape into the character
+# itself — so `"\r"` was the LETTER r and no literal could hold a carriage
+# return. Both lexers were missing it, so the token streams still agreed and
+# the 9.4 fixed point never noticed.
+agree("\\r is a carriage return, not the letter r",
+      'string s = "a\\rb";\nprint(len(s));\nprint(s == "arb");\nprint(s[1] == "\\r");\n',
+      backends=_S135, expect="3\nfalse\ntrue")
+
+# A program that declares its own must keep it — the lowering only fires for a
+# name the program has not defined.
+agree("a user function of the same name still wins",
+      'fn chars(string s) -> int ={ return len(s); }\nprint(chars("abcd"));\n',
+      backends=_S135, expect="4")
+
+
+# ── C# and C++ backends: the two newest targets ──────────────
+#
+# Both are real output comparisons wherever their toolchain exists: `csharp`
+# needs the .NET SDK, `cpp` a C++ compiler, and `agree()` skips a backend it
+# cannot run rather than failing. On a machine with neither, these cases prove
+# nothing — so read a green run together with the backend list each line prints.
+print("\n── C# / C++ backends ──")
+_NEW = ('pyro', 'node', 'go', 'csharp', 'cpp')
+
+agree("scalars render identically",
+      'int a = 5;\nnumber f = 2.5;\nstring s = "hi";\nbool b = true;\n'
+      'print(a);\nprint(f);\nprint(s);\nprint(b);\n',
+      backends=_NEW, expect="5\n2.5\nhi\ntrue")
+# A float with no fractional part prints as an integer, and a locale with a
+# comma decimal separator must not change that — the C# project pins
+# InvariantGlobalization for exactly this line.
+agree("a whole number prints without a fraction",
+      "number[] f = [1.5, 2.0];\nprint(f);\nnumber g = 4.0;\nprint(g);\n",
+      backends=_NEW, expect="[1.5, 2]\n4")
+agree("containers render in the VM's notation",
+      'int[] a = [0, 1, 2];\nstring[] s = ["x", "y"];\n'
+      'map<string,int> m = {"b": 2, "a": 1};\n'
+      'print(a);\nprint(s);\nprint(m);\nprint(keys(m));\n',
+      backends=_NEW, expect="[0, 1, 2]\n[x, y]\n{a: 1, b: 2}\n[a, b]")
+# Int keys order by TEXT, not numerically. It looks wrong and it is what the
+# VM does; a Dictionary iterated in its own order would print 1, 2, 10.
+agree("map keys order by their text",
+      'map<int,string> m = {2: "two", 1: "one", 10: "ten"};\nprint(m);\n',
+      backends=_NEW, expect="{1: one, 10: ten, 2: two}")
+# A struct renders as a map of its field names (PYRO_RUNTIME 3.1). C# printed
+# the TYPE NAME here until it was given a ToString — the same class of bug as
+# Go's fmt.Sprint giving "[0 1 2]" for an array.
+agree("a struct renders as a map of its fields",
+      "struct P { int x; int y; }\nP p = new P { x: 1, y: 2 };\n"
+      "print(p);\nprint(p.x);\n",
+      backends=_NEW, expect="{x: 1, y: 2}\n1")
+# 12.9 — a payload-less member is an INTEGER. A C# `enum` would have rendered
+# "A", which is why they lower to constants.
+agree("a payload-less enum member is its integer",
+      "enum E { A, B }\nE e = A;\nprint(e);\nE f = B;\nprint(f);\n",
+      backends=_NEW, expect="0\n1")
+agree("optionals and ?? behave",
+      'int? a = null;\nint? b = 3;\nprint(a ?? 7);\nprint(b ?? 7);\nprint(b!);\n'
+      'print(a == null);\nprint(b == null);\n',
+      backends=_NEW, expect="7\n3\n3\ntrue\nfalse")
+agree("ISSUES/18 holds on the new backends too",
+      'map<string,int> m = {"a": 1};\nint[] xs = [1];\nstring s = "";\nint z = 0;\n'
+      'print(m == null);\nprint(xs == null);\nprint(s == null);\nprint(z == null);\n'
+      'print(null == null);\n',
+      backends=_NEW, expect="false\nfalse\nfalse\nfalse\ntrue")
+agree("ISSUES/17 holds on the new backends too",
+      'print(replace("abc", "", "-"));\nprint(replace("", "", "-"));\n',
+      backends=_NEW, expect="-a-b-c-\n-")
+agree("13.5's string builtins reach them as well",
+      'print(lines("a\\r\\nb\\n"));\nprint(chars("abc"));\n'
+      'print(title_case("hELLO wORLD"));\nprint("[" + trim_start("  hi") + "]");\n',
+      backends=_NEW, expect="[a, b]\n[a, b, c]\nHello World\n[hi]")
+agree("integer division truncates and modulo agrees",
+      "int a = 7;\nint b = 2;\nprint(a / b);\nprint(a % b);\n"
+      "print((0 - 7) / 2);\n",
+      backends=_NEW, expect="3\n1\n-3")
+agree("try/catch binds the message string",
+      'try { throw("boom"); } catch (string e) { print("caught: " + e); }\n',
+      backends=_NEW, expect="caught: boom")
+
 
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))

@@ -149,10 +149,21 @@ void cryo_array_push(CryoArray* a, uint64_t v) {
     a->data[a->length++] = v;
 }
 
+/* 12.13 — the Pyro VM's text, verbatim.
+ *
+ * These used to read "[Cryo] IndexError: indice N fora dos limites" — a
+ * different prefix AND a different language from every other engine, so one
+ * program aborted with two unrelated messages depending on the backend. The VM
+ * is canonical here as it is for every other runtime message, and the C VM
+ * (pyro/vm/pyro_runtime.c) already matched it; only this runtime, used by the
+ * C backend and the AOT route, did not.
+ *
+ * The asymmetry is deliberate and copied as-is: GET reports the length, SET
+ * does not. Tidying that up here would just be a third spelling. */
 uint64_t cryo_array_get(CryoArray* a, int64_t i) {
     if (i < 0 || i >= a->length) {
-        fprintf(stderr, "[Cryo] IndexError: indice %" PRId64
-                        " fora dos limites (length=%" PRId64 ")\n", i, a->length);
+        fprintf(stderr, "[Cryo Security] IndexError: index %" PRId64
+                        " out of bounds (len=%" PRId64 ")\n", i, a->length);
         exit(1);
     }
     return a->data[i];
@@ -160,7 +171,8 @@ uint64_t cryo_array_get(CryoArray* a, int64_t i) {
 
 void cryo_array_set(CryoArray* a, int64_t i, uint64_t v) {
     if (i < 0 || i >= a->length) {
-        fprintf(stderr, "[Cryo] IndexError: indice %" PRId64 " fora dos limites\n", i);
+        fprintf(stderr, "[Cryo Security] IndexError: index %" PRId64
+                        " out of bounds\n", i);
         exit(1);
     }
     a->data[i] = v;

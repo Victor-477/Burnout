@@ -216,7 +216,7 @@ class CodeGenPyro:
                  assets: Optional[Dict[str, bytes]] = None,
                  sign_key: Optional[bytes] = None):
         self.safe = safe
-        # 11.14 — when set, the container is signed (see the tail of _assemble)
+        # 11.14 — when set, the container is signed (see _sign)
         self.sign_key = sign_key
         self.encode = encode
         self.optimize = optimize
@@ -853,17 +853,17 @@ class CodeGenPyro:
             self._emit(OP_CALL_VALUE, len(n.args))
             return
         if isinstance(n, Identifier):
+            if n.name in self._enum_maps and n.name not in self._cur.locals:
+                self._emit(OP_CONST, self._const(TAG_STR, "tag"))
+                self._emit(OP_CONST, self._const(TAG_STR, self._enum_maps[n.name]))
+                self._emit(OP_NEWMAP, 1)
+                return
             # a top-level function name used as a value -> function value
             if n.name in self._fnindex and n.name not in self._cur.locals:
                 self._emit(OP_PUSHFN, self._fnindex[n.name])
                 return
             if n.name in self._enum_consts:      # enum member -> const int
                 self._emit(OP_CONST, self._const(TAG_INT, self._enum_consts[n.name]))
-                return
-            if n.name in self._enum_maps:
-                self._emit(OP_CONST, self._const(TAG_STR, "tag"))
-                self._emit(OP_CONST, self._const(TAG_STR, self._enum_maps[n.name]))
-                self._emit(OP_NEWMAP, 1)
                 return
             # global const inlined (visible in any function), except if
             # there is a local variable with the same name (shadow)
@@ -918,6 +918,21 @@ class CodeGenPyro:
         if isinstance(n, FieldAccess):
             if n.field == 'length':
                 self._expr(n.obj); self._emit(OP_LEN); return
+            # 12.9 — `Status.ATIVO` is a qualified ENUM MEMBER, not a field
+            # read. Without this it compiled `Status` as a variable and failed
+            # with "variable 'Status' not declared".
+            #
+            # Resolved from the existing table rather than by registering enum
+            # NAMES: the prescan already keys every member under its qualified
+            # spelling, so `Status_ATIVO` is the whole lookup. A variable of the
+            # same name still wins — a struct value called `Status` with a
+            # field `ATIVO` must keep reading its field.
+            if isinstance(n.obj, Identifier) and n.obj.name not in self._cur.locals \
+                    and not self._is_global(n.obj.name):
+                qual = f"{n.obj.name}_{n.field}"
+                if qual in self._enum_consts:
+                    self._emit(OP_CONST, self._const(TAG_INT, self._enum_consts[qual]))
+                    return
             self._expr(n.obj)
             self._emit(OP_CONST, self._const(TAG_STR, n.field))
             self._emit(OP_INDEX); return
@@ -1330,10 +1345,10 @@ class CodeGenPyro:
             pb = spec.encode('utf-8')
             out += struct.pack('<I', len(pb)); out += pb
         # 11.14 — the signature is LAST, and covers every byte before it:
-        # magic, flags, constants, code, debug, assets and permissions.
-        # Anything left outside would be exactly the part worth editing, and
-        # the permissions section (11.12) is the clearest example: widening
-        # `net` costs one byte and produces no error.
+        # magic, flags, constants, code, debug, assets and permissions. Placing
+        # it anywhere else would leave part of the file outside what is signed,
+        # and the permissions section is exactly the part an attacker would
+        # want to edit.
         if self.sign_key:
             out += hmac.new(self.sign_key, bytes(out), hashlib.sha256).digest()
         return bytes(out)

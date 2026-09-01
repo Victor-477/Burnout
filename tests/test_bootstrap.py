@@ -49,10 +49,15 @@ def _read(f):
     with open(os.path.join(SELF, f), encoding="utf-8") as fh:
         return fh.read()
 
-# SRC: the compiler's own source, with `import "lexer.cryo"` inlined by concat
+# SRC: the compiler's own source, with its imports inlined by concatenation.
+# The self-hosted compiler has no module resolution — that is a reference
+# front-end feature — so the bootstrap has to do what `import` would.
+# 13.2 added semantic.cryo to the chain; leaving it out made `analyze`
+# undefined and every bootstrap stage failed to compile.
+_IMPORTS = ('import "lexer.cryo"', 'import "semantic.cryo"')
 _codegen = "\n".join(l for l in _read("codegen.cryo").splitlines()
-                     if l.strip() != 'import "lexer.cryo"')
-SRC = _read("lexer.cryo") + "\n" + _codegen
+                     if l.strip() not in _IMPORTS)
+SRC = _read("lexer.cryo") + "\n" + _read("semantic.cryo") + "\n" + _codegen
 
 def _embed(s):
     # embed `s` as a Cryo string literal in a driver; split `${` so the

@@ -21,6 +21,7 @@
 #      say as much as for what it says.
 # ============================================================
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -160,6 +161,220 @@ def test_syntax(work):
           log.count('[Syntax Error]') == 1, log[-300:])
 
 
+# ── parser error recovery (13.6) ─────────────────────────────
+#
+# 11.24 made every SEMANTIC pass report all of its problems at once; the parser
+# still stopped at the first, so fixing five typos took five compiles. It now
+# recovers at statement boundaries and reports them together.
+#
+# Recovery is only worth having if the extra errors are REAL. A parser that
+# resumes in the wrong place invents a cascade from one genuine mistake, and a
+# list of ten problems where nine are noise is worse than one true problem —
+# you stop reading them. That failure mode is why parsers so often report only
+# the first, so it gets as many assertions here as the counting does, each one
+# a shape that actually produced a phantom during implementation.
+
+def _problem_count(log):
+    """How many problems the compiler says it found.
+
+    The batched header only appears for two or more; a single syntax error
+    keeps the exact one-error shape it has always had, which `test_syntax`
+    pins separately.
+    """
+    # 'at least N' when the cap fired, plain 'N' otherwise. Both report the
+    # number of PROBLEMS, which never includes the cap notice itself.
+    m = re.search(r'found (?:at least )?(\d+) problems', log)
+    if m:
+        return int(m.group(1))
+    return 1 if '[Syntax Error]' in log else 0
+
+
+def test_recovery_reports_all(work):
+    print("\n── syntax errors: all of them, not the first ──")
+
+    # Three independent bad statements at the top level.
+    rc, log = compile_bad(work, (
+        'int a = 1 +;\n'
+        'int b = 2;\n'
+        'int c = * 3;\n'
+        'int d = 4;\n'
+        'int e = ;\n'
+        'print(d);\n'), name='three_top.cryo')
+    check("the program is rejected", rc != 0)
+    check("three top-level syntax errors report three",
+          _problem_count(log) == 3, log[:400])
+    check("each is rendered against its own line",
+          log.count('-->') == 3, log[-500:])
+    for ln in ('three_top.cryo:1', 'three_top.cryo:3', 'three_top.cryo:5'):
+        check(f"and points at {ln.split(':')[1]}", ln in log, log[-500:])
+    check("the good lines in between are not reported",
+          'three_top.cryo:2' not in log and 'three_top.cryo:4' not in log,
+          log[-500:])
+
+    # The same three, inside a function body. This is the case that needs
+    # recovery INSIDE a block: before it, the first bad statement unwound the
+    # whole function and the parser resumed at the top level mid-body.
+    rc, log = compile_bad(work, (
+        'fn f(int n) -> int ={\n'
+        '    int a = n +;\n'
+        '    int b = * 2;\n'
+        '    int c = ;\n'
+        '    return n;\n'
+        '}\n'
+        'print(f(1));\n'), name='three_body.cryo')
+    check("three errors in one function body report three",
+          _problem_count(log) == 3, log[:400])
+    check("each one in the body is rendered too",
+          log.count('-->') == 3, log[-500:])
+
+
+def test_recovery_no_cascade(work):
+    print("\n── syntax errors: no phantom cascade ──")
+
+    # Each of these has EXACTLY ONE real mistake. Everything after it is valid
+    # Cryo, so anything beyond one report is invented. The trailing construct
+    # in each is the one that broke: recovery has to land somewhere that lets
+    # the ENCLOSING construct finish, or its continuation keyword arrives with
+    # nothing open and reads as a fresh error.
+    singles = [
+        ('one_else.cryo',
+         'fn f(int n) -> int ={\n'
+         '    if (n >) {\n'
+         '        return 1;\n'
+         '    } else {\n'
+         '        return 2;\n'
+         '    }\n'
+         '}\n',
+         "a valid `else` after a bad `if` condition"),
+
+        ('one_match.cryo',
+         'enum R { Ok(int), Err(string) }\n'
+         'fn f(R r) -> int ={\n'
+         '    match r {\n'
+         '        Ok(v) => { int q = +; return v; }\n'
+         '        Err(e) => { return 0; }\n'
+         '    }\n'
+         '    return 1;\n'
+         '}\n',
+         "a valid second match arm after a bad first one"),
+
+        ('one_catch.cryo',
+         'fn f(int n) -> int ={\n'
+         '    try {\n'
+         '        int a = +;\n'
+         '    } catch (string e) {\n'
+         '        print(e);\n'
+         '    }\n'
+         '    return 0;\n'
+         '}\n',
+         "a valid `catch` after a bad `try` body"),
+
+        ('one_case.cryo',
+         'fn f(int n) -> int ={\n'
+         '    switch (n) {\n'
+         '        case 1:\n'
+         '            int a = +;\n'
+         '            return 1;\n'
+         '        case 2:\n'
+         '            return 2;\n'
+         '        default:\n'
+         '            return 0;\n'
+         '    }\n'
+         '}\n',
+         "a valid second `case` after a bad first one"),
+
+        ('one_deep.cryo',
+         'fn f(int n) -> int ={\n'
+         '    while (n > 0) {\n'
+         '        if (n == 1) {\n'
+         '            int x = * 2;\n'
+         '        } else {\n'
+         '            n = n - 1;\n'
+         '        }\n'
+         '    }\n'
+         '    return n;\n'
+         '}\n',
+         "an error two blocks deep, with valid code closing both"),
+
+        ('one_then_decl.cryo',
+         'fn f() -> int ={\n'
+         '    int a = +;\n'
+         '    return 1;\n'
+         '}\n'
+         'struct P { int x; int y; }\n'
+         'fn g(P p) -> int ={ return p.x; }\n',
+         "valid declarations following a bad function body"),
+
+        ('one_then_loop.cryo',
+         'fn f(int n) -> int ={\n'
+         '    int a = +;\n'
+         '    while (n > 0) {\n'
+         '        n = n - 1;\n'
+         '        if (n == 2) { break; }\n'
+         '        continue;\n'
+         '    }\n'
+         '    return n;\n'
+         '}\n',
+         "`break`/`continue`, which are legal only inside a loop"),
+    ]
+    for name, src, why in singles:
+        rc, log = compile_bad(work, src, name=name)
+        check(f"still rejected — {why}", rc != 0, log[-200:])
+        n = _problem_count(log)
+        check(f"one real error stays one, not a cascade — {why}",
+              n == 1, f"reported {n}\n{log[-600:]}")
+
+    # The counting above would also pass if recovery gave up and reported the
+    # first error only. This is the control: the same file with a SECOND real
+    # mistake after the `else` must report two, so the single-error results
+    # above mean "no phantoms", not "no recovery".
+    rc, log = compile_bad(work, (
+        'fn f(int n) -> int ={\n'
+        '    if (n >) {\n'
+        '        return 1;\n'
+        '    } else {\n'
+        '        return 2;\n'
+        '    }\n'
+        '}\n'
+        'int z = * 2;\n'), name='else_plus_one.cryo')
+    check("recovery is still live — a real second error is found",
+          _problem_count(log) == 2, log[-600:])
+    check("and it is the one after the else, not the else",
+          'else_plus_one.cryo:8' in log and 'ELSE' not in log, log[-600:])
+
+
+def test_recovery_cap(work):
+    print("\n── syntax errors: the cap ──")
+    # Past a certain point the parse has lost the thread and the honest advice
+    # is to fix these and recompile. The cap must LATCH: the block that gives
+    # up still unwinds past its own `}`, and every frame on the way out used to
+    # record again — a 12-error file reported 13, with the "stopping here" line
+    # buried in the middle instead of ending the list.
+    src = ('fn f() -> int ={\n'
+           + ''.join(f'    int v{i} = +;\n' for i in range(12))
+           + '    return 1;\n}\n')
+    rc, log = compile_bad(work, src, name='many.cryo')
+    check("the program is rejected", rc != 0)
+    # The count is the number of PROBLEMS, and the cap notice is not one of
+    # them: it is a sentence about the report. Counting it made a 12-mistake
+    # file announce 11 while listing 10 mistakes and a note — a number that
+    # matched nothing the reader could see. `_MAX_ERRORS` is 10, so 10 it is.
+    check("the report is capped, not one per mistake",
+          _problem_count(log) == 10, f"reported {_problem_count(log)}")
+    check("and the count matches what is actually rendered",
+          log.count('-->') == 10, f"{log.count('-->')} rendered")
+    # "at least", because the parser stopped looking. It cannot claim there are
+    # exactly 10 when it gave up at 10, and it must not claim there are more
+    # when a file with exactly 10 mistakes hits the same path.
+    check("the count is hedged, since the parser stopped looking",
+          'found at least 10 problems' in log, log[:200])
+    check("the cap is announced once",
+          log.count('stopping here') == 1, log[-400:])
+    check("and it is the last thing said",
+          log.rstrip().endswith('compile again to see whether more remain'),
+          log[-300:])
+
+
 def test_still_compiles(work):
     print("\n── a correct program is unaffected ──")
     p = os.path.join(work, 'good.cryo')
@@ -182,6 +397,9 @@ def main():
         test_render()
         test_semantic(work)
         test_syntax(work)
+        test_recovery_reports_all(work)
+        test_recovery_no_cascade(work)
+        test_recovery_cap(work)
         test_still_compiles(work)
     finally:
         shutil.rmtree(work, ignore_errors=True)

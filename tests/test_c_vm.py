@@ -104,7 +104,23 @@ def test_parity():
             skipped += 1
             os.remove(tmp_pyro)
             continue
-            
+
+        # 12.5 — the scheduler is the GO VM's. The C VM refuses spawn/await
+        # with a clear message rather than mis-running it, so an example that
+        # uses them is a documented gap and not a parity failure. Skipped by
+        # what the SOURCE uses rather than by filename, so a second concurrent
+        # example does not have to be remembered here.
+        #
+        # This is a skip, not a silenced diff: everything else in the file is
+        # still compared, and if the C VM ever grows a scheduler the two will
+        # be compared here again by deleting these five lines.
+        _src = open(filepath, encoding="utf-8", errors="replace").read()
+        if "spawn" in _src or "await" in _src:
+            print(f"Skipping {filename} (spawn/await: the C VM has no scheduler, 12.5)")
+            skipped += 1
+            os.remove(tmp_pyro)
+            continue
+
         print(f"Testing {filename}...")
         
         # Run on the Go VM
@@ -160,6 +176,16 @@ def test_parity():
     # Programs that abort must produce identical messages/stack traces
     # in both VMs — the loop above only covers clean executions.
     C_VM = os.path.join(_root, "Pyro", "vm", "pyrovm.exe")
+    # 30 chained locals, built rather than written out: the count is the whole
+    # point and thirty near-identical declarations would bury it. Each depends
+    # on the one before so the optimizer cannot drop them — a first attempt used
+    # twenty independent `int vN = N;` and the optimizer folded every one away,
+    # leaving locals=1 and a program that proved nothing.
+    _deep_locals = ("fn deep(int n) -> int ={ int v0 = n; "
+                    + " ".join(f"int v{i} = v{i-1} + 1;" for i in range(1, 30))
+                    + " if (n <= 0) { return 0; } "
+                      "return 1 + deep(n - 1) + (v29 - v29); } "
+                      "print(deep(100000));")
     aborts = [
         ("div-zero",     'int x = 10; int y = 0; print(x / y);', []),
         ("array-oob",    'int[] a = [1, 2]; print(a[5]);', []),
@@ -173,6 +199,52 @@ def test_parity():
         ("catch-throw",  'try { throw("x"); } catch (string e) { print("cap: " + e); }', []),
         ("catch-assert", 'try { assert(false, "boom"); } catch (string e) { print(e); }', []),
         ("catch-unwrap", 'try { int? z = null; int y = z!; print(y); } catch (string e) { print(e); }', []),
+        # Runaway recursion (13.4 / 14.1). Written for 14.1's parity test and
+        # it FAILED, on a real divergence: the C VM bounds the CALL stack and
+        # the Go VM did not bound it at all.
+        #
+        #   C VM   `static Frame frames[4096]` (main.c:57) guarded at
+        #          `fp > 4094` (main.c:574, main.c:632) ->
+        #          "call stack overflow (runaway recursion?)" at 4095 frames
+        #   Go VM  had NO call-stack guard; `frames` was an unbounded append,
+        #          so it ran on to the VALUE stack ceiling and aborted at
+        #          65531 frames with "value stack overflow" instead.
+        #
+        # A different message, a 16x different depth, and traces of ~4095 vs
+        # 65531 lines — which this suite compares byte for byte.
+        #
+        # FIXED in the Go VM (main.go): checkFrames/checkHandlers now mirror
+        # main.c's two guards, in main.c's `> max-2` shape so both engines
+        # abort while pushing the SAME call and print the same number of trace
+        # lines. Measured on the Go side afterwards: 4095 frames, exit 1,
+        # "malformed .pyro: call stack overflow (runaway recursion?)" — the C
+        # VM's exact wording.
+        #
+        # The C side of this row is still UNVERIFIED: there is no C toolchain
+        # on the machine it was written on, so the 4095 above is derived by
+        # reading main.c's guard, not by running it. That is precisely what
+        # 14.1's CI exists to settle, and this row is one of the things it
+        # settles.
+        ("deep-recursion", 'fn deep(int n) -> int ={ if (n <= 0) { return 0; } '
+                           'return 1 + deep(n - 1); } print(deep(100000));', []),
+        # The same recursion with 31 slots per frame, which trips a DIFFERENT
+        # limit — and one that, until this was written, existed in neither VM.
+        #
+        # The C VM carves every frame's locals out of one
+        # `static Value locals_stack[65536]` (main.c:63) and bounded none of the
+        # writes. Capping the frame stack at 4095 is what made this reachable:
+        # 4095 frames only fit inside 65536 slots while a frame stays under ~16
+        # locals, and a function with 31 puts `next_base` past the end at ~2114
+        # deep. Not malformed bytecode — an ordinary recursive function with
+        # thirty variables, silently writing past a static array.
+        #
+        # Both VMs now check before the writes, at `base + nlocals > 65534`, and
+        # before their frame guard, so whichever limit a recursion reaches first
+        # is the one that reports. Go measured afterwards: 2115 frames, exit 1,
+        # "malformed .pyro: locals stack overflow (runaway recursion?)". The C
+        # side is again derived from main.c rather than run, which is what 14.1's
+        # runner is for.
+        ("deep-recursion-locals", _deep_locals, []),
     ]
     print("\n-- abort parity (stdout+stderr+exit) --")
     for name, src, extra in aborts:
@@ -310,6 +382,18 @@ def test_parity():
                        'print(apply(pick(true), 4));',
                        # expected values, so a bug shared by both engines fails
                        "42\n42\n12\n20\n100\n49\n20\n11\n20\n11\n8"),
+        # ISSUES/17: an EMPTY needle. The C runtime used to special-case
+        # old_len == 0 and hand the input straight back (to dodge the infinite
+        # loop strstr(p, "") invites), where the Go VM inserted the replacement
+        # at every boundary. Both engines answered confidently and differently,
+        # so this carries the expected VALUE — Go == C would have passed on the
+        # old code too, had the C side been the one copied.
+        ("replace-empty-needle",
+         'print(replace("abc", "", "-")); print(replace("", "", "-")); '
+         'print(replace("abc", "", "")); print(replace("ab", "", "xy")); '
+         # and the ordinary needle must still behave
+         'print(replace("abc", "b", "-")); print(replace("abc", "z", "-"));',
+         "-a-b-c-\n-\nabc\nxyaxybxy\na-c\nabc"),
         ("stdlib2", 'print(pad_start("7", 3, "0")); print(pad_start("x", 5, "ab")); '
                     'print(pad_end("x", 5, "ab")); print(pad_start("toolong", 3, " ")); '
                     'int[] a = [1, 2, 3]; int[] b = [4, 5]; int[] c = concat(a, b); '

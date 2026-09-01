@@ -131,6 +131,16 @@ def is_optional(t: str) -> bool:
     return bool(t) and t.endswith('?')
 
 
+def _is_null(node, t: str) -> bool:
+    """Is this operand the null literal? (ISSUES/18)
+
+    Inference reports `null` for the literal, but a null that reached the
+    generator through a typed slot can arrive as the node alone, so both are
+    checked.
+    """
+    return t == 'null' or (isinstance(node, Literal) and node.kind == 'null')
+
+
 def elem_type(arr_t: str) -> str:
     if not arr_t:
         return 'unknown'
@@ -162,6 +172,8 @@ class TypeEnv:
         self._fns:    Dict[str, str] = {}
         self._fn_params: Dict[str, List[str]] = {}
         self._structs: Dict[str, Dict[str, str]] = {}
+        self._member_to_enum: Dict[str, str] = {}
+        self._zero_arg_enums: Set[str] = set()
         self._enums:  Set[str] = set()
 
     def push(self): self._scopes.append({})
@@ -241,7 +253,17 @@ class TypeEnv:
                        'agent': 'string', 'index_of': 'int', 'count': 'int',
                        'pad_start': 'string', 'pad_end': 'string'}.get(node.callee)
             # these preserve the type of their first argument
-            if node.callee in ('clamp', 'min', 'max', 'sort', 'reverse',
+            #
+            # 13.1 — `abs` belonged here and was in the table above as
+            # 'number' instead. The EMITTER already picks cryoAbsI (int64) for
+            # an int argument, so the inferred type contradicted the code being
+            # generated: `abs(a) > (b - a)` became
+            #     cryoAbsI(a) > float64(cryoSubOvf(b, a))
+            # and the Go compiler rejected it. Even `int b = abs(a) + 1;`
+            # failed. Found by the differential generator on its first real
+            # run, and it had gone unnoticed because a compile-only check never
+            # runs the Go compiler over the result.
+            if node.callee in ('abs', 'clamp', 'min', 'max', 'sort', 'reverse',
                                'slice', 'concat') and node.args:
                 return self.infer(node.args[0])
             return builtin or self.fn_ret(node.callee)
@@ -297,6 +319,11 @@ class CodeGenGo:
         self._tools: List[FunctionDecl] = []
         self._use_tools = False
         self._member_to_enum: Dict[str, str] = {}
+        # 12.9 — member spelling -> the Go constant, for enums with NO data.
+        # Such an enum compiles to `const ( E_A E = iota; E_B )`, so a bare `A`
+        # was simply undefined. Kept separate from the data-carrying path,
+        # whose members are constructor functions, not constants.
+        self._plain_enum_member: Dict[str, str] = {}
         # 11.30 — generated variant struct name -> its Cryo member name, so
         # cryoStr can lead an enum value with `tag:` the way pyro and node do.
         self._enum_tags: Dict[str, str] = {}
@@ -363,16 +390,19 @@ class CodeGenGo:
                 self.te.reg_struct(n.name, {f.name: f.field_type for f in n.fields})
             elif isinstance(n, EnumDecl):
                 self.te.reg_enum(n.name)
+                # 12.9 — an enum with no data at all compiles to plain Go
+                # constants, so its members are VALUES, not constructors.
+                if not any(len(m.fields) > 0 for m in n.members):
+                    for m in n.members:
+                        q = f"{n.name}_{m.name}"
+                        self._plain_enum_member[m.name] = q
+                        self._plain_enum_member[q] = q
                 for m in n.members:
                     self._member_to_enum[m.name] = n.name
                     self._member_to_enum[f"{n.name}_{m.name}"] = n.name
-                    # A variant with data compiles to a constructor function, so
-                    # register its RETURN TYPE (the enum). Without this,
-                    # infer(Ok(x)) is 'unknown' and every context that needs a
-                    # concrete Go type falls back to `any` â€” which does not
-                    # satisfy the enum interface. That is what made
-                    #     Res r = cond ? Ok(x) : Err("e");
-                    # emit `func() any {â€¦}()` and fail to compile.
+                    if not m.fields:
+                        self.te._zero_arg_enums.add(m.name)
+                        self.te._zero_arg_enums.add(f"{n.name}_{m.name}")
                     self.te.reg_fn(m.name, n.name)
                     self.te.reg_fn(f"{n.name}_{m.name}", n.name)
             elif isinstance(n, FunctionDecl):
@@ -530,6 +560,30 @@ class CodeGenGo:
             # call site so the message is not built when the assertion holds.
             H += ["func cryoAssertFail(msg string) {",
                   '\tpanic("[Cryo Assert] " + msg)', "}", ""]
+        if 'index' in self._helpers:
+            # 12.13 — the Pyro VM's text, verbatim, including the asymmetry
+            # that GET reports the length and SET does not, and that a string
+            # index has its own wording with neither. Those are the shapes the
+            # VM and the C VM already produce, so they are what to match rather
+            # than tidy up: a fourth spelling is the problem being fixed.
+            H += ["func cryoIndex[T any](a []T, i int64) T {",
+                  "\tif i < 0 || i >= int64(len(a)) {",
+                  '\t\tpanic(fmt.Sprintf("[Cryo Security] IndexError: index %d out of bounds (len=%d)", i, len(a)))',
+                  "\t}",
+                  "\treturn a[i]", "}",
+                  "",
+                  "func cryoSetIndex[T any](a []T, i int64, v T) {",
+                  "\tif i < 0 || i >= int64(len(a)) {",
+                  '\t\tpanic(fmt.Sprintf("[Cryo Security] IndexError: index %d out of bounds", i))',
+                  "\t}",
+                  "\ta[i] = v", "}",
+                  "",
+                  "func cryoStrIndex(s string, i int64) string {",
+                  "\tif i < 0 || i >= int64(len(s)) {",
+                  '\t\tpanic("[Cryo Security] IndexError: string index out of bounds")',
+                  "\t}",
+                  "\treturn string(s[i])", "}", ""]
+            self._imports.add('fmt')
         if 'future' in self._helpers:
             # 12.11 — a future HOLDS its result; it does not hand it over.
             #
@@ -1760,6 +1814,13 @@ class CodeGenGo:
                    f"{self._expr_typed(n.value, self.te.get(n.name))}")
 
     def _index_assign(self, n: IndexAssignment):
+        # 12.13 — same as the read path; maps are left alone, since assigning a
+        # new key is how a map grows.
+        if self._safe_mode and self.te.infer(n.obj).endswith('[]'):
+            self._helpers.add('index')
+            self._emit(f"cryoSetIndex({self._expr(n.obj)}, "
+                       f"{self._expr(n.index)}, {self._expr(n.value)})")
+            return
         self._emit(f"{self._expr(n.obj)}[{self._expr(n.index)}] = {self._expr(n.value)}")
 
     def _compound(self, n: CompoundAssignment):
@@ -2112,6 +2173,14 @@ class CodeGenGo:
             return str(node.value)
 
         if isinstance(node, Identifier):
+            # 12.9 — a bare member of a data-less enum is the Go constant.
+            # Checked FIRST: such a member is a value, and must not fall into
+            # the constructor path below, which would emit `A()` — a call
+            # against an int constant.
+            if self.te.get(node.name) == 'unknown' and node.name in self._plain_enum_member:
+                return self._plain_enum_member[node.name]
+            if node.name in self.te._zero_arg_enums and self.te.get(node.name) == 'unknown':
+                return f"{gid(node.name)}()"
             return gid(node.name)
 
         if isinstance(node, BinaryExpr):
@@ -2136,12 +2205,35 @@ class CodeGenGo:
             return self._method(node)
 
         if isinstance(node, FieldAccess):
+            # 12.9 — `Status.ATIVO` is a qualified enum member, not a field
+            # read. A variable of the same name still wins, so a struct value
+            # called `Status` keeps reading its own field.
+            if (isinstance(node.obj, Identifier)
+                    and self.te.is_enum(node.obj.name)
+                    and self.te.get(node.obj.name) == 'unknown'):
+                q = self._plain_enum_member.get(f"{node.obj.name}_{node.field}")
+                if q:
+                    return q
             obj = self._expr(node.obj)
             if node.field == 'length':
                 return f"int64(len({obj}))"
             return f"{obj}.{go_field(node.field)}"
 
         if isinstance(node, IndexAccess):
+            # 12.13 — go had NO bounds check at all. An out-of-range index
+            # surfaced Go's own `panic: runtime error: index out of range [5]
+            # with length 2`, so the same program aborted with a message the
+            # other three engines never produce — and a constant bad index did
+            # not even compile ("must not be negative"), which is a third
+            # failure mode again. Routing through a helper gives all four the
+            # VM's text and turns the compile error into the same abort.
+            ot = self.te.infer(node.obj)
+            if self._safe_mode and ot == 'string':
+                self._helpers.add('index')
+                return f"cryoStrIndex({self._expr(node.obj)}, {self._expr(node.index)})"
+            if self._safe_mode and ot.endswith('[]'):
+                self._helpers.add('index')
+                return f"cryoIndex({self._expr(node.obj)}, {self._expr(node.index)})"
             return f"{self._expr(node.obj)}[{self._expr(node.index)}]"
 
         if isinstance(node, ArrayLiteral):
@@ -2317,6 +2409,27 @@ class CodeGenGo:
             if op == '==':
                 return f"cryoSamePtr({l}, {r})"
             return f"(!cryoSamePtr({l}, {r}))"
+
+        # ISSUES/18 — a NON-nilable value compared against null.
+        #
+        # `string s = ""; print(s == null);` is false on both VMs and on node,
+        # and PYRO_RUNTIME.md says so: null is equal only to null. Go is the
+        # only backend where the comparison has to type-check, and falling
+        # through to the generic path emitted `("" == nil)`, which the Go
+        # compiler rejects outright — the program did not build at all.
+        #
+        # An int, a number, a string, a bool and a struct have no nil in Go, so
+        # the answer is a constant and is folded here. Slices, maps, optionals
+        # (*T), function values, futures and `any` are all nilable and are
+        # handled above or by the generic path; `unknown` is left alone rather
+        # than guessed at.
+        if op in ('==', '!=') and (_is_null(node.left, lt) or _is_null(node.right, rt)):
+            other_t = rt if _is_null(node.left, lt) else lt
+            other_n = node.right if _is_null(node.left, lt) else node.left
+            if other_t not in ('unknown', 'any', 'null') and not is_optional(other_t) \
+                    and not is_future(other_t) and not other_t.startswith('fn(') \
+                    and not is_cont(other_t, other_n):
+                return 'false' if op == '==' else 'true'
 
         # int<->number coercion: Go does not mix int64 and float64. If one side is
         # 'number' and the other 'int', converts the integer to float64.

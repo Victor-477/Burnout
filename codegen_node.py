@@ -165,6 +165,7 @@ class CodeGenNode:
         self._indent = 0
         self._ntmp = 0                 # fresh temporaries ('?' propagation)
         self._imported_langs: Set[str] = set()
+        self._zero_arg_enums: Set[str] = set()
 
     # ── util ────────────────────────────────────────────────
     def _emit(self, line: str):
@@ -182,6 +183,12 @@ class CodeGenNode:
                 self._t.structs[n.name] = {f.name: f.field_type for f in n.fields}
             elif isinstance(n, EnumDecl):
                 self._t.enums.add(n.name)
+                has_data = any(len(m.fields) > 0 for m in n.members)
+                if has_data:
+                    for m in n.members:
+                        if not m.fields:
+                            self._zero_arg_enums.add(m.name)
+                            self._zero_arg_enums.add(f"{n.name}_{m.name}")
 
     def generate(self, program: Program) -> str:
         self._imported_langs = collect_imports(program)
@@ -225,6 +232,13 @@ class CodeGenNode:
         if not has_data:
             for i, m in enumerate(n.members):
                 self._emit(f"const {n.name}_{m.name} = {i};")
+                # 12.9 — the BARE name too. Only the qualified constant was
+                # emitted, so `enum E { A, B } E e = A;` referenced an
+                # undefined `A` — it compiled and then failed at run time,
+                # which is why a compile-only check reported it as supported.
+                # The data-carrying branch below already emits both names;
+                # this branch simply did not.
+                self._emit(f"const {jsid(m.name)} = {n.name}_{m.name};")
         else:
             for m in n.members:
                 params = ', '.join(f"val{idx}" for idx in range(len(m.fields)))
@@ -312,15 +326,32 @@ class CodeGenNode:
                   "  return Math.trunc(a / b);   // integer division (truncates toward zero)",
                   "}", ""]
         if 'index' in self._helpers:
+            # 12.13 — the VM's text, verbatim. This used to be in Portuguese
+            # ("índice N fora dos limites"), so one program aborted with two
+            # different messages depending on the backend. The VM is canonical
+            # here as it is for every other runtime message.
+            #
+            # A STRING index has its own wording in the VM — no index number and
+            # no length — so it gets its own helper rather than reusing the
+            # array one, which is what made node report an array-shaped message
+            # for `"ab"[5]`.
             H += ["function cryoIndex(a, i) {",
                   "  if (i < 0 || i >= a.length)",
-                  "    throw new Error('[Cryo Security] IndexError: índice ' + i + ' fora dos limites (len=' + a.length + ')');",
+                  "    throw '[Cryo Security] IndexError: index ' + i + ' out of bounds (len=' + a.length + ')';",
                   "  return a[i];",
                   "}", ""]
+        if 'strindex' in self._helpers:
+            H += ["function cryoStrIndex(s, i) {",
+                  "  if (i < 0 || i >= s.length)",
+                  "    throw '[Cryo Security] IndexError: string index out of bounds';",
+                  "  return s[i];",
+                  "}", ""]
         if 'setindex' in self._helpers:
+            # The VM's SET message carries no (len=…); the C VM mirrors that
+            # asymmetry too, so it is the shape to match, not to tidy up.
             H += ["function cryoSetIndex(a, i, v) {",
                   "  if (i < 0 || i >= a.length)",
-                  "    throw new Error('[Cryo Security] IndexError: índice ' + i + ' fora dos limites (len=' + a.length + ')');",
+                  "    throw '[Cryo Security] IndexError: index ' + i + ' out of bounds';",
                   "  a[i] = v;",
                   "}", ""]
         if 'substr' in self._helpers:
@@ -624,6 +655,8 @@ class CodeGenNode:
         if isinstance(n, Literal):
             return self._literal(n)
         if isinstance(n, Identifier):
+            if n.name in self._zero_arg_enums:
+                return f"{jsid(n.name)}()"
             return jsid(n.name)
         if isinstance(n, BinaryExpr):
             return self._binary(n)
@@ -644,12 +677,26 @@ class CodeGenNode:
         if isinstance(n, FieldAccess):
             if n.field == 'length':
                 return f"{self._expr(n.obj)}.length"
+            # 12.9 — `Status.ATIVO` is a qualified ENUM MEMBER, not a field
+            # read. Resolved here at compile time to the constant the enum
+            # declared, rather than emitting a runtime object for the enum:
+            # an object would need a name at run time and could collide with a
+            # variable, and there is nothing to look up — the value is known.
+            if (isinstance(n.obj, Identifier) and n.obj.name in self._t.enums):
+                return f"{n.obj.name}_{n.field}"
             return f"{self._expr(n.obj)}.{n.field}"
         if isinstance(n, IndexAccess):
             ot = self._t.infer(n.obj)
             # bounds-check on arrays AND strings (both have .length and [i]);
             # maps are left out (missing key -> undefined is expected)
-            if self.safe and (ot.endswith('[]') or ot == 'string'):
+            #
+            # 12.13 — a string gets its own helper: the VM words a string index
+            # differently (no index number, no length), and reusing the array
+            # helper made `"ab"[5]` report an array-shaped message here.
+            if self.safe and ot == 'string':
+                self._helpers.add('strindex')
+                return f"cryoStrIndex({self._expr(n.obj)}, {self._expr(n.index)})"
+            if self.safe and ot.endswith('[]'):
                 self._helpers.add('index')
                 return f"cryoIndex({self._expr(n.obj)}, {self._expr(n.index)})"
             return f"{self._expr(n.obj)}[{self._expr(n.index)}]"

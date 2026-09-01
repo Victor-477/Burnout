@@ -64,6 +64,11 @@ def is_optional(t: str) -> bool:
     return bool(t) and t.endswith('?')
 
 
+def _c_is_null(node, t: str) -> bool:
+    """Is this operand the null literal? (ISSUES/18)"""
+    return t == 'null' or (isinstance(node, Literal) and node.kind == 'null')
+
+
 def opt_base(t: str) -> str:
     return t[:-1] if is_optional(t) else t
 
@@ -149,6 +154,7 @@ class TypeEnv:
         self._fns:    Dict[str, str] = {}
         self._structs:Dict[str, Dict[str, str]] = {}
         self._enums:  Set[str] = set()
+        self._enum_members: Dict[str, str] = {}   # 12.9: 'A' -> 'E_A'
 
     def push(self): self._scopes.append({})
     def pop(self):  self._scopes.pop()
@@ -172,6 +178,16 @@ class TypeEnv:
 
     def reg_enum(self, name: str): self._enums.add(name)
     def is_enum(self, name: str) -> bool: return name in self._enums
+
+    # 12.9 — bare member name -> the constant C actually declares.
+    # `typedef enum { E_A, E_B } E;` declares E_A, but `E e = A;` emitted a
+    # bare `A`, so the C did not compile. Registered for both spellings so a
+    # qualified `E.A` resolves through the same table.
+    def reg_enum_member(self, member: str, qualified: str):
+        self._enum_members[member] = qualified
+
+    def enum_member(self, name: str):
+        return self._enum_members.get(name)
 
     def infer(self, node) -> str:
         if node is None: return 'unknown'
@@ -352,6 +368,9 @@ class CodeGenC:
                 self.te.reg_struct(n.name, {f.name: f.field_type for f in n.fields})
             elif isinstance(n, EnumDecl):
                 self.te.reg_enum(n.name)
+                for m in n.members:
+                    self.te.reg_enum_member(m.name, f"{n.name}_{m.name}")
+                    self.te.reg_enum_member(f"{n.name}_{m.name}", f"{n.name}_{m.name}")
             elif isinstance(n, FunctionDecl):
                 ret = n.return_type or 'void'
                 self.te.reg_fn(n.name, ret)
@@ -864,6 +883,13 @@ class CodeGenC:
             return str(node.value)
 
         if isinstance(node, Identifier):
+            # 12.9 — a bare enum member resolves to the declared constant, but
+            # a variable of the same name still shadows it (TypeEnv.get returns
+            # 'unknown' only for names nothing has declared).
+            if self.te.get(node.name) == 'unknown':
+                q = self.te.enum_member(node.name)
+                if q:
+                    return q
             return node.name
 
         if isinstance(node, BinaryExpr):
@@ -885,6 +911,15 @@ class CodeGenC:
             return self._method(node)
 
         if isinstance(node, FieldAccess):
+            # 12.9 — `E.A` is a qualified enum member, not a field read. A
+            # variable of the same name still wins, so a struct called `E` with
+            # a field `A` keeps reading its field.
+            if (isinstance(node.obj, Identifier)
+                    and self.te.is_enum(node.obj.name)
+                    and self.te.get(node.obj.name) == 'unknown'):
+                q = self.te.enum_member(f"{node.obj.name}_{node.field}")
+                if q:
+                    return q
             obj = self._expr(node.obj)
             ot  = self.te.infer(node.obj)
             if node.field == 'length':
@@ -935,6 +970,24 @@ class CodeGenC:
                 return (f"({{ {c_type(lt)} __o = ({l}); "
                         f"__o != NULL ? *__o : ({ct})({r}); }})")
             return f"(({l}) != NULL ? ({l}) : ({r}))"
+
+        # ISSUES/18 — a NON-nilable value compared against null.
+        #
+        # Both VMs and node say `int z = 0; z == null` is false, and
+        # PYRO_RUNTIME.md says null is equal only to null. C has no such rule:
+        # the generic path emitted `(0 == NULL)`, which the C compiler folds to
+        # TRUE — the wrong answer, silently, in code that builds clean. A struct
+        # was worse: `(p == NULL)` against a by-value struct does not compile.
+        #
+        # A string, an optional, an array and a map are all pointers here and
+        # keep their real comparison; an int, a number, a bool and a struct
+        # cannot be null, so the answer is a constant.
+        if node.op in ('==', '!=') and (_c_is_null(node.left, lt) != _c_is_null(node.right, rt)):
+            other = rt if _c_is_null(node.left, lt) else lt
+            if other not in ('unknown', 'any', 'string') and not is_optional(other) \
+                    and not other.endswith('[]') and not other.startswith('map<') \
+                    and other not in ('array', 'map'):
+                return 'false' if node.op == '==' else 'true'
 
         # String concatenation
         if node.op == '+' and (lt == 'string' or rt == 'string'):
