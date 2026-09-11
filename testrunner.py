@@ -36,7 +36,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(
         prog='cryoc test',
         description='Run the `test fn` declarations in a Cryo file.')
-    ap.add_argument('input', help='the .cryo file to test')
+    ap.add_argument('input', nargs='+', help='the .cryo file(s) or directory to test')
     ap.add_argument('--backend', default='pyro',
                     choices=['pyro', 'go', 'node', 'c'],
                     help='which backend to run the suite on (default: pyro)')
@@ -46,15 +46,71 @@ def main(argv=None):
                     help='list the tests without running them')
     args = ap.parse_args(argv)
 
-    if not os.path.isfile(args.input):
-        print(f"[cryoc test] no such file: {args.input}", file=sys.stderr)
+    files = []
+    for item in args.input:
+        if os.path.isdir(item):
+            found = []
+            for root, _, fnames in os.walk(item):
+                for fn in sorted(fnames):
+                    if fn.endswith('.cryo'):
+                        found.append(os.path.join(root, fn))
+            if not found:
+                print(f"[cryoc test] no .cryo files found in directory: {item}", file=sys.stderr)
+                return 2
+            files.extend(found)
+        elif os.path.isfile(item):
+            files.append(item)
+        else:
+            print(f"[cryoc test] no such file: {item}", file=sys.stderr)
+            return 2
+
+    if not files:
+        print("[cryoc test] no input files", file=sys.stderr)
         return 2
 
+    if len(files) == 1:
+        return _run_single(files[0], args)
+
+    total_rc = 0
+    if args.list:
+        total_tests = 0
+        for fpath in files:
+            rc, count = _list_tests_file(fpath)
+            total_tests += count
+            if rc != 0:
+                total_rc = rc
+        print(f"\n{total_tests} test(s) total")
+        return total_rc
+
+    for fpath in files:
+        rc = _run_single(fpath, args)
+        if rc != 0:
+            total_rc = rc
+    return total_rc
+
+
+def _list_tests_file(fpath):
+    from lexer import Lexer, LexerError
+    from parser import Parser, ParseError
+    import testing
+    try:
+        src = open(fpath, encoding='utf-8').read()
+        ast = Parser(Lexer(src).tokenize()).parse()
+        tests = testing.collect(ast)
+        for t in tests:
+            print(f"  {t.name}  ({fpath}:{getattr(t, 'line', 0)})")
+        return 0, len(tests)
+    except Exception as e:
+        print(f"[cryoc test] error in {fpath}: {e}", file=sys.stderr)
+        return 1, 0
+
+
+def _run_single(path, args):
     from lexer import Lexer, LexerError
     from parser import Parser, ParseError
     import testing
 
-    src = open(args.input, encoding='utf-8').read()
+    src = open(path, encoding='utf-8').read()
     try:
         ast = Parser(Lexer(src).tokenize()).parse()
     except (LexerError, ParseError) as e:
@@ -64,20 +120,24 @@ def main(argv=None):
     tests = testing.collect(ast)
     if args.list:
         for t in tests:
-            print(f"  {t.name}  ({args.input}:{getattr(t, 'line', 0)})")
+            print(f"  {t.name}  ({path}:{getattr(t, 'line', 0)})")
         print(f"\n{len(tests)} test(s)")
         return 0
     if not tests:
         # Not an error worth a stack trace, but not a pass either: a file with
         # no tests reporting success is how a suite silently stops running.
-        print(f"[cryoc test] {args.input}: no tests found.\n"
+        print(f"[cryoc test] {path}: no tests found.\n"
               f"  Declare one with:  test fn name() ={{ assert(…, \"…\"); }}",
               file=sys.stderr)
         return 1
 
-    testing.build_runner(ast)
+    try:
+        testing.build_runner(ast)
+    except testing.TestError as e:
+        print(f"\n[cryoc test] {e}", file=sys.stderr)
+        return 1
 
-    print(f"[cryoc test] {args.input} — {len(tests)} test(s) on --backend {args.backend}\n")
+    print(f"[cryoc test] {path} — {len(tests)} test(s) on --backend {args.backend}\n")
     # The suite writes to this terminal from a CHILD process, which does not
     # share this one's buffer — without the flush the header lands after the
     # results it introduces.
@@ -89,7 +149,7 @@ def main(argv=None):
     try:
         code = compiler._compile_resolved(
             ast, args.backend, not args.unsafe, compiler.default_abi(),
-            True, False, 'html', None, src, args.input)
+            True, False, 'html', None, src, path)
         return _run(code, args.backend, work)
     except Exception as e:
         print(f"\n[cryoc test] {type(e).__name__}: {e}", file=sys.stderr)

@@ -142,6 +142,25 @@ def main():
     out, _ = repl([':nonsense'])
     check("an unknown command says so", 'unknown command' in out, out[-300:])
 
+    # ── :load command ──────────────────────────────────────
+    print("\n── :load ──")
+    import tempfile
+    load_tmp = tempfile.NamedTemporaryFile(suffix='.cryo', delete=False, mode='w', encoding='utf-8')
+    load_tmp.write('fn times_three(int n) -> int ={ return n * 3; }\nint base_val = 100;\n')
+    load_tmp.close()
+    try:
+        out, _ = repl([f':load {load_tmp.name}', 'times_three(4)', 'base_val + 5'])
+        check(":load reports loaded", f"loaded {load_tmp.name}" in out, out[-400:])
+        check("loaded function can be called", "12" in out, out[-300:])
+        check("loaded variable is visible", "105" in out, out[-300:])
+        out_bad, _ = repl([':load non_existent_file.cryo'])
+        check(":load missing file reports error", "no such file" in out_bad, out_bad[-300:])
+    finally:
+        try:
+            os.remove(load_tmp.name)
+        except OSError:
+            pass
+
     print(f"\n{_passed} passed, {_failed} failed")
     return 1 if _failed else 0
 

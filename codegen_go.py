@@ -619,6 +619,7 @@ class CodeGenGo:
                   "\treturn fu.v",
                   "}", ""]
         if 'anycast' in self._helpers:
+            self._imports.add('fmt')
             # 11.31 — an `any` reaching a typed slot. go is the only backend
             # where the interface is explicit, so this supplies what pyro and
             # node do implicitly.
@@ -1680,6 +1681,8 @@ class CodeGenGo:
         self._indent += 1
         for s in n.body:
             self._gen(s)
+        if ret and (not n.body or not isinstance(n.body[-1], Return)):
+            self._emit('panic("unreachable")')
         self._indent -= 1
         self.te.pop()
         self._emit("}")

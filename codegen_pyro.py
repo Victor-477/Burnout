@@ -1040,7 +1040,7 @@ class CodeGenPyro:
             nid, argc = nat
             if len(n.args) != argc:
                 raise CodeGenPyroError(
-                    f"'{n.callee}' espera {argc} argumento(s), recebeu {len(n.args)}")
+                    f"'{n.callee}' expects {argc} argument(s), got {len(n.args)}")
             for a in n.args:
                 self._expr(a)
             self._emit(OP_NATIVE, (nid, argc))

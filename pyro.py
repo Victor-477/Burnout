@@ -211,6 +211,28 @@ def cmd_run(a):
         except OSError: pass
 
 
+def cmd_test(a):
+    import testrunner
+    argv = list(a.input)
+    if getattr(a, "backend", None):
+        argv.extend(["--backend", a.backend])
+    if getattr(a, "unsafe", False):
+        argv.append("--unsafe")
+    if getattr(a, "list", False):
+        argv.append("--list")
+    sys.exit(testrunner.main(argv))
+
+
+def cmd_repl(a):
+    import repl
+    argv = []
+    if getattr(a, "backend", None):
+        argv.extend(["--backend", a.backend])
+    if getattr(a, "unsafe", False):
+        argv.append("--unsafe")
+    sys.exit(repl.main(argv))
+
+
 def main():
     ap = argparse.ArgumentParser(prog="pyro", description="Cryo/Pyro toolchain — one command")
     sub = ap.add_subparsers(dest="cmd", required=True)
@@ -253,6 +275,20 @@ def main():
     pc = sub.add_parser("c", help="emit AOT C source")
     common(pc); pc.add_argument("-o", "--output", help="output .c path")
     pc.set_defaults(fn=cmd_c)
+
+    pt = sub.add_parser("test", help="run test fn declarations in Cryo file(s)")
+    pt.add_argument("input", nargs="+", help="the .cryo file(s) or directory to test")
+    pt.add_argument("--backend", default="pyro", choices=["pyro", "go", "node", "c"],
+                    help="backend to run the suite on (default: pyro)")
+    pt.add_argument("--unsafe", action="store_true", help="turn off safety instrumentation")
+    pt.add_argument("--list", action="store_true", help="list tests without running them")
+    pt.set_defaults(fn=cmd_test)
+
+    prep = sub.add_parser("repl", help="interactive Cryo REPL session")
+    prep.add_argument("--backend", default="pyro", choices=["pyro", "go", "node", "c"],
+                      help="backend to run the REPL on (default: pyro)")
+    prep.add_argument("--unsafe", action="store_true", help="turn off safety instrumentation")
+    prep.set_defaults(fn=cmd_repl)
 
     a = ap.parse_args()
     if not hasattr(a, "args"):

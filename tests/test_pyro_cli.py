@@ -75,5 +75,20 @@ else:
     check("build fails cleanly without a C toolchain",
           rb.returncode != 0 and "toolchain" in (rb.stderr + rb.stdout))
 
+# pyro test
+test_cryo = os.path.join(TMP, "cli_test.cryo")
+open(test_cryo, "w", encoding="utf-8").write('test fn t() ={ assert(1 == 1, "ok"); }\n')
+rt = run(["test", test_cryo])
+check("pyro test runs test suite", rt.returncode == 0 and "1 passed, 0 failed" in rt.stdout)
+rt_list = run(["test", test_cryo, "--list"])
+check("pyro test --list lists tests", rt_list.returncode == 0 and "test(s)" in rt_list.stdout)
+try: os.remove(test_cryo)
+except OSError: pass
+
+# pyro repl
+r_repl = subprocess.run([sys.executable, PYRO, "repl"], input="1 + 2\n:quit\n",
+                        capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60)
+check("pyro repl evaluates expression and exits", r_repl.returncode == 0 and "3" in r_repl.stdout)
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
