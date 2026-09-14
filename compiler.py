@@ -327,7 +327,7 @@ def _compile_resolved(ast, backend: str, safe: bool, abi: str,
     if backend == 'go':
         return CodeGenGo(safe=safe, sandbox=sandbox).generate(ast)
     if backend == 'node':
-        return CodeGenNode(safe=safe).generate(ast)
+        return CodeGenNode(safe=safe, sandbox=sandbox).generate(ast)
     if backend == 'csharp':
         return CodeGenCSharp(safe=safe).generate(ast)
     if backend == 'cpp':
@@ -500,10 +500,12 @@ def compile_file(input_path: str,
         backend, motivo = select_backend(load_ast(source, base_dir))
         print(f"→ backend automático: {backend}  ({motivo})")
 
-    # sandbox is applicable to both pyro (VM) and go (generated code) targets.
-    if sandbox and backend not in ('pyro', 'go'):
-        print(f"⚠ --sandbox only applies to pyro and go backends; ignored"
-              f"para '{backend}'.", file=sys.stderr)
+    # The sandbox now covers every PRIMARY executable backend — pyro (VM flag),
+    # go and node (guards in the generated code). It stays inapplicable to c,
+    # asm, wasm and frontend, which is why the warning survives.
+    if sandbox and backend not in ('pyro', 'go', 'node'):
+        print(f"⚠ --sandbox applies to the pyro, go and node backends; "
+              f"ignored for '{backend}'.", file=sys.stderr)
 
     # ── code generation ──
     try:

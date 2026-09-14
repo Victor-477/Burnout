@@ -153,8 +153,14 @@ class _Types:
 
 
 class CodeGenNode:
-    def __init__(self, safe: bool = True):
+    def __init__(self, safe: bool = True, sandbox: bool = False):
         self.safe = safe
+        # Phase 7 — the runtime sandbox reaches node too. It used to be
+        # pyro and go only, and node FAILED OPEN: the same --sandbox
+        # program that pyro and go refused would happily write the file
+        # here. Golden rule 1 is parity across pyro/go/node, and a
+        # security control is the worst place to be the odd one out.
+        self._sandbox = sandbox
         self._t = _Types()
         self._requires: List[str] = []
         self._enums:    List[str] = []
@@ -309,6 +315,19 @@ class CodeGenNode:
                   "  return v;",
                   "}",
                   "function cryoJSONEncode(v) { return JSON.stringify(cryoJSONSort(v)); }", ""]
+        if 'sandbox' in self._helpers:
+            # Mirrors cryoSandboxGuard() in the go backend, including the
+            # PYRO_SANDBOX=1 override: the environment can only TIGHTEN the
+            # baked-in value, never loosen it.
+            baked = 'true' if self._sandbox else 'false'
+            H += [f"const cryoSandbox = {baked} || process.env.PYRO_SANDBOX === \"1\";",
+                  "function cryoSandboxGuard(op) {",
+                  "  if (cryoSandbox) {",
+                  '    console.error("[Cryo Security] Sandbox: " + op +'
+                  ' " blocked by sandbox policy");',
+                  "    process.exit(1);",
+                  "  }",
+                  "}", ""]
         if 'len' in self._helpers:
             H += ["function cryoLen(x) {",
                   "  if (x == null) return 0;",
@@ -918,23 +937,41 @@ class CodeGenNode:
             return f"(fs.existsSync({A(0)}) ? fs.readdirSync({A(0)}).sort() : [])"
         if c == 'make_dir' and len(a) == 1:
             self._require('fs')
-            return f"((function(){{ try {{ fs.mkdirSync({A(0)}, {{ recursive: true }}); return true; }} catch(e) {{ return false; }} }})())"
+            self._helpers.add('sandbox')
+            # (guard(), expr) — the comma operator, PARENTHESISED. Without the
+            # parens `let x = guard(), expr` parses as two declarations.
+            return f"(cryoSandboxGuard('make_dir()'), " + f"((function(){{ try {{ fs.mkdirSync({A(0)}, {{ recursive: true }}); return true; }} catch(e) {{ return false; }} }})()))"
         if c == 'delete_file' and len(a) == 1:
             self._require('fs')
-            return f"((function(){{ try {{ if (fs.statSync({A(0)}).isDirectory()) return false; fs.unlinkSync({A(0)}); return true; }} catch(e) {{ return false; }} }})())"
+            self._helpers.add('sandbox')
+            # (guard(), expr) — the comma operator, PARENTHESISED. Without the
+            # parens `let x = guard(), expr` parses as two declarations.
+            return f"(cryoSandboxGuard('delete_file()'), " + f"((function(){{ try {{ if (fs.statSync({A(0)}).isDirectory()) return false; fs.unlinkSync({A(0)}); return true; }} catch(e) {{ return false; }} }})()))"
         if c == 'file_size' and len(a) == 1:
             self._require('fs')
             return f"((function(){{ try {{ return fs.statSync({A(0)}).size; }} catch(e) {{ return -1; }} }})())"
         if c == 'write_file' and len(a) == 2:
             self._require('fs')
-            return f"((function(){{ try {{ fs.writeFileSync({A(0)}, {A(1)}); return true; }} catch(e) {{ return false; }} }})())"
+            self._helpers.add('sandbox')
+            # (guard(), expr) — the comma operator, PARENTHESISED. Without the
+            # parens `let x = guard(), expr` parses as two declarations.
+            return f"(cryoSandboxGuard('write_file()'), " + f"((function(){{ try {{ fs.writeFileSync({A(0)}, {A(1)}); return true; }} catch(e) {{ return false; }} }})()))"
         if c == 'read_file' and len(a) == 1:
             self._require('fs')
-            return f"((function(){{ try {{ return fs.readFileSync({A(0)}, 'utf8'); }} catch(e) {{ return \"\"; }} }})())"
+            self._helpers.add('sandbox')
+            # (guard(), expr) — the comma operator, PARENTHESISED. Without the
+            # parens `let x = guard(), expr` parses as two declarations.
+            return f"(cryoSandboxGuard('read_file()'), " + f"((function(){{ try {{ return fs.readFileSync({A(0)}, 'utf8'); }} catch(e) {{ return \"\"; }} }})()))"
         if c == 'env' and len(a) == 1:
-            return f"(process.env[{A(0)}] || \"\")"
+            self._helpers.add('sandbox')
+            # (guard(), expr) — the comma operator, PARENTHESISED. Without the
+            # parens `let x = guard(), expr` parses as two declarations.
+            return f"(cryoSandboxGuard('env()'), " + f"(process.env[{A(0)}] || \"\"))"
         if c == 'exec' and len(a) == 1:
-            return f"((function(){{ try {{ return require('child_process').execSync({A(0)}, {{ encoding: 'utf8' }}); }} catch(e) {{ return e.stdout || \"\"; }} }})())"
+            self._helpers.add('sandbox')
+            # (guard(), expr) — the comma operator, PARENTHESISED. Without the
+            # parens `let x = guard(), expr` parses as two declarations.
+            return f"(cryoSandboxGuard('exec()'), " + f"((function(){{ try {{ return require('child_process').execSync({A(0)}, {{ encoding: 'utf8' }}); }} catch(e) {{ return e.stdout || \"\"; }} }})()))"
         if c == 'args' and len(a) == 0:
             return "process.argv.slice(2)"
         # user function call

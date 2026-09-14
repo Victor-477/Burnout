@@ -547,17 +547,20 @@ check("disasm shows 'sandbox' nas flags", "sandbox" in _dis_sbx)
 print("[go] sandbox (--sandbox)")
 _go_sbx = gen_go('string o = pyro_exec("ls");', sandbox=True)
 check("go --sandbox: var cryoSandbox = true", "var cryoSandbox = true" in _go_sbx)
+# Phase 7 — cryoExec takes the op name as a parameter; the guard itself is
+# `cryoSandboxGuard(op)` and the name is supplied per call site, so exec() no
+# longer reports itself as pyro_exec().
 check("go --sandbox: guard in cryoExec",
-      'cryoSandboxGuard("pyro_exec")' in _go_sbx)
+      'cryoSandboxGuard(op)' in _go_sbx and 'cryoExec("pyro_exec()"' in _go_sbx)
 _go_plain = gen_go('string b = http_get("http://x");')
 check("go without --sandbox: baked false + override by env",
       "var cryoSandbox = false" in _go_plain and
       'os.Getenv("PYRO_SANDBOX")' in _go_plain)
 check("go: http_get gets sandbox guard",
-      'cryoSandboxGuard("http_get")' in _go_plain)
+      'cryoSandboxGuard("http_get()")' in _go_plain)
 _go_wf = gen_go('bool ok = pyro_write_file("a.txt", "d");', sandbox=True)
 check("go: pyro_write_file guarded by sandbox",
-      'cryoSandboxGuard("pyro_write_file")' in _go_wf)
+      'cryoSandboxGuard("pyro_write_file()")' in _go_wf)
 check("go without builtin sensitive not emits sandbox",
       "cryoSandbox" not in gen_go('int x = 1; print(x);'))
 
@@ -1310,7 +1313,7 @@ _dwb = disasm_pyro.disassemble(gen_pyro(_wb, encode=False))
 check("pyro: write_bytes becomes NATIVE 27 (argc 2)", "NATIVE 27 2" in _dwb)
 check("go: write_bytes uses cryoWriteBytes", "cryoWriteBytes(" in gen_go(_wb))
 check("go: write_bytes guarded by sandbox",
-      'cryoSandboxGuard("write_bytes")' in gen_go(_wb))
+      'cryoSandboxGuard("write_bytes()")' in gen_go(_wb))
 try:
     from semantic import check as _sem_check
     _sem_check(ast_of(_wb))   # not deve acusar 'function unknown'
