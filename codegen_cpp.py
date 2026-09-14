@@ -103,6 +103,47 @@ def _is_null(node, t: str) -> bool:
     return t == 'null' or (isinstance(node, Literal) and node.kind == 'null')
 
 
+def _cpp_split_commas(s: str):
+    """Top-level commas only: `fn(int)->int, string` is two types, not three."""
+    out, depth, cur = [], 0, ''
+    for ch in s:
+        if ch in '(<[':
+            depth += 1
+        elif ch in ')>]':
+            depth -= 1
+        if ch == ',' and depth == 0:
+            out.append(cur.strip()); cur = ''
+        else:
+            cur += ch
+    if cur.strip():
+        out.append(cur.strip())
+    return out
+
+
+def _cpp_fn_type(t: str) -> str:
+    """`fn(P1,P2)->R` -> `std::function<R(P1, P2)>`.
+
+    Matched to the parameter list by BRACKET DEPTH rather than by the first
+    `)`, because a parameter can itself be a function type — `fn(fn(int)->int)
+    ->int` closes an inner paren first, and splitting there would produce a
+    return type of `->int)->int`.
+    """
+    i, depth = 3, 1
+    while i < len(t) and depth:
+        if t[i] == '(':
+            depth += 1
+        elif t[i] == ')':
+            depth -= 1
+            if depth == 0:
+                break
+        i += 1
+    params = t[3:i]
+    rest = t[i + 1:]
+    ret = rest[2:] if rest.startswith('->') else 'void'
+    cps = ', '.join(cpp_type(p) for p in _cpp_split_commas(params))
+    return f"std::function<{cpp_type(ret)}({cps})>"
+
+
 def cpp_type(t: str) -> str:
     if not t:
         return 'auto'
@@ -119,9 +160,7 @@ def cpp_type(t: str) -> str:
     if t.startswith('(') and t.endswith(')'):
         return cpp_type(t[1:-1])
     if t.startswith('fn(') and '->' in t:
-        raise CodeGenCppError(
-            f"function type '{t}' (first-class functions) is not yet supported "
-            f"in the C++ backend; use --backend go, node or pyro.")
+        return _cpp_fn_type(t)
     if t.startswith('future<'):
         raise CodeGenCppError(
             "concurrency (spawn/await) is not supported in the C++ backend; "
@@ -576,6 +615,39 @@ class CodeGenCpp:
             self._emit("}")
         self._indent -= 1
         self._emit("}")
+
+    def _lambda(self, n: Lambda) -> str:
+        """`(int v) => v * 2` -> `[=](int64_t v) -> int64_t { return v * 2; }`.
+
+        Captured BY VALUE (`[=]`), which is what the other backends do and the
+        only choice that is safe here: a Cryo lambda can outlive the scope that
+        built it — it is stored in a std::function and returned — and `[&]`
+        would leave it holding references to dead locals. A dangling capture
+        does not fail at the capture, it fails later and elsewhere.
+        """
+        params = ', '.join(f"{cpp_type(pt)} {cppid(pn)}" for pt, pn in n.params)
+        ret = n.return_type or self._infer_lambda_ret(n)
+        body = []
+        prev, self._cur = self._cur, body
+        prev_i, self._indent = self._indent, 1
+        self.te.push()
+        for pt, pn in n.params:
+            self.te.set(pn, pt)
+        for st in n.body:
+            self._gen(st)
+        self.te.pop()
+        self._cur, self._indent = prev, prev_i
+        inner = (chr(10)).join(body)
+        return (f"[=]({params}) -> {cpp_type(ret)} {{" + chr(10)
+                + inner + chr(10) + ("    " * prev_i) + "}")
+
+    def _infer_lambda_ret(self, n: Lambda) -> str:
+        """The type of the first `return` in the body, else void."""
+        for st in n.body:
+            if isinstance(st, Return) and st.value is not None:
+                t = self.te.infer(st.value)
+                return t if t != 'unknown' else 'int'
+        return 'void'
 
     def _data_enum(self, n: EnumDecl):
         """An enum with payloads -> a small class hierarchy behind shared_ptr.
@@ -1122,9 +1194,12 @@ class CodeGenCpp:
         if isinstance(node, (SpawnExpr, AwaitExpr)):
             self._err("concurrency (spawn/await) is not supported in the C++ "
                       "backend; use --backend go or pyro.")
-        if isinstance(node, (Lambda, CallValueExpr)):
-            self._err("first-class functions are not yet supported in the C++ "
-                      "backend; use --backend go, node or pyro.")
+        if isinstance(node, Lambda):
+            return self._lambda(node)
+        if isinstance(node, CallValueExpr):
+            # Calling the result of an expression: `f(x)` where f is a value.
+            args = ', '.join(self._expr(x) for x in node.args)
+            return f"({self._expr(node.callee)})({args})"
         if isinstance(node, CastExpr):
             self._err("'as T' (JSON casting) is not yet supported in the C++ "
                       "backend; use --backend go, node or pyro.")

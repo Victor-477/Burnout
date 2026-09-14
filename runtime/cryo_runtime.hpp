@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <functional>   // std::function — Cryo's fn(T)->R
 #include <cstdlib>
 #include <iostream>
 #include <map>

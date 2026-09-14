@@ -842,6 +842,44 @@ agree("enums survive in an array",
       'enum R { Ok(int), Err(string) }\nR[] rs = [Ok(1), Err(\"x\")];\nfor (R r in rs) { match r { Ok(v) => { print(v); } Err(e) => { print(e); } } }\n',
       backends=_CPPSET, expect="1\nx")
 
+# ── first-class functions on the C++ backend ─────────────────
+#
+# `fn(T)->R` maps to std::function and a lambda literal to a C++ lambda
+# capturing BY VALUE. By value is not a style choice: a Cryo lambda can
+# outlive the scope that built it — stored in a std::function and returned
+# — and `[&]` would leave it holding references to dead locals. That fails
+# later and elsewhere, never at the capture, so "returned closure" below is
+# the case that actually tests it.
+print("\n── first-class functions on cpp ──")
+
+agree("a lambda literal runs",
+      'fn(int)->int f = (int v) => v + 1;\nprint(f(41));\n',
+      backends=_CPPSET, expect="42")
+
+agree("a named function is a value",
+      'fn dbl(int n) -> int ={ return n*2; }\nfn(int)->int f = dbl;\nprint(f(21));\n',
+      backends=_CPPSET, expect="42")
+
+agree("a lambda captures an enclosing local",
+      'int base = 10;\nfn(int)->int f = (int v) => v + base;\nprint(f(5));\n',
+      backends=_CPPSET, expect="15")
+
+agree("a returned closure outlives the frame that built it",
+      'fn mk(int b) -> fn(int)->int ={ return (int v) => v + b; }\nfn(int)->int g = mk(100);\nprint(g(5));\n',
+      backends=_CPPSET, expect="105")
+
+agree("a function is passed as a parameter",
+      'fn apply(fn(int)->int f, int x) -> int ={ return f(x); }\nprint(apply((int v) => v * 3, 7));\n',
+      backends=_CPPSET, expect="21")
+
+agree("functions live in an array",
+      '(fn(int)->int)[] ops = [(int v) => v + 1, (int v) => v * 2];\nprint(ops[0](10)); print(ops[1](10));\n',
+      backends=_CPPSET, expect="11\n20")
+
+agree("map / filter / reduce",
+      'int[] xs=[1,2,3,4];\nprint(map(xs, (int v) => v * 2));\nprint(filter(xs, (int v) => v % 2 == 0));\nprint(reduce(xs, (int a, int b) => a + b, 0));\n',
+      backends=_CPPSET, expect="[2, 4, 6, 8]\n[2, 4]\n10")
+
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))
 sys.exit(1 if _failed else 0)
