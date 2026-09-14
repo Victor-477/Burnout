@@ -1322,6 +1322,27 @@ except Exception:
     check("semantics: write_bytes is builtin known", False)
 
 # ── range-based for loops (Phase 10.1) ──────────────────────
+# ── a bare throw() has ONE default, decided in the front end ──
+# It used to have three: pyro threw null, node threw the string "erro", and
+# the go backend indexed args[0] and crashed the compiler with
+# "[Internal Error] list index out of range" — an internal error on input the
+# analyser accepts. Desugared in the parser now, so every backend sees the
+# same explicit null (golden rule 2).
+print("[throw] a bare throw() defaults to null everywhere")
+_thr = 'try { throw(); } catch (string e) { print(e); }'
+check("bare throw() compiles on go (used to crash the compiler)",
+      'panic(' in gen_go(_thr))
+# Assert the DESUGAR itself: the parser must hand every backend an explicit
+# null argument, which is what makes the three agree.
+_thr_ast = ast_of('throw();')
+_thr_call = _thr_ast.statements[0]
+check("the parser gives throw() an explicit null argument",
+      getattr(_thr_call, 'callee', None) == 'throw'
+      and len(_thr_call.args) == 1
+      and getattr(_thr_call.args[0], 'kind', None) == 'null')
+check("node no longer invents the Portuguese default 'erro'",
+      '"erro"' not in gen_node(_thr))
+
 print("[phase10] range for-loops")
 _rng = 'int s = 0; for (int i in 0..5) { s += i; } print(s);'
 _rngi = 'int s = 0; for (int i in 1..=5) { s += i; } print(s);'
