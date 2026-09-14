@@ -791,6 +791,57 @@ agree("try/catch binds the message string",
       backends=_NEW, expect="caught: boom")
 
 
+# ── data-carrying enums on the C++ backend ───────────────────
+#
+# The cpp backend refused ADTs outright until now. It compiles them to a
+# small class hierarchy behind shared_ptr — C++14 has no std::variant — so
+# these RUN it against pyro rather than inspecting the emitted C++: the
+# point is that the ANSWER agrees, and "it generated plausible C++" is the
+# weaker claim 11.33 already showed can be false.
+#
+# cpp is named explicitly because the default set is pyro/node/go.
+print("\n── data enums on cpp ──")
+_CPPSET = ('pyro', 'cpp')
+
+agree("a variant carrying a payload renders like everywhere else",
+      'enum R { Ok(int), Err(string) }\nR r = Ok(5);\nprint(r);\n',
+      backends=_CPPSET, expect="{tag: Ok, val0: 5}")
+
+agree("a payload-less variant of a DATA enum is a value, not an int",
+      'enum R { Ok(int), None }\nR r = None;\nprint(r);\n',
+      backends=_CPPSET, expect="{tag: None}")
+
+agree("both constructor spellings build the same value",
+      'enum R { Ok(int), Err(string) }\nR a = Ok(7); R b = R_Ok(7);\nprint(a); print(b);\n',
+      backends=_CPPSET, expect="{tag: Ok, val0: 7}\n{tag: Ok, val0: 7}")
+
+agree("match binds the payload",
+      'enum R { Ok(int), Err(string) }\nR r = Err(\"bad\");\nmatch r { Ok(v) => { print(v); } Err(e) => { print(\"err:\" + e); } }\n',
+      backends=_CPPSET, expect="err:bad")
+
+agree("a wildcard arm catches the rest",
+      'enum R { Ok(int), Err(string) }\nR r = Err(\"x\");\nmatch r { Ok(v) => { print(\"ok\"); } _ => { print(\"other\"); } }\n',
+      backends=_CPPSET, expect="other")
+
+agree("several payloads bind in order",
+      'enum P { Pt(int,int), Z }\nP p = Pt(3,4);\nprint(p);\nmatch p { Pt(x,y) => { print(x + y); } Z => { print(0); } }\n',
+      backends=_CPPSET, expect="{tag: Pt, val0: 3, val1: 4}\n7")
+
+# The subject goes into a temporary and is evaluated ONCE. An if/else
+# chain over the raw expression would call mk() again per arm —
+# silently, and visible only when the subject has a side effect.
+agree("the match subject is evaluated once",
+      'enum R { Ok(int), Err(string) }\nfn mk() -> R ={ print(\"called\"); return Ok(1); }\nmatch mk() { Ok(v) => { print(v); } Err(e) => { print(e); } }\n',
+      backends=_CPPSET, expect="called\n1")
+
+agree("match nests without the temporaries colliding",
+      'enum R { Ok(int), Err(string) }\nR a = Ok(2);\nmatch a { Ok(v) => { match a { Ok(w) => { print(v + w); } _ => { print(0); } } } _ => { print(9); } }\n',
+      backends=_CPPSET, expect="4")
+
+agree("enums survive in an array",
+      'enum R { Ok(int), Err(string) }\nR[] rs = [Ok(1), Err(\"x\")];\nfor (R r in rs) { match r { Ok(v) => { print(v); } Err(e) => { print(e); } } }\n',
+      backends=_CPPSET, expect="1\nx")
+
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))
 sys.exit(1 if _failed else 0)
