@@ -143,6 +143,72 @@ template <class T> std::string str(const std::shared_ptr<T>& p) {
 
 template <class T> void print(const T& v) { std::cout << str(v) << std::endl; }
 
+// ── JSON encoding (12.10) ──
+
+inline std::string json_quote(const std::string& s) {
+    std::string out = "\"";
+    for (size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        if (c == '"') out += "\\\"";
+        else if (c == '\\') out += "\\\\";
+        else if (c == '\b') out += "\\b";
+        else if (c == '\f') out += "\\f";
+        else if (c == '\n') out += "\\n";
+        else if (c == '\r') out += "\\r";
+        else if (c == '\t') out += "\\t";
+        else out += c;
+    }
+    out += "\"";
+    return out;
+}
+
+inline std::string json_encode(bool v) { return v ? "true" : "false"; }
+inline std::string json_encode(int64_t v) { return str(v); }
+inline std::string json_encode(int v) { return str(v); }
+inline std::string json_encode(double v) { return str(v); }
+inline std::string json_encode(const std::string& v) { return json_quote(v); }
+inline std::string json_encode(const char* v) { return json_quote(std::string(v)); }
+inline std::string json_encode(std::nullptr_t) { return "null"; }
+
+template <class T> std::string json_encode(const Arr<T>& a);
+template <class K, class V> std::string json_encode(const Map<K, V>& m);
+template <class T> std::string json_encode(const std::shared_ptr<T>& p);
+
+template <class T> std::string json_encode(const Arr<T>& a) {
+    if (!a) return "null";
+    std::string out = "[";
+    for (size_t i = 0; i < a->size(); ++i) {
+        if (i) out += ",";
+        out += json_encode((*a)[i]);
+    }
+    return out + "]";
+}
+
+template <class K, class V> std::string json_encode(const Map<K, V>& m) {
+    if (!m) return "null";
+    std::vector<std::pair<std::string, std::string> > pairs;
+    for (typename std::map<K, V>::const_iterator it = m->begin(); it != m->end(); ++it) {
+        pairs.push_back(std::make_pair(str(it->first), json_encode(it->second)));
+    }
+    std::sort(pairs.begin(), pairs.end(),
+              [](const std::pair<std::string, std::string>& a,
+                 const std::pair<std::string, std::string>& b) {
+                  return a.first < b.first;
+              });
+    std::string out = "{";
+    for (size_t i = 0; i < pairs.size(); ++i) {
+        if (i) out += ",";
+        out += json_quote(pairs[i].first) + ":" + pairs[i].second;
+    }
+    return out + "}";
+}
+
+template <class T> std::string json_encode(const std::shared_ptr<T>& p) {
+    if (!p) return "null";
+    return json_encode(*p);
+}
+
+
 // ── throw / catch ──
 //
 // The value a catch binds is the message STRING, not an exception object —

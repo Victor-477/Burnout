@@ -38,7 +38,7 @@ def main(argv=None):
         description='Run the `test fn` declarations in a Cryo file.')
     ap.add_argument('input', nargs='+', help='the .cryo file(s) or directory to test')
     ap.add_argument('--backend', default='pyro',
-                    choices=['pyro', 'go', 'node', 'c'],
+                    choices=['pyro', 'go', 'node', 'c', 'cpp', 'csharp'],
                     help='which backend to run the suite on (default: pyro)')
     ap.add_argument('--unsafe', action='store_true',
                     help='turn off safety instrumentation')
@@ -182,28 +182,65 @@ def _run(code, backend, work):
             f.write(code)
         return subprocess.run(['go', 'run', out], cwd=work).returncode
     # c: the backend emits source; compile it the way the driver does
-    out = os.path.join(work, 'suite.c')
-    with open(out, 'w', encoding='utf-8') as f:
-        f.write(code)
-    import shutil
-    cc = next((c for c in ('gcc', 'clang', 'cc') if shutil.which(c)), None)
-    if cc is None:
-        print("[cryoc test] no C toolchain found", file=sys.stderr)
-        return 2
-    exe = os.path.join(work, 'suite' + ('.exe' if sys.platform == 'win32' else ''))
-    rt = os.path.join(_here, 'runtime', 'cryo_runtime.c')
-    libs = ['-lm'] + (['-lws2_32'] if sys.platform == 'win32' else [])
-    r = subprocess.run([cc, '-O2', '-std=c11', '-I', os.path.join(_here, 'runtime'),
-                        '-o', exe, out, rt] + libs, capture_output=True, text=True)
-    if r.returncode != 0:
-        print(r.stderr[-800:], file=sys.stderr)
-        return 1
-    return subprocess.run([exe]).returncode
+    if backend == 'c':
+        out = os.path.join(work, 'suite.c')
+        with open(out, 'w', encoding='utf-8') as f:
+            f.write(code)
+        import shutil
+        cc = next((c for c in ('gcc', 'clang', 'cc') if shutil.which(c)), None)
+        if cc is None:
+            print("[cryoc test] no C toolchain found", file=sys.stderr)
+            return 2
+        exe = os.path.join(work, 'suite' + ('.exe' if sys.platform == 'win32' else ''))
+        rt = os.path.join(_here, 'runtime', 'cryo_runtime.c')
+        libs = ['-lm'] + (['-lws2_32'] if sys.platform == 'win32' else [])
+        r = subprocess.run([cc, '-O2', '-std=c11', '-I', os.path.join(_here, 'runtime'),
+                            '-o', exe, out, rt] + libs, capture_output=True, text=True)
+        if r.returncode != 0:
+            print(r.stderr[-800:], file=sys.stderr)
+            return 1
+        return subprocess.run([exe]).returncode
+    if backend == 'cpp':
+        out = os.path.join(work, 'suite.cpp')
+        with open(out, 'w', encoding='utf-8') as f:
+            f.write(code)
+        import compiler
+        cxx, cxx_dir = compiler.find_cxx()
+        if cxx is None:
+            cxx, cxx_dir = 'g++', None
+        exe = os.path.join(work, 'suite' + ('.exe' if sys.platform == 'win32' else ''))
+        rt_dir = os.path.join(_here, 'runtime')
+        cmd = [cxx, '-std=c++14', '-O2', '-I', rt_dir, out, '-o', exe]
+        if 'clang' not in os.path.basename(cxx).lower():
+            cmd += ['-static-libgcc', '-static-libstdc++']
+        build_env = None
+        if cxx_dir:
+            build_env = dict(os.environ)
+            build_env['PATH'] = cxx_dir + os.pathsep + build_env.get('PATH', '')
+        r = subprocess.run(cmd, capture_output=True, text=True, env=build_env)
+        if r.returncode != 0:
+            print(r.stderr[-800:], file=sys.stderr)
+            return 1
+        return subprocess.run([exe]).returncode
+    if backend == 'csharp':
+        out = os.path.join(work, 'suite.cs')
+        with open(out, 'w', encoding='utf-8') as f:
+            f.write(code)
+        import compiler
+        proj = compiler._csharp_project(out)
+        if proj is None:
+            print("[cryoc test] dotnet not found — cannot run C# suite", file=sys.stderr)
+            return 2
+        return subprocess.run(['dotnet', 'run', '--project', proj,
+                               '-v', 'quiet', '--nologo']).returncode
+    return 1
 
 
 def _find_vm():
     exe = '.exe' if sys.platform == 'win32' else ''
     for c in (os.path.join(_root, 'build', 'pyrovm' + exe),
+              os.path.join(_root, 'build', 'pyrovm_cpp' + exe),
+              os.path.join(_root, 'build', 'pyrovm_cs' + exe),
               os.path.join(_root, 'Pyro', 'vm', 'pyrovm_go' + exe),
               os.path.join(_root, 'Pyro', 'vm', 'pyrovm' + exe)):
         if os.path.isfile(c):

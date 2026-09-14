@@ -74,6 +74,53 @@ public static class Cryo {
 
     public static void Print(object v) { Console.WriteLine(Str(v)); }
 
+    public static string JSONQuote(string s) {
+        if (s == null) return "null";
+        var sb = new System.Text.StringBuilder("\"");
+        foreach (char c in s) {
+            if (c == '"') sb.Append("\\\"");
+            else if (c == '\\') sb.Append("\\\\");
+            else if (c == '\b') sb.Append("\\b");
+            else if (c == '\f') sb.Append("\\f");
+            else if (c == '\n') sb.Append("\\n");
+            else if (c == '\r') sb.Append("\\r");
+            else if (c == '\t') sb.Append("\\t");
+            else sb.Append(c);
+        }
+        sb.Append("\"");
+        return sb.ToString();
+    }
+
+    public static string JSONEncode(object v) {
+        if (v == null) return "null";
+        if (v is bool) return ((bool)v) ? "true" : "false";
+        if (v is double) return Num((double)v);
+        if (v is float) return Num((double)(float)v);
+        if (v is long || v is int || v is short || v is sbyte || v is ulong || v is uint || v is ushort || v is byte)
+            return Convert.ToString(v, CultureInfo.InvariantCulture);
+        if (v is string) return JSONQuote((string)v);
+        if (v is System.Collections.IDictionary) {
+            var map = (System.Collections.IDictionary)v;
+            var keys = new List<string>();
+            var byText = new Dictionary<string, object>();
+            foreach (System.Collections.DictionaryEntry e in map) {
+                string k = Str(e.Key);
+                if (!byText.ContainsKey(k)) { keys.Add(k); byText[k] = e.Value; }
+            }
+            keys.Sort(StringComparer.Ordinal);
+            var parts = new List<string>();
+            foreach (var k in keys) parts.Add(JSONQuote(k) + ":" + JSONEncode(byText[k]));
+            return "{" + string.Join(",", parts) + "}";
+        }
+        if (v is System.Collections.IEnumerable) {
+            var parts = new List<string>();
+            foreach (var x in (System.Collections.IEnumerable)v) parts.Add(JSONEncode(x));
+            return "[" + string.Join(",", parts) + "]";
+        }
+        return JSONQuote(Convert.ToString(v, CultureInfo.InvariantCulture));
+    }
+
+
     // ── aborts ──
     //
     // The envelope is this engine's to choose — the VM prefixes "[Pyro VM] ",

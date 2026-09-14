@@ -49,6 +49,10 @@ _CPP_LANGS = ('c++', 'cpp', 'cxx')
 # cpp_type needs to know both — and threading an environment through its forty
 # call sites would cost more than a module global the compiler resets.
 _ENUM_NAMES: Set[str] = set()
+# Enums with at least one data-carrying member. They compile to a class
+# hierarchy behind a shared_ptr, not to an integer constant, so cpp_type()
+# has to answer differently for them than for a plain enum.
+_DATA_ENUMS: Set[str] = set()
 _STRUCT_NAMES: Set[str] = set()
 
 
@@ -102,6 +106,10 @@ def _is_null(node, t: str) -> bool:
 def cpp_type(t: str) -> str:
     if not t:
         return 'auto'
+    if t in _DATA_ENUMS:
+        # shared_ptr so `str()` renders it through the runtime's pointer
+        # overload, and so a null variant prints "null" like everywhere else.
+        return f"std::shared_ptr<{t}_Base>"
     if t in _ENUM_NAMES:
         return 'int64_t'
     if t in _STRUCT_NAMES:
@@ -318,6 +326,9 @@ class CodeGenCpp:
         self._tmp = 0
         self._imported_langs: Set[str] = set()
         self._plain_enum_member: Dict[str, str] = {}
+        # member spelling -> (enum, member) for data-carrying enums
+        self._variant_of: Dict[str, tuple] = {}
+        self._zero_arg_variant: Set[str] = set()
 
     @property
     def _safe(self) -> bool:
@@ -340,6 +351,7 @@ class CodeGenCpp:
 
     def generate(self, program: Program) -> str:
         _ENUM_NAMES.clear()
+        _DATA_ENUMS.clear()
         _STRUCT_NAMES.clear()
         self._imported_langs = collect_imports(program)
         self._pre_scan(program.statements)
@@ -373,8 +385,27 @@ class CodeGenCpp:
             elif isinstance(n, EnumDecl):
                 self.te.reg_enum(n.name)
                 _ENUM_NAMES.add(n.name)
+                if any(m.fields for m in n.members):
+                    _DATA_ENUMS.add(n.name)
+                    for m in n.members:
+                        # Both spellings construct: `Ok(x)` and `Result_Ok(x)`.
+                        self._variant_of[m.name] = (n.name, m.name)
+                        self._variant_of[f"{n.name}_{m.name}"] = (n.name, m.name)
+                        if not m.fields:
+                            # A payload-less member of a DATA enum is still a
+                            # VALUE in Cryo (`R c = None;`), but it compiles to
+                            # a constructor call here — 12.9's shape.
+                            self._zero_arg_variant.add(m.name)
+                            self._zero_arg_variant.add(f"{n.name}_{m.name}")
+                is_data = n.name in _DATA_ENUMS
                 for m in n.members:
-                    if not m.fields:
+                    # Only a PLAIN enum's members are integer constants. A
+                    # payload-less member of a data enum is a constructor call,
+                    # and registering it here too shadowed that: the identifier
+                    # path checks this map first, so `R c = None;` emitted
+                    # `R_None` — the constructor's NAME, never called — and g++
+                    # rejected the assignment of a function to a shared_ptr.
+                    if not m.fields and not is_data:
                         self._plain_enum_member[m.name] = f"{n.name}_{m.name}"
                         self._plain_enum_member[f"{n.name}_{m.name}"] = f"{n.name}_{m.name}"
                     self.te.reg_enum_member(m.name, f"{n.name}_{m.name}")
@@ -443,8 +474,7 @@ class CodeGenCpp:
             self._err("'skill' (the LLM layer) is not supported in the C++ "
                       "backend; use --backend go.")
         elif isinstance(node, MatchStatement):
-            self._err("'match' on a data-carrying enum is not yet supported in "
-                      "the C++ backend; use --backend go, node or pyro.")
+            self._match(node)
         elif isinstance(node, (CallExpr, MethodCallExpr, CallValueExpr)):
             self._emit(self._expr(node) + ';')
         else:
@@ -478,13 +508,141 @@ class CodeGenCpp:
 
     def _enum(self, n: EnumDecl):
         if any(m.fields for m in n.members):
-            self._err(
-                "enums with data (algebraic data types) are not yet supported "
-                "in the C++ backend; use --backend go, node or pyro.")
+            self._data_enum(n)
+            return
         # Constants, not an `enum class`: the member is an integer VALUE in
         # Cryo (12.9), so `print(e)` is "0" and not "A".
         for i, m in enumerate(n.members):
             self._emit(f"static const int64_t {n.name}_{m.name} = {i};")
+        self._emit()
+
+    def _match(self, n: MatchStatement):
+        """`match x { Ok(v) => { … } _ => { … } }` -> an if/else-if chain.
+
+        Dispatch is on the virtual tag rather than on dynamic_cast, so it costs
+        one string compare and needs no RTTI. The payload is reached by a
+        static_cast, which is safe precisely because the tag was just checked.
+
+        The subject is evaluated ONCE into a temporary: `match f(x) { … }` must
+        not call f again per arm, which is the bug an if/else chain over the
+        raw expression would introduce silently.
+        """
+        tmp = self._next_tmp()
+        self._emit("{")
+        self._indent += 1
+        self._emit(f"auto {tmp} = {self._expr(n.subject)};")
+        first = True
+        default_case = None
+        for case in n.cases:
+            if case.pattern_name == '_':
+                default_case = case
+                continue
+            owner = self._variant_of.get(case.pattern_name)
+            if owner is None:
+                self._err(f"pattern '{case.pattern_name}' is not a known "
+                          f"variant of a data-carrying enum")
+            ename, mname = owner
+            kw = "if" if first else "} else if"
+            first = False
+            self._emit(f'{kw} ({tmp}->_tag() == "{mname}") {{')
+            self._indent += 1
+            if case.pattern_vars:
+                sname = f"{ename}__{mname}"
+                cast = self._next_tmp()
+                self._emit(f"auto* {cast} = static_cast<{sname}*>({tmp}.get());")
+                self.te.push()
+                for i, vname in enumerate(case.pattern_vars):
+                    self._emit(f"auto {cppid(vname)} = {cast}->val{i};")
+                    self._emit(f"(void){cppid(vname)};")
+                for st in case.body:
+                    self._gen(st)
+                self.te.pop()
+            else:
+                for st in case.body:
+                    self._gen(st)
+            self._indent -= 1
+        if default_case is not None:
+            if first:
+                for st in default_case.body:
+                    self._gen(st)
+            else:
+                self._emit("} else {")
+                self._indent += 1
+                for st in default_case.body:
+                    self._gen(st)
+                self._indent -= 1
+                self._emit("}")
+        elif not first:
+            self._emit("}")
+        self._indent -= 1
+        self._emit("}")
+
+    def _data_enum(self, n: EnumDecl):
+        """An enum with payloads -> a small class hierarchy behind shared_ptr.
+
+        C++14 has no std::variant, so this is the go backend's shape rather
+        than a union: one base with a virtual tag, one derived struct per
+        variant, and a free function per variant to build it.
+
+        The variant STRUCT is `R__Ok` and the constructor is `R_Ok`, two
+        underscores against one. They cannot share a name: that collision is
+        what 11.33 hit on the go backend, where `Result_Ok(5)` resolved to the
+        struct and was read as a type conversion rather than a call.
+
+        `_str()` is virtual so the runtime's `str(shared_ptr<T>)` renders it
+        by dereferencing — which also means a null enum prints "null", as it
+        does on every other backend. The rendering is fixed by the other
+        backends: `{tag: Ok, val0: 5}`, and `{tag: None}` with no payload.
+        """
+        base = f"{n.name}_Base"
+        self._emit(f"struct {base} {{")
+        self._indent += 1
+        self._emit(f"virtual ~{base}() {{}}")
+        self._emit("virtual std::string _tag() const = 0;")
+        self._emit("virtual std::string _str() const = 0;")
+        self._indent -= 1
+        self._emit("};")
+        self._emit(f"using {n.name} = std::shared_ptr<{base}>;")
+        self._emit()
+
+        for m in n.members:
+            sname = f"{n.name}__{m.name}"
+            self._emit(f"struct {sname} : {base} {{")
+            self._indent += 1
+            for i, ft in enumerate(m.fields or []):
+                self._emit(f"{cpp_type(ft)} val{i};")
+            if m.fields:
+                params = ', '.join(f"{cpp_type(ft)} a{i}"
+                                   for i, ft in enumerate(m.fields))
+                init = ', '.join(f"val{i}(a{i})" for i in range(len(m.fields)))
+                self._emit(f"{sname}({params}) : {init} {{}}")
+            self._emit(f'std::string _tag() const {{ return "{m.name}"; }}')
+            if m.fields:
+                parts = ' + ", " + '.join(
+                    f'std::string("val{i}: ") + cryo::str(val{i})'
+                    for i in range(len(m.fields)))
+                self._emit('std::string _str() const { return std::string("{tag: '
+                           + m.name + ', ") + ' + parts + ' + "}"; }')
+            else:
+                self._emit('std::string _str() const { return "{tag: '
+                           + m.name + '}"; }')
+            self._indent -= 1
+            self._emit("};")
+
+        # Constructors, both spellings. `inline` so a header-like emission
+        # cannot produce duplicate symbols.
+        for m in n.members:
+            sname = f"{n.name}__{m.name}"
+            params = ', '.join(f"{cpp_type(ft)} a{i}"
+                               for i, ft in enumerate(m.fields or []))
+            args = ', '.join(f"a{i}" for i in range(len(m.fields or [])))
+            for fname in (m.name, f"{n.name}_{m.name}"):
+                self._emit(f"inline {n.name} {fname}({params}) {{ "
+                           f"return std::make_shared<{sname}>({args}); }}")
+        # Rendering: found by ADL on the base class, which is why both live in
+        # the global namespace alongside the generated structs.
+        self._emit(f"inline std::string str(const {base}& v) "
+                   f"{{ return v._str(); }}")
         self._emit()
 
     def _fn(self, n: FunctionDecl):
@@ -882,6 +1040,11 @@ class CodeGenCpp:
             m = self._plain_enum_member.get(node.name)
             if m and self.te.get(node.name) == 'unknown':
                 return m
+            # `R c = None;` — a payload-less variant of a data enum is written
+            # as a value and built by calling its constructor.
+            if (node.name in self._zero_arg_variant
+                    and self.te.get(node.name) == 'unknown'):
+                return f"{cppid(node.name)}()"
             return cppid(node.name)
 
         if isinstance(node, BinaryExpr):
@@ -1139,6 +1302,9 @@ class CodeGenCpp:
             return f"cryo::keys({E(0)})"
         if c == 'remove' and len(a) == 2:
             return f"cryo::remove({E(0)}, {E(1)})"
+
+        if c == 'json_encode' and len(a) == 1:
+            return f"cryo::json_encode({E(0)})"
 
         if c in ('llm', 'agent', 'llm_call', 'llm_try', 'agent_call',
                  'agent_try', 'llm_stream', 'skills', 'skill_get'):

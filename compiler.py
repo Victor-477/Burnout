@@ -514,7 +514,10 @@ def compile_file(input_path: str,
                               assets=assets, use_cache=use_cache,
                               path=input_path, sign_key=sign_key)
     except (CodeGenError, CodeGenGoError, CodeGenAsmError,
-            CodeGenPyroError, CodeGenNodeError) as e:
+            CodeGenPyroError, CodeGenNodeError,
+            # cpp and csharp were missing here, so a backend that REFUSED a
+            # construct escaped the safety net instead of falling back to go.
+            CodeGenCppError, CodeGenCSharpError) as e:
         # safety net: if auto chose a backend that failed,
         # recompiles in go (superset) instead of aborting.
         if auto and backend != 'go':
@@ -859,6 +862,15 @@ def main() -> None:
         print(f"\n[CodeGen Node Error] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenWasmError as e:
         print(f"\n[CodeGen Wasm Error] {e}", file=sys.stderr); sys.exit(1)
+    # Without these two a DELIBERATE refusal from the cpp or csharp backend
+    # fell through to `except Exception` below, which prints "[Internal
+    # Error]" and re-raises — so a carefully worded "not supported yet, use
+    # --backend go" arrived as a compiler crash with a Python traceback.
+    # The message was right; the frame around it blamed the wrong party.
+    except CodeGenCppError as e:
+        print(f"\n[CodeGen C++ Error] {e}", file=sys.stderr); sys.exit(1)
+    except CodeGenCSharpError as e:
+        print(f"\n[CodeGen C# Error] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenError   as e:
         print(f"\n[CodeGen Error]   {e}", file=sys.stderr); sys.exit(1)
     except Exception      as e:
