@@ -880,6 +880,38 @@ agree("map / filter / reduce",
       'int[] xs=[1,2,3,4];\nprint(map(xs, (int v) => v * 2));\nprint(filter(xs, (int v) => v % 2 == 0));\nprint(reduce(xs, (int a, int b) => a + b, 0));\n',
       backends=_CPPSET, expect="[2, 4, 6, 8]\n[2, 4]\n10")
 
+# ── optionals and `?` propagation on the C++ backend ─────────
+#
+# Two defects sat on top of each other here. The cpp backend never wrapped
+# a bare value into an optional, so ANY function declared `-> T?` failed to
+# compile — `return x;` emitted an int64_t where a shared_ptr was wanted.
+# That made `?` over an optional untestable until it was fixed.
+#
+# `?` over a Result is compared against pyro; `?` over an OPTIONAL is
+# compared against go, because pyro gets it wrong — see ISSUES/24.
+print("\n── optionals and ? on cpp ──")
+_CPPGO = ('go', 'cpp')
+
+agree("a function may return a bare value as an optional",
+      'fn f(int x) -> int? ={ return x; }\nprint(f(7) ?? 0);\n',
+      backends=_CPPSET, expect="7")
+
+agree("and may return null",
+      'fn f(int x) -> int? ={ if (x > 0) { return x; } return null; }\nprint(f(7) ?? 0); print(f(-1) ?? 99);\n',
+      backends=_CPPSET, expect="7\n99")
+
+agree("`?` over a Result yields the payload",
+      'enum Res { Ok(int), Err(string) }\nfn p(int x) -> Res ={ if (x > 0) { return Ok(x); } return Err(\"neg\"); }\nfn u(int x) -> Res ={ int v = p(x)?; return Ok(v * 10); }\nmatch u(5) { Ok(v) => { print(v); } Err(e) => { print(\"E:\" + e); } }\n',
+      backends=_CPPSET, expect="50")
+
+agree("`?` over a Result returns the error early",
+      'enum Res { Ok(int), Err(string) }\nfn p(int x) -> Res ={ if (x > 0) { return Ok(x); } return Err(\"neg\"); }\nfn u(int x) -> Res ={ int v = p(x)?; return Ok(v * 10); }\nmatch u(-1) { Ok(v) => { print(v); } Err(e) => { print(\"E:\" + e); } }\n',
+      backends=_CPPSET, expect="E:neg")
+
+agree("`?` over an optional short-circuits on null",
+      'fn lk(int x) -> int? ={ if (x > 0) { return x; } return null; }\nfn u(int x) -> int? ={ int v = lk(x)?; return v * 2; }\nprint(u(21) ?? 0); print(u(-1) ?? 0);\n',
+      backends=_CPPGO, expect="42\n0")
+
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))
 sys.exit(1 if _failed else 0)

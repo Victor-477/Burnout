@@ -616,6 +616,30 @@ class CodeGenCpp:
         self._indent -= 1
         self._emit("}")
 
+    def _try_prop(self, inner: Node) -> str:
+        """`expr?` — emit the temporary and the early return, yield the value.
+
+        Two shapes, matching every other backend:
+
+          optional   null -> `return nullptr;`, else the value itself
+          Result     tag != "Ok" -> `return tmp;`, else its payload
+
+        The temporary matters for the same reason it does in `match`: the
+        operand is evaluated ONCE. `parse(s)?` that called parse twice would
+        be a silent double side effect.
+        """
+        t = self.te.infer(inner)
+        tmp = self._next_tmp()
+        self._emit(f"auto {tmp} = {self._expr(inner)};")
+        if is_optional(t) or t == 'null':
+            self._emit(f"if (!{tmp}) return nullptr;")
+            return f"cryo::unwrap({tmp})"
+        if t in _DATA_ENUMS:
+            self._emit(f'if ({tmp}->_tag() != "Ok") return {tmp};')
+            return f"static_cast<{t}__Ok*>({tmp}.get())->val0"
+        self._err(f"propagation '?' needs an optional or a Result-shaped enum; "
+                  f"this operand is '{t}'")
+
     def _lambda(self, n: Lambda) -> str:
         """`(int v) => v * 2` -> `[=](int64_t v) -> int64_t { return v * 2; }`.
 
@@ -726,11 +750,18 @@ class CodeGenCpp:
             self.te.set(pn, pt)
         params = ', '.join(f"{cpp_type(pt)} {cppid(pn)}" for pt, pn in n.params)
         ret = cpp_type(n.return_type or 'void')
+        # The DECLARED return type, so `return x;` in a `-> int?` function can
+        # be wrapped. Without it the bare value was emitted as-is and g++
+        # rejected "could not convert 'x' from int64_t to shared_ptr<long long>"
+        # — a function that simply returns an optional did not compile, on
+        # every program, while pyro/go/node all ran it.
+        prev_ret, self._cur_ret = getattr(self, '_cur_ret', None), n.return_type
         self._emit(f"{ret} {cppid(n.name)}({params}) {{")
         self._indent += 1
         for s in n.body:
             self._gen(s)
         self._indent -= 1
+        self._cur_ret = prev_ret
         self._emit("}")
         self._emit()
         self.te.pop()
@@ -750,6 +781,10 @@ class CodeGenCpp:
     def _var(self, n: VarDecl):
         t = n.var_type or self.te.infer(n.value)
         self.te.set(n.name, t)
+        if isinstance(n.value, TryExpr):
+            ok = self._try_prop(n.value.operand)
+            self._emit(f"{cpp_type(t)} {cppid(n.name)} = {ok};")
+            return
         if n.value is None:
             self._emit(f"{cpp_type(t)} {cppid(n.name)} = {self._zero(t)};")
         else:
@@ -776,6 +811,9 @@ class CodeGenCpp:
 
     def _assign(self, n: Assignment):
         t = self.te.get(n.name)
+        if isinstance(n.value, TryExpr):
+            self._emit(f"{cppid(n.name)} = {self._try_prop(n.value.operand)};")
+            return
         self._emit(f"{cppid(n.name)} = {self._expr_typed(n.value, t)};")
 
     def _compound(self, n: CompoundAssignment):
@@ -791,8 +829,14 @@ class CodeGenCpp:
         self._emit(f"{cppid(n.name)}{n.op};")
 
     def _return(self, n: Return):
-        self._emit("return;" if n.value is None
-                   else f"return {self._expr(n.value)};")
+        if isinstance(n.value, TryExpr):
+            self._emit(f"return {self._try_prop(n.value.operand)};")
+            return
+        if n.value is None:
+            self._emit("return;")
+            return
+        target = getattr(self, '_cur_ret', None)
+        self._emit(f"return {self._expr_typed(n.value, target) if target else self._expr(n.value)};")
 
     def _if(self, n: If):
         self._emit(f"if ({self._truthy(n.condition)}) {{")
