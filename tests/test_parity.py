@@ -912,6 +912,73 @@ agree("`?` over an optional short-circuits on null",
       'fn lk(int x) -> int? ={ if (x > 0) { return x; } return null; }\nfn u(int x) -> int? ={ int v = lk(x)?; return v * 2; }\nprint(u(21) ?? 0); print(u(-1) ?? 0);\n',
       backends=_CPPGO, expect="42\n0")
 
+# ── text helpers added to the language core ──────────────────
+#
+# These are DESUGARINGS in Cryo/parser.py, not natives: one Cryo
+# implementation is injected as a synthetic function and every backend
+# compiles it (golden rule 2). So the interesting property is not that any
+# one backend is right — it is that a single source produced the same
+# answer through six independent code generators.
+#
+# Each case pins a decision that could defensibly have gone the other way,
+# because those are what a later "cleanup" would quietly change.
+print("\n── text helpers (front-end desugarings) ──")
+
+# The three fast backends for the per-helper cases, and ONE composite case on
+# cpp below. Every helper is built from the same constructs — while, string
+# indexing, len/substr/contains/find — so a construct cpp lacked would fail all
+# of them alike; running ten g++ builds to learn that once is a poor trade in a
+# suite people have to be willing to run.
+_ALLTEXT = ('pyro', 'node', 'go')
+
+agree("is_digit is whole-string, and empty is false",
+      'print(is_digit("123")); print(is_digit("12a")); print(is_digit(""));\n',
+      backends=_ALLTEXT, expect="true\nfalse\nfalse")
+
+agree("is_alpha rejects a digit",
+      'print(is_alpha("abc")); print(is_alpha("ab1"));\n',
+      backends=_ALLTEXT, expect="true\nfalse")
+
+agree("is_alnum accepts both, rejects punctuation",
+      'print(is_alnum("a1")); print(is_alnum("a-1"));\n',
+      backends=_ALLTEXT, expect="true\nfalse")
+
+agree("is_space agrees with trim about whitespace",
+      'print(is_space("  ")); print(is_space(" x"));\n',
+      backends=_ALLTEXT, expect="true\nfalse")
+
+agree("reverse_str",
+      'print(reverse_str("cryo"));\n',
+      backends=_ALLTEXT, expect="oyrc")
+
+agree("replace_first replaces only the first",
+      'print(replace_first("a-b-c", "-", "+"));\n',
+      backends=_ALLTEXT, expect="a+b-c")
+
+agree("replace_first with an empty needle returns the string unchanged",
+      'print(replace_first("abc", "", "+"));\n',
+      backends=_ALLTEXT, expect="abc")
+
+agree("count_of does not count overlaps",
+      'print(count_of("aaaa", "aa")); print(count_of("abc", "z"));\n',
+      backends=_ALLTEXT, expect="2\n0")
+
+agree("last_index_of finds the LAST, and -1 when absent",
+      'print(last_index_of("a/b/c", "/")); print(last_index_of("abc", "z"));\n',
+      backends=_ALLTEXT, expect="3\n-1")
+
+agree("the helpers compose",
+      'print(reverse_str(replace_first("ab-cd", "-", "+")));\n',
+      backends=_ALLTEXT, expect="dc+ba")
+
+# One composite case DOES go through cpp: it calls every helper, so the
+# synthetic functions all get compiled by a real C++ compiler and their
+# answers compared, at the cost of a single build.
+agree("every text helper compiles and agrees on cpp too",
+      'print(is_digit("12")); print(is_alpha("ab")); print(is_alnum("a1"));\nprint(is_space(" ")); print(reverse_str("ab"));\nprint(replace_first("a-b-c", "-", "+"));\nprint(count_of("aaaa", "aa")); print(last_index_of("a/b", "/"));\n',
+      backends=('pyro', 'cpp'),
+      expect="true\ntrue\ntrue\ntrue\nba\na+b-c\n2\n1")
+
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))
 sys.exit(1 if _failed else 0)

@@ -1328,6 +1328,27 @@ except Exception:
 # "[Internal Error] list index out of range" — an internal error on input the
 # analyser accepts. Desugared in the parser now, so every backend sees the
 # same explicit null (golden rule 2).
+# ── text helpers are DESUGARINGS, with the properties that implies ──
+# These three are not about the answer — test_parity covers that across the
+# backends. They are about the mechanism: a helper must not displace a user's
+# own function, must not be emitted twice, and must report a wrong argument
+# count as a syntax error rather than compiling into something surprising.
+print("[text] helper desugarings behave like helpers")
+check("a user function of the same name wins",
+      'return false' in gen_node(
+          'fn is_digit(string s) -> bool ={ return false; }' + chr(10)
+          + 'print(is_digit("1"));' + chr(10)))
+check("the helper is emitted once however many calls",
+      gen_node('print(is_digit("1")); print(is_digit("2"));' + chr(10))
+      .count('function __cryo_is_digit') == 1)
+_arity_msg = ''
+try:
+    gen_node('print(count_of("abc"));' + chr(10))
+except Exception as _e:
+    _arity_msg = str(_e)
+check("a wrong argument count is refused, and says how many",
+      'takes 2 arguments' in _arity_msg)
+
 print("[throw] a bare throw() defaults to null everywhere")
 _thr = 'try { throw(); } catch (string e) { print(e); }'
 check("bare throw() compiles on go (used to crash the compiler)",
