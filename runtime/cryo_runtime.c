@@ -60,35 +60,35 @@ static void _cryo_fatal(const char* kind, const char* detail) {
 int64_t cryo_add_ovf(int64_t a, int64_t b) {
     int64_t r;
     if (__builtin_add_overflow(a, b, &r))
-        _cryo_fatal("Overflow", "integer addition overflow");
+        _cryo_fatal("Overflow", "integer addition");
     return r;
 }
 
 int64_t cryo_sub_ovf(int64_t a, int64_t b) {
     int64_t r;
     if (__builtin_sub_overflow(a, b, &r))
-        _cryo_fatal("Overflow", "integer subtraction overflow");
+        _cryo_fatal("Overflow", "integer subtraction");
     return r;
 }
 
 int64_t cryo_mul_ovf(int64_t a, int64_t b) {
     int64_t r;
     if (__builtin_mul_overflow(a, b, &r))
-        _cryo_fatal("Overflow", "integer multiplication overflow");
+        _cryo_fatal("Overflow", "integer multiplication");
     return r;
 }
 
 int64_t cryo_idiv_chk(int64_t a, int64_t b) {
     if (b == 0)
-        _cryo_fatal("DivByZero", "integer division by zero");
+        _cryo_fatal("DivByZero", "integer division");
     if (a == INT64_MIN && b == -1)
-        _cryo_fatal("Overflow", "INT64_MIN / -1 overflows");
+        _cryo_fatal("Overflow", "INT64_MIN / -1");
     return a / b;
 }
 
 int64_t cryo_imod_chk(int64_t a, int64_t b) {
     if (b == 0)
-        _cryo_fatal("DivByZero", "modulo by zero");
+        _cryo_fatal("DivByZero", "modulo");
     if (a == INT64_MIN && b == -1)
         return 0;
     return a % b;
