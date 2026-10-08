@@ -1095,6 +1095,38 @@ agree("clamp / sign / gcd / hypot on c",
       backends=('pyro', 'node', 'go', 'c'),
       expect="3\n1\n-1\n0\n6\n5")
 
+# ── a comprehension containing a unary operator ──────────────
+#
+# `_extract_identifiers` (Cryo/parser.py), the walker that finds what a
+# comprehension CAPTURES, read `node.expr` on a UnaryExpr whose field is
+# `operand`. So `[-x for x in xs]` and `[x for x in xs if !flag]` aborted the
+# compiler with "[Internal Error] 'UnaryExpr' object has no attribute 'expr'"
+# — on input the analyser accepts. The neighbouring Spawn/Await/Unwrap/Try
+# branch genuinely does use `expr`, which is how the wrong name looked right.
+#
+# pyro and node ONLY, and that is ISSUES/26, not an oversight: the go backend
+# does not compile ANY list comprehension over an array — the synthetic
+# function comes out typed `any`/`[]any` and the Go compiler rejects it. Add
+# 'go' here when 26 lands; the case is written so that is the only edit.
+#
+# No parity case ran a comprehension on go before, which is why both bugs
+# survived: test_smoke calls the generators directly, so "it generated
+# plausible Go" is all it could check, and 11.33 is the standing proof that
+# the claim can be false.
+print("\n── comprehensions with unary operators ──")
+
+agree("a comprehension negating its element",
+      'int[] xs = [1, 2, 3]; int[] ys = [-x for x in xs]; print(ys);\n',
+      backends=('pyro', 'node'), expect="[-1, -2, -3]")
+
+agree("a comprehension whose guard is a negation",
+      'int[] xs = [1, 2, 3]; bool f = false; int[] ys = [x for x in xs if !f];\nprint(ys);\n',
+      backends=('pyro', 'node'), expect="[1, 2, 3]")
+
+agree("and the guard really does filter",
+      'int[] xs = [1, 2, 3]; bool f = true; int[] ys = [x for x in xs if !f];\nprint(ys);\n',
+      backends=('pyro', 'node'), expect="[]")
+
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))
 sys.exit(1 if _failed else 0)

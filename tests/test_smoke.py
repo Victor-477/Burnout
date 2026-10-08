@@ -1436,6 +1436,39 @@ except Exception as _e:
 check("c: a builtin needing a host is still refused",
       'not supported in the C backend' in _still)
 
+# ── a comprehension with a unary operator does not crash the compiler ──
+# Cryo/parser.py's _extract_identifiers read node.expr on a UnaryExpr whose
+# field is `operand`, so these aborted with "[Internal Error] 'UnaryExpr'
+# object has no attribute 'expr'". Asserting it COMPILES, because the failure
+# was an exception out of the parser rather than wrong output.
+print("[10.3] unary operators inside a comprehension")
+for _label, _src in (
+        ('negated element', 'int[] xs = [1,2,3]; int[] ys = [-x for x in xs];'),
+        ('negated guard',
+         'int[] xs = [1,2,3]; bool f = false; int[] ys = [x for x in xs if !f];'),
+        ('negation in a map comprehension',
+         'int[] xs = [1,2,3]; map<int,int> m = {x: -x for x in xs};'),
+):
+    try:
+        gen_pyro(_src + chr(10))
+        _ok = True
+    except Exception as _e:
+        _ok = False
+        print(f"       {_label}: {_e}")
+    check(f"10.3: {_label} compiles", _ok)
+# SafetyBlock had the same shape: optimize.py read node.is_safe for a field
+# called `safe`, so any program with a `safe {}`/`unsafe {}` block aborted
+# once the optimizer ran — which it does by default.
+from optimize import optimize as _optimize_ast
+try:
+    _optimize_ast(ast_of('safe { int x = 1; print(x); } unsafe { print("u"); }'))
+    _sb_ok = True
+except Exception as _e:
+    _sb_ok = False
+    print(f"       safe/unsafe block: {_e}")
+check("11.21: the optimizer walks a safe/unsafe block", _sb_ok)
+
+
 
 
 

@@ -100,7 +100,19 @@ def test_parity():
         c_code, c_out, c_err = run_command(comp_args)
         
         if c_code != 0:
-            # if it does not compile with the pyro backend, we just skip it (e.g. asm, node, etc.)
+            # An example the pyro backend does not accept cannot be compared
+            # between the two VMs, so it is skipped — but it SAYS SO, with the
+            # reason. This branch used to be silent, and 17 of this suite's 19
+            # skips came through it: a compile regression in any of those
+            # examples would have looked exactly like a green run.
+            #
+            # That is the same failure mode that hid a segfault in the C
+            # backend's string index for an entire phase — test_parity skipped
+            # the `c` backend because no local gcc worked, and reported it as a
+            # count. A skip nobody can read is indistinguishable from a pass.
+            _why = (c_err or c_out or '').strip().splitlines()
+            _why = next((l.strip() for l in _why if l.strip()), '(no message)')
+            print(f"Skipping {filename} (pyro backend refused: {_why[:120]})")
             skipped += 1
             os.remove(tmp_pyro)
             continue
