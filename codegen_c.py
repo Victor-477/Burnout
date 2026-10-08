@@ -553,7 +553,21 @@ class CodeGenC:
             for elem in n.value.elements:
                 fn = _PUSH_FN.get(et, 'cryo_array_push')
                 self._emit(f"{fn}({n.name}, {self._expr(elem)});")
-        elif is_map(n.var_type):
+        elif is_map(n.var_type) and isinstance(n.value, MapLiteral):
+            # The `isinstance(n.value, MapLiteral)` guard is the fix for a
+            # SILENT WRONG ANSWER. `_var` above has it; this branch did not,
+            # so a MODULE-level map initialised from anything that is not a
+            # literal — a copy, a function's return, a comprehension —
+            # discarded the initialiser and emitted a fresh empty map. The
+            # loop below then found no `pairs` and added nothing, so
+            #
+            #   map<int,int> a = {1: 2}; map<int,int> b = a; print(b);
+            #
+            # printed `{1: 2}` on every other backend and `{}` here. Not a
+            # build failure, not a refusal: a wrong answer. Since a Cryo
+            # program is mostly top-level statements, this is the common path,
+            # and `_var`'s correct version only covers locals — the same
+            # half-applied shape as the nine builtins in ab20b8b.
             kt, vt = map_kv(n.var_type)
             self._emit(f"{n.name} = cryo_map_new({1 if kt == 'string' else 0});")
             for k, v in (getattr(n.value, 'pairs', None) or []):

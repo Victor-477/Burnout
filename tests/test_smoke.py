@@ -1468,6 +1468,70 @@ except Exception as _e:
     print(f"       safe/unsafe block: {_e}")
 check("11.21: the optimizer walks a safe/unsafe block", _sb_ok)
 
+# ── ISSUES/26: the comprehension lowering stops saying `any` ──
+# test_parity runs these on five backends; these are about the lowering, and
+# in particular about the SAFETY PROPERTY: where the type cannot be read the
+# lowering is unchanged, so no backend that worked before can start failing.
+print("[26] a comprehension's lowering carries types")
+from lexer import Lexer as _L26
+from parser import Parser as _P26
+
+
+def _comp26(src):
+    """The synthetic comprehension helper for `src`."""
+    p = _P26(_L26(src).tokenize())
+    p.parse()
+    for fn in p.synthetic_fns:
+        if fn.name.startswith(('__list_comp_', '__map_comp_')):
+            return fn
+    return None
+
+
+_h = _comp26('int[] xs = [1,2,3]; int[] ys = [x * 2 for x in xs];' + chr(10))
+check("26: the result type comes from the declaration",
+      _h is not None and _h.return_type == 'int[]')
+check("26: the captured iterable keeps its declared type",
+      _h is not None and ('int[]', 'xs') in _h.params)
+_fe = [s for s in (_h.body if _h else []) if type(s).__name__ == 'ForEach']
+check("26: the loop variable is typed from the iterable",
+      len(_fe) == 1 and _fe[0].var_type == 'int')
+# A range is always int, so the program no longer has to write it out — this
+# was a hard ParseError ("range loop variable must be 'int', got 'any'").
+_hr = _comp26('int[] ys = [x * 2 for x in 1..=3];' + chr(10))
+check("26: a range comprehension needs no declared loop variable",
+      _hr is not None and _hr.return_type == 'int[]')
+# A literal iterable is bound to a typed local: c has no inline array literal
+# and cpp dereferenced a temporary shared_ptr, printing garbage.
+_hl = _comp26('int[] ys = [x * 2 for x in [1,2,3]];' + chr(10))
+_decls = [s for s in (_hl.body if _hl else []) if type(s).__name__ == 'VarDecl']
+check("26: an array literal is bound to a typed local first",
+      any(d.var_type == 'int[]' and d.name.startswith('__it_') for d in _decls))
+check("26: and that local is NOT passed in as a parameter",
+      _hl is not None
+      and not any(n.startswith('__it_') for _t, n in _hl.params))
+# The capture scan reads the ORIGINAL iterable, so names inside the literal
+# are still captured.
+_hc = _comp26('int a = 1; int b = 2; int[] ys = [v + 1 for v in [a, b]];' + chr(10))
+check("26: names inside the literal are still captured",
+      _hc is not None
+      and {n for _t, n in _hc.params} == {'a', 'b'})
+# THE SAFETY PROPERTY. No declaration to read and an element expression that
+# is not the loop variable: the lowering must stay exactly as it was, because
+# a half-guessed type is how backends come to disagree.
+_ha = _comp26('int[] xs = [1,2,3]; any z = [v * 2 for v in xs];' + chr(10))
+check("26: an unreadable result type still falls back to any[]",
+      _ha is not None and _ha.return_type == 'any[]')
+# A name declared twice with two types is ambiguous, and ambiguous means
+# unknown — the map is flat, so this is the guard that makes being wrong
+# about scope impossible rather than unlikely.
+_p26 = _P26(_L26('fn f(string[] xs) -> int ={ return 1; }' + chr(10)
+                 + 'int[] xs = [1,2,3]; int[] ys = [x for x in xs];' + chr(10)
+                 ).tokenize())
+_p26.parse()
+check("26: a name declared with two types is treated as unknown",
+      'xs' in _p26._ambiguous_decls)
+
+
 
 
 

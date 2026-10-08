@@ -240,15 +240,37 @@ agree("a typed for-in over an array",
 # matters is that it REFUSES clearly instead of emitting `any` into the output
 # for gcc to choke on — the compiler's job is to report its own errors.
 print("\n── 11.27: the C backend's `any` gap is refused, not leaked ──")
+# ISSUES/26 — this used to assert that a comprehension was REFUSED here.
+# It is not any more: `int[] d = [v * 2 for v in xs]` states its own result
+# type, so the lowering no longer invents `any` and the c backend compiles it
+# (see the comprehension section at the end of this file, which runs it).
+# Pinning the refusal would now be pinning the bug, the same way three smoke
+# assertions pinned the C deny-list in ab20b8b.
+#
+# The `any` GAP is still real and still has to fail closed, so the case moves
+# to a comprehension whose result type genuinely cannot be read: no
+# declaration to take it from, and an element expression that is not just the
+# loop variable.
 _work = tempfile.mkdtemp(prefix='cryo_par_')
-_r = _compile(_work, "int[] xs = [1, 2];\nint[] d = [v * 2 for v in xs];\nprint(d);\n",
+_r = _compile(_work, "int[] xs = [1, 2];\nany z = [v * 2 for v in xs];\nprint(z);\n",
               'c', os.path.join(_work, 'p.c'))
 _msg = (_r.stdout + _r.stderr)
-check("a comprehension is refused by the compiler", _r.returncode != 0, _msg[:200])
+check("an unreadable comprehension type is still refused", _r.returncode != 0,
+      _msg[:200])
 check("with a Cryo diagnostic, not a gcc error",
       'CodeGen Error' in _msg and 'unknown type name' not in _msg, _msg[:300])
-check("and the message says where the `any` came from",
+check("and the message still says where the `any` came from",
       'comprehension' in _msg, _msg[:300])
+# The other surviving source of `any`: a loop variable the program did not
+# declare. cpp's wording names both, and it is the message that tells a user
+# what to do about it.
+_r2 = _compile(_work, 'for (x in ["a", "b"]) { print(x); }\n',
+               'c', os.path.join(_work, 'p2.c'))
+_msg2 = (_r2.stdout + _r2.stderr)
+check("an undeclared loop variable over a literal is refused too",
+      _r2.returncode != 0 and 'CodeGen Error' in _msg2, _msg2[:200])
+check("and that message says to give the variable a type",
+      'declared type' in _msg2 or 'explicit type' in _msg2, _msg2[:300])
 
 # ── 11.34: `??` on a data-carrying enum ────────────────────
 # `??` asks whether a value is null. An `Err("no")` is not null, so the
@@ -1104,10 +1126,10 @@ agree("clamp / sign / gcd / hypot on c",
 # — on input the analyser accepts. The neighbouring Spawn/Await/Unwrap/Try
 # branch genuinely does use `expr`, which is how the wrong name looked right.
 #
-# pyro and node ONLY, and that is ISSUES/26, not an oversight: the go backend
-# does not compile ANY list comprehension over an array — the synthetic
-# function comes out typed `any`/`[]any` and the Go compiler rejects it. Add
-# 'go' here when 26 lands; the case is written so that is the only edit.
+# These ran on pyro and node only until ISSUES/26 landed, because the go
+# backend did not compile ANY list comprehension over an array — the
+# synthetic function came out typed `any`/`[]any`. go is in the list now;
+# changing the tuple was the only edit the note had promised.
 #
 # No parity case ran a comprehension on go before, which is why both bugs
 # survived: test_smoke calls the generators directly, so "it generated
@@ -1117,15 +1139,108 @@ print("\n── comprehensions with unary operators ──")
 
 agree("a comprehension negating its element",
       'int[] xs = [1, 2, 3]; int[] ys = [-x for x in xs]; print(ys);\n',
-      backends=('pyro', 'node'), expect="[-1, -2, -3]")
+      backends=('pyro', 'node', 'go'), expect="[-1, -2, -3]")
 
 agree("a comprehension whose guard is a negation",
       'int[] xs = [1, 2, 3]; bool f = false; int[] ys = [x for x in xs if !f];\nprint(ys);\n',
-      backends=('pyro', 'node'), expect="[1, 2, 3]")
+      backends=('pyro', 'node', 'go'), expect="[1, 2, 3]")
 
 agree("and the guard really does filter",
       'int[] xs = [1, 2, 3]; bool f = true; int[] ys = [x for x in xs if !f];\nprint(ys);\n',
-      backends=('pyro', 'node'), expect="[]")
+      backends=('pyro', 'node', 'go'), expect="[]")
+
+# ── ISSUES/26: comprehensions, on every backend that has types ──────
+#
+# A comprehension lowers to a synthetic function, and every part of it used
+# to be typed `any`:
+#
+#   fn __list_comp_1(any xs) -> any[] { any[] __res = []; … }
+#
+# pyro and node are dynamically typed, so `any` cost them nothing and the
+# feature looked finished. go is not, and emitted Go the Go compiler
+# rejected — "cannot use __list_comp_1(xs) (value of type []any) as []int64
+# value" — while c and cpp refused the construct outright, having no `any` at
+# all. A headline 10.3 feature worked on two backends out of six.
+#
+# The fix stopped the lowering saying `any` where the PROGRAM had already
+# said something better: the declaration being initialised states the result
+# type, a range is always int, and an array's element type types the loop
+# variable. Nothing is inferred — where the knowledge runs out the lowering
+# is unchanged, which is why nothing that worked before could start failing.
+#
+# These run on pyro/node/go per case, with ONE composite case through c and
+# cpp: the constructs are shared, so a backend missing one fails all of them
+# alike, and two more native builds per case is a poor trade in a suite
+# people have to be willing to run.
+print("\n── ISSUES/26: comprehensions across the typed backends ──")
+
+_COMP = ('pyro', 'node', 'go')
+
+agree("a comprehension over a named array",
+      'int[] xs = [1, 2, 3]; int[] ys = [x for x in xs]; print(ys);\n',
+      backends=_COMP, expect="[1, 2, 3]")
+
+agree("…with an expression per element",
+      'int[] xs = [1, 2, 3]; int[] ys = [x * 2 for x in xs]; print(ys);\n',
+      backends=_COMP, expect="[2, 4, 6]")
+
+agree("…over an array LITERAL, which is bound to a typed local first",
+      'int[] ys = [x * 2 for x in [1, 2, 3, 4] if x % 2 == 0]; print(ys);\n',
+      backends=_COMP, expect="[4, 8]")
+
+agree("…over a range, whose loop variable no longer has to be written out",
+      'int[] ys = [x * 2 for x in 1..=3]; print(ys);\n',
+      backends=_COMP, expect="[2, 4, 6]")
+
+agree("…with the loop variable declared, as before",
+      'int[] ys = [x * x for int x in 1..=5 if x % 2 == 0]; print(ys);\n',
+      backends=_COMP, expect="[4, 16]")
+
+agree("…over strings, through a call",
+      'string[] ss = ["a", "b"]; string[] up = [upper(s) for s in ss]; print(up);\n',
+      backends=_COMP, expect="[A, B]")
+
+# The literal's own contents may name things that DO have to be captured, so
+# the capture scan reads the original expression and not the temp it is bound
+# to. Getting this wrong passed `__it_1` in as a parameter.
+agree("…over a literal built from captured names",
+      'int a = 7; int b = 9; int[] ys = [v + 1 for v in [a, b]]; print(ys);\n',
+      backends=_COMP, expect="[8, 10]")
+
+agree("a map comprehension",
+      'int[] xs = [1, 2, 3]; map<int,int> m = {x: x * 2 for x in xs}; print(m);\n',
+      backends=_COMP, expect="{1: 2, 2: 4, 3: 6}")
+
+agree("comprehensions compile and agree on c and cpp too",
+      'int[] xs = [1, 2, 3];\nint[] a = [x for x in xs];\nint[] b = [x * 2 for x in [1, 2, 3, 4] if x % 2 == 0];\nint[] c = [x * 2 for x in 1..=3];\nmap<int,int> m = {x: x * 2 for x in xs};\nprint(a); print(b); print(c); print(m);\n',
+      backends=('pyro', 'c', 'cpp'),
+      expect="[1, 2, 3]\n[4, 8]\n[2, 4, 6]\n{1: 2, 2: 4, 3: 6}")
+
+# ── the two defects the literal-binding fix also closed ─────
+#
+# `for (int x in [1, 2, 3])` is not a comprehension, and it was broken in the
+# same place for the same reason: the c backend has no inline array literal
+# as an expression ("expected expression before ')'"), and cpp emitted
+# `for (… : *(cryo::arr<…>(…)))`, dereferencing a temporary shared_ptr whose
+# vector was already freed — so it printed GARBAGE rather than failing to
+# build. pyro, node and go were fine, so the two engines that disagreed were
+# the two nobody could test without a C compiler.
+agree("a plain for-each over an array literal",
+      'for (int x in [1, 2, 3]) { print(x); }\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp'), expect="1\n2\n3")
+
+# A module-level map initialised from anything that is not a literal lost its
+# initialiser on the c backend: `cryo_map_new()` was emitted and the
+# expression discarded, so this printed `{}` there and the right thing
+# everywhere else. `_var` had the guard for locals; `_module_var` did not.
+# Not a build failure and not a refusal — a wrong answer.
+agree("a module-level map copied from another map",
+      'map<int,int> a = {1: 2, 3: 4}; map<int,int> b = a; print(b);\n',
+      backends=('pyro', 'node', 'go', 'c'), expect="{1: 2, 3: 4}")
+
+agree("a module-level map from a function's return",
+      'fn mk() -> map<int,int> ={ map<int,int> r = {}; r[5] = 6; return r; }\nmap<int,int> c = mk(); print(c);\n',
+      backends=('pyro', 'node', 'go', 'c'), expect="{5: 6}")
 
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))
