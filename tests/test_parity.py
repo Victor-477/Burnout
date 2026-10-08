@@ -979,6 +979,68 @@ agree("every text helper compiles and agrees on cpp too",
       backends=('pyro', 'cpp'),
       expect="true\ntrue\ntrue\ntrue\nba\na+b-c\n2\n1")
 
+# ── text helpers, second set: affixes, case, words ───────────
+#
+# Same mechanism as above, so the same trade: the per-helper cases run on the
+# three fast backends and one composite case goes through cpp.
+#
+# Every case here pins a DECISION rather than an implementation. The ones most
+# worth having in writing:
+#   - is_blank("") is true while is_digit("") is false. Different questions:
+#     "does every character qualify" is vacuous on "", "is there nothing of
+#     substance here" is emphatically yes.
+#   - capitalize lowercases the tail, so "mcDONALD" becomes "Mcdonald".
+#   - strip_prefix returns the string unchanged on a miss and on an empty
+#     affix, matching replace_first's empty-needle rule.
+#   - word_count counts RUNS of non-whitespace, so repeated separators do not
+#     invent empty words the way len(split(s, " ")) would.
+print("\n── text helpers: affixes, case, words ──")
+
+agree("is_blank is true for empty and for whitespace, false otherwise",
+      'print(is_blank("")); print(is_blank("  \\t ")); print(is_blank(" x "));\n',
+      backends=_ALLTEXT, expect="true\ntrue\nfalse")
+
+agree("strip_prefix strips, and leaves a miss or an empty affix alone",
+      'print(strip_prefix("foobar", "foo")); print(strip_prefix("foobar", "baz"));\nprint(strip_prefix("foobar", ""));\n',
+      backends=_ALLTEXT, expect="bar\nfoobar\nfoobar")
+
+agree("strip_suffix strips from the end only",
+      'print(strip_suffix("foobar", "bar")); print(strip_suffix("foobar", "foo"));\n',
+      backends=_ALLTEXT, expect="foo\nfoobar")
+
+agree("capitalize lowercases the tail, and leaves empty empty",
+      'print(capitalize("mcDONALD")); print(capitalize("x")); print("[" + capitalize("") + "]");\n',
+      backends=_ALLTEXT, expect="Mcdonald\nX\n[]")
+
+agree("equals_ignore_case",
+      'print(equals_ignore_case("HeLLo", "hello")); print(equals_ignore_case("a", "b"));\n',
+      backends=_ALLTEXT, expect="true\nfalse")
+
+agree("replace_last replaces only the last",
+      'print(replace_last("a-b-c", "-", "+"));\n',
+      backends=_ALLTEXT, expect="a-b+c")
+
+agree("replace_last leaves an empty needle and a miss alone",
+      'print(replace_last("a-b-c", "", "+")); print(replace_last("abc", "-", "+"));\n',
+      backends=_ALLTEXT, expect="a-b-c\nabc")
+
+agree("word_count counts runs, not separators",
+      'print(word_count("  one   two  three ")); print(word_count("solo")); print(word_count(""));\n',
+      backends=_ALLTEXT, expect="3\n1\n0")
+
+agree("common_prefix is character-wise, and empty when there is none",
+      'print(common_prefix("prefix_a", "prefix_b")); print(common_prefix("abc", "abcdef"));\nprint("[" + common_prefix("abc", "xyz") + "]");\n',
+      backends=_ALLTEXT, expect="prefix_\nabc\n[]")
+
+agree("the second set composes with the first",
+      'print(reverse_str(capitalize(strip_suffix("hello!", "!"))));\n',
+      backends=_ALLTEXT, expect="olleH")
+
+agree("every helper in the second set compiles and agrees on cpp too",
+      'print(is_blank(" ")); print(strip_prefix("foobar", "foo"));\nprint(strip_suffix("foobar", "bar")); print(capitalize("mcDONALD"));\nprint(equals_ignore_case("A", "a")); print(replace_last("a-b-c", "-", "+"));\nprint(word_count("  one   two ")); print(common_prefix("abc", "abd"));\n',
+      backends=('pyro', 'cpp'),
+      expect="true\nbar\nfoo\nMcdonald\ntrue\na-b+c\n2\nab")
+
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))
 sys.exit(1 if _failed else 0)

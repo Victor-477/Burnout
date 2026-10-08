@@ -1348,6 +1348,35 @@ except Exception as _e:
     _arity_msg = str(_e)
 check("a wrong argument count is refused, and says how many",
       'takes 2 arguments' in _arity_msg)
+# The second set brought helpers taking two and three arguments, so the arity
+# check is now a table rather than a hardcoded 1. Both branches are worth
+# pinning: the count must be right, and the noun must agree with it.
+_arity3 = ''
+try:
+    gen_node('print(replace_last("abc", "-"));' + chr(10))
+except Exception as _e:
+    _arity3 = str(_e)
+check("a 3-argument helper reports 3", 'takes 3 arguments' in _arity3)
+_arity1 = ''
+try:
+    gen_node('print(is_blank("a", "b"));' + chr(10))
+except Exception as _e:
+    _arity1 = str(_e)
+check("a 1-argument helper says 'argument', singular",
+      'takes 1 argument,' in _arity1)
+# Two helpers called together must each be emitted once: registration is
+# per-helper, and a shared flag would emit the second one never or twice.
+_two = gen_node('print(capitalize("a")); print(word_count("a b"));' + chr(10))
+check("two different helpers are each emitted once",
+      _two.count('function __cryo_capitalize') == 1
+      and _two.count('function __cryo_word_count') == 1)
+# is_blank is written OVER trim() rather than over its own whitespace loop, so
+# that it and is_space/trim cannot disagree about what whitespace is. That is
+# the property a later "inline it for speed" would silently break, so assert
+# the mechanism and not just the answer.
+check("is_blank is built on trim, so it cannot disagree with it",
+      'trim()' in gen_node('print(is_blank(" "));' + chr(10)))
+
 
 print("[throw] a bare throw() defaults to null everywhere")
 _thr = 'try { throw(); } catch (string e) { print(e); }'
