@@ -433,6 +433,32 @@ char* cryo_str_slice(const char* s, int64_t start, int64_t end) {
     return out;
 }
 
+/* `s[i]` — a ONE-CHARACTER STRING, and out of range ABORTS.
+ *
+ * The C backend used to compile a string index to cryo_array_get(), the array
+ * accessor, which read an array header off the char pointer and segfaulted
+ * (0xC0000005). The obvious repair is cryo_str_slice(s, i, i+1), and it is
+ * wrong in one specific way: slice CLAMPS, so `"abc"[9]` would have returned
+ * "" while the Pyro VM, node and go all abort with the text below. That is a
+ * fail-open answer to an out-of-range read, which is the one direction a
+ * bounds check must never fail.
+ *
+ * The message is the VM's, verbatim, with no index or length appended —
+ * matching go's cryoStrIndex rather than cryo_array_get's richer array text,
+ * because agreeing with the other engines matters more here than detail. */
+char* cryo_str_index(const char* s, int64_t i) {
+    int64_t n = (int64_t)strlen(s ? s : "");
+    if (i < 0 || i >= n) {
+        fprintf(stderr,
+                "[Cryo Security] IndexError: string index out of bounds\n");
+        exit(1);
+    }
+    char* out = malloc(2);
+    out[0] = s[i];
+    out[1] = '\0';
+    return out;
+}
+
 char* cryo_str_upper(const char* s) {
     char* out = strdup(s);
     for (char* p = out; *p; p++) *p = (char)toupper((unsigned char)*p);

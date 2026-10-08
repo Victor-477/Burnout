@@ -1377,6 +1377,67 @@ check("two different helpers are each emitted once",
 check("is_blank is built on trim, so it cannot disagree with it",
       'trim()' in gen_node('print(is_blank(" "));' + chr(10)))
 
+# ── the C backend's string index ──
+# `s[i]` compiled to cryo_array_get(), the ARRAY accessor, reading an array
+# header off a char pointer: a segfault, not a build failure. These are the
+# codegen-level checks; test_parity runs the program on all four engines and
+# compares, including the out-of-range abort.
+print("[c] a string index is a string, not an array read")
+_cidx = gen_c('string s = "abc"; print(s[1]);' + chr(10))
+check("c: s[i] uses the string accessor",
+      'cryo_str_index(' in _cidx)
+check("c: s[i] no longer reaches the array accessor",
+      'cryo_array_get(' not in _cidx)
+# cryo_str_slice would clamp, so "abc"[9] would be "" while every other engine
+# aborts. Fail-open on an out-of-range read is the one answer a bounds check
+# must not give, so assert the helper that aborts is the one being called.
+check("c: and not the clamping slice, which would fail open",
+      'cryo_str_slice(' not in _cidx)
+_sassign = ''
+try:
+    gen_c('string s = "abc"; s[1] = "z";' + chr(10))
+except Exception as _e:
+    _sassign = str(_e)
+check("c: writing through a string index is refused, not emitted",
+      'immutable' in _sassign)
+
+# ── nine builtins the C backend refused but had already implemented ──
+# clamp, sign, gcd, hypot, starts_with, ends_with, repeat, pad_start and
+# pad_end were implemented by ISSUES/09 and never removed from `_call`'s
+# deny-list, which runs first — so the C backend refused nine builtins whose
+# implementations were sitting right below the refusal, unreachable.
+#
+# Asserting the EMITTED CALL rather than just "it did not raise": a deny-list
+# entry and a missing dispatch arm look identical from outside, and these are
+# only interesting because the dispatch was always there.
+print("[c] nine builtins the deny-list hid from their own implementations")
+for _name, _src, _want in (
+        ('starts_with', 'print(starts_with("ab", "a"));', 'cryo_str_starts_with('),
+        ('ends_with',   'print(ends_with("ab", "b"));',   'cryo_str_ends_with('),
+        ('repeat',      'print(repeat("ab", 2));',        'cryo_str_repeat('),
+        ('pad_start',   'print(pad_start("7", 3, "0"));', 'cryo_str_pad_start('),
+        ('pad_end',     'print(pad_end("7", 3, "0"));',   'cryo_str_pad_end('),
+        ('clamp',       'print(clamp(5, 1, 3));',         'cryo_clamp_'),
+        ('sign',        'print(sign(-7));',               'cryo_sign_'),
+        ('gcd',         'print(gcd(12, 18));',            'cryo_gcd('),
+        ('hypot',       'print(hypot(3.0, 4.0));',        'cryo_hypot('),
+):
+    try:
+        _got = gen_c(_src + chr(10))
+    except Exception as _e:
+        _got = f'<refused: {_e}>'
+    check(f"c: {_name} reaches its runtime helper", _want in _got)
+# The ones that really do need a host the C backend has not got stay refused.
+_still = ''
+try:
+    gen_c('print(http_get("http://x"));' + chr(10))
+except Exception as _e:
+    _still = str(_e)
+check("c: a builtin needing a host is still refused",
+      'not supported in the C backend' in _still)
+
+
+
 
 print("[throw] a bare throw() defaults to null everywhere")
 _thr = 'try { throw(); } catch (string e) { print(e); }'
@@ -1452,8 +1513,17 @@ def expect_c_reject(src, label):
         gen_c(src); check(label, False)
     except Exception as e:
         check(label, "backend" in str(e).lower())
-expect_c_reject('print(clamp(1, 0, 2));', "c: clamp rejected with clear error")
-expect_c_reject('print(repeat("x", 2));', "c: repeat rejected with clear error")
+# These two used to assert that the C backend REFUSED clamp and repeat.
+# That was testing the deny-list, not a limitation: the runtime has
+# cryo_clamp_i/f and cryo_str_repeat, and the dispatch below the deny-list
+# always emitted them. An assertion that pins a refusal with a working
+# implementation behind it is protecting the bug, so these now assert what
+# the backend can actually do. expect_c_reject stays — the function-value
+# refusal below is real.
+check("c: clamp reaches cryo_clamp_*",
+      'cryo_clamp_' in gen_c('print(clamp(1, 0, 2));' + chr(10)))
+check("c: repeat reaches cryo_str_repeat",
+      'cryo_str_repeat(' in gen_c('print(repeat("x", 2));' + chr(10)))
 # semantics: all seven are known builtins (no 'unknown function')
 try:
     from semantic import check as _sem_check2
@@ -1504,7 +1574,9 @@ _n2 = gen_node(_s2)
 check("node: pad_start uses padStart", ".padStart(" in _n2)
 check("node: concat spreads", "..." in _n2)
 check("node: sum uses reduce", ".reduce(" in _n2)
-expect_c_reject('print(pad_start("7", 3, "0"));', "c: pad_start rejected")
+# Was a refusal assertion; cryo_str_pad_start has existed since 10.4.
+check("c: pad_start reaches cryo_str_pad_start",
+      'cryo_str_pad_start(' in gen_c('print(pad_start("7", 3, "0"));' + chr(10)))
 check("c: sum compiles", "cryo_sum_" in gen_c('int[] a=[1]; print(sum(a));'))
 try:
     from semantic import check as _sem_check4

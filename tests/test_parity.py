@@ -1041,6 +1041,60 @@ agree("every helper in the second set compiles and agrees on cpp too",
       backends=('pyro', 'cpp'),
       expect="true\nbar\nfoo\nMcdonald\ntrue\na-b+c\n2\nab")
 
+# ── a string index on the C backend ──────────────────────────
+#
+# The helpers above walk a string with `s[i]`, and the C backend compiled that
+# to cryo_array_get() — the ARRAY accessor — which read an array header off a
+# char pointer and SEGFAULTED (0xC0000005). It stayed invisible because no
+# local gcc worked, so every `c` row in this suite was skipped; fixing the
+# toolchain is what surfaced seven failures here at once.
+#
+# The second case is the one that matters most. The obvious repair is
+# cryo_str_slice(s, i, i+1), and slice CLAMPS — so `"abc"[9]` would have been
+# "" on c while every other engine aborts. An out-of-range read is the one
+# direction a bounds check must not fail, so this pins the abort and not just
+# the happy path.
+print("\n── string indexing, and the C backend's array accessor ──")
+
+agree("s[i] is a one-character string, on c as everywhere else",
+      'string s = "abc"; print(s[0]); print(s[1]); print(s[2]);\n',
+      backends=('pyro', 'node', 'go', 'c'), expect="a\nb\nc")
+
+aborts_with("an out-of-range string index aborts rather than returning empty",
+            'string s = "abc"; print(s[9]);\n',
+            '[Cryo Security] IndexError: string index out of bounds',
+            backends=('pyro', 'node', 'go', 'c'))
+
+agree("the second set of helpers agrees on c too",
+      'print(is_blank("  ")); print(capitalize("mcDONALD"));\nprint(strip_prefix("foobar", "foo")); print(replace_last("a-b-c", "-", "+"));\nprint(word_count("  one   two ")); print(common_prefix("abc", "abd"));\n',
+      backends=('pyro', 'node', 'go', 'c'),
+      expect="true\nMcdonald\nbar\na-b+c\n2\nab")
+
+# ── nine builtins the C backend refused but could already compile ──
+#
+# clamp, sign, gcd, hypot, starts_with, ends_with, repeat, pad_start and
+# pad_end were implemented by ISSUES/09 — runtime helpers, codegen dispatch
+# and type inference, all present — and left on `_call`'s deny-list, which
+# runs first. So the C backend refused nine builtins it could compile, and
+# the code that compiles them was unreachable for the whole of Phase 10.4.
+#
+# Found because strip_prefix/strip_suffix lower to starts_with/ends_with: a
+# front-end desugaring inherited a refusal that had no reason left.
+#
+# Two cases rather than nine, to keep this to two gcc builds: the nine share
+# nothing but the deny-list, so a name still on it fails its group outright.
+print("\n── builtins the C backend refused but had implemented ──")
+
+agree("starts_with / ends_with / repeat / pad_start / pad_end on c",
+      'print(starts_with("foobar", "foo")); print(ends_with("foobar", "bar"));\nprint(repeat("ab", 3)); print(pad_start("7", 3, "0")); print(pad_end("7", 3, "0"));\n',
+      backends=('pyro', 'node', 'go', 'c'),
+      expect="true\ntrue\nababab\n007\n700")
+
+agree("clamp / sign / gcd / hypot on c",
+      'print(clamp(5, 1, 3)); print(clamp(0, 1, 3)); print(sign(-7)); print(sign(0));\nprint(gcd(12, 18)); print(hypot(3.0, 4.0));\n',
+      backends=('pyro', 'node', 'go', 'c'),
+      expect="3\n1\n-1\n0\n6\n5")
+
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))
 sys.exit(1 if _failed else 0)

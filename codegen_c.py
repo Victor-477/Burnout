@@ -115,6 +115,17 @@ def c_type(t: str) -> str:
     return C_TYPE.get(t, t)          # struct types pass directly
 
 def elem_type(arr_t: str) -> str:
+    # A STRING's element is a one-character string, not 'unknown'. Returning
+    # 'unknown' for it is what let `s[i]` reach the array path in `_expr` and
+    # compile to cryo_array_get(char*, i) — the ARRAY accessor, reading an
+    # array header off a char pointer. That segfaulted (0xC0000005) rather
+    # than failing a build, and it was invisible for as long as no local gcc
+    # worked, so the parity suite skipped the `c` backend entirely.
+    #
+    # Every other backend reads a string index as a one-character string, so
+    # this agrees with them rather than inventing a C-only answer.
+    if arr_t == 'string':
+        return 'string'
     return arr_t[:-2] if arr_t.endswith('[]') else 'unknown'
 
 
@@ -566,6 +577,21 @@ class CodeGenC:
             self._emit(f"cryo_map_set({obj}, {_U64_TO[kt]}({self._expr(n.index)}), "
                        f"{_U64_TO[vt]}({self._expr(n.value)}));")
             return
+        if ot == 'string':
+            # Refused, not emitted. No backend supports writing through a
+            # string index: the VM aborts with "indexed assignment on a
+            # non-indexable value", node throws a TypeError, and the go
+            # backend fails the build. Saying so here is the only one of the
+            # four that reports it before the program runs.
+            #
+            # This clause is load-bearing BECAUSE of the elem_type fix above:
+            # with a string's element type now 'string', the line below would
+            # otherwise pick cryo_set_str — the string-array setter — and
+            # write through a char pointer.
+            raise CodeGenError(
+                "a string cannot be assigned through an index in the C "
+                "backend: strings are immutable. Build a new string with "
+                "substr()/+ instead")
         et = elem_type(ot)
         fn = _SET_FN.get(et, 'cryo_array_set')
         self._emit(f"{fn}({obj}, {self._expr(n.index)}, {self._expr(n.value)});")
@@ -936,6 +962,16 @@ class CodeGenC:
                 kt, vt = map_kv(at)
                 return (f"{_U64_FROM[vt]}(cryo_map_get({obj}, "
                         f"{_U64_TO[kt]}({idx})))")
+            if at == 'string':
+                # `s[i]` is a one-character string. This has to come BEFORE
+                # the array path: cryo_get_str is the accessor for a string
+                # ARRAY and would read an array header off the char pointer.
+                #
+                # cryo_str_index, not cryo_str_slice(obj, i, i+1): slice
+                # CLAMPS, so `"abc"[9]` would quietly be "" while every other
+                # engine aborts. The runtime helper bounds-checks and aborts
+                # with the VM's text.
+                return f"cryo_str_index({obj}, {idx})"
             et  = elem_type(at)
             fn  = _GET_FN.get(et, 'cryo_array_get')
             return f"{fn}({obj}, {idx})"
@@ -1024,13 +1060,26 @@ class CodeGenC:
         callee = node.callee
         args   = node.args
 
-        # resources only for Go/Node/Pyro backends
+        # Resources that genuinely need a host the C backend does not have:
+        # a skill registry, an HTTP client, an LLM, a JSON encoder, a clock.
+        #
+        # NINE NAMES USED TO BE ON THIS LIST AND SHOULD NOT HAVE BEEN:
+        # clamp, sign, gcd, hypot, starts_with, ends_with, repeat, pad_start
+        # and pad_end. ISSUES/09 implemented every one of them — the runtime
+        # has cryo_clamp_i/f, cryo_sign_i/f, cryo_gcd, cryo_hypot,
+        # cryo_str_starts_with, cryo_str_ends_with, cryo_str_repeat and
+        # cryo_str_pad_start/end, `_call` below emits all nine, and TypeEnv
+        # already infers their result types. Only this deny-list, which the
+        # implementation never removed them from, stood in front of it.
+        #
+        # So the C backend refused nine builtins it could already compile, and
+        # the code that compiles them was unreachable. Found because
+        # strip_prefix/strip_suffix lower to starts_with/ends_with, so a
+        # front-end desugaring inherited a refusal that had no reason left.
         if callee.startswith('pyro_') or callee in (
                 'skills', 'skill_get', 'skill_has', 'skills_json', 'json_encode',
                 'http_get', 'http_post', 'sleep',
-                'schema_of', 'llm', 'tools', 'tool_get', 'tools_json', 'agent',
-                'clamp', 'sign', 'gcd', 'hypot', 'starts_with', 'ends_with', 'repeat',
-                'pad_start', 'pad_end'):
+                'schema_of', 'llm', 'tools', 'tool_get', 'tools_json', 'agent'):
             raise CodeGenError(
                 f"'{callee}()' is not supported in the C backend; "
                 f"use --backend go, node or pyro.")
