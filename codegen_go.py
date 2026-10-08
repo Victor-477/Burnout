@@ -51,7 +51,7 @@ def _split_type_pair(s: str):
             depth -= 1
         elif c == ',' and depth == 0:
             return s[:i].strip(), s[i + 1:].strip()
-    raise CodeGenGoError(f"tipo map malformado: '{s}'")
+    raise CodeGenGoError(f"malformed map type: '{s}'")
 
 
 def _split_top_commas(s: str):

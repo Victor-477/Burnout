@@ -3,7 +3,7 @@
 #  .cryo  ->  .js  (JavaScript CommonJS, executable with `node`)
 #
 #  Covers the CORE of the language: scalars, strings, bool, arrays,
-#  maps, structs (objetos), enums, functions, controle de fluxo,
+#  maps, structs (as objects), enums, functions, control flow,
 #  operators, print/assert, JSON, and foreign blocks/libraries
 #  of JavaScript (>Node( ... ) / >JS( ... ) and `library >node x<`).
 #
@@ -335,13 +335,25 @@ class CodeGenNode:
                   "  return Object.keys(x).length;",
                   "}", ""]
         if 'div' in self._helpers:
+            # NOT a guarded division. This helper is reached only when the
+            # operands are not statically both `int`, i.e. float division —
+            # and float division by zero is IEEE on every other engine: the
+            # Pyro VM and the go backend both yield +Inf, which
+            # PYRO_RUNTIME.md §1 specifies. Throwing here made `1.0 / 0.0`
+            # print `+Inf` on pyro and abort on node, and the message it threw
+            # was in Portuguese on top of that.
+            #
+            # It cannot do better by inspecting the values: JavaScript has one
+            # number type, so a genuine `1.0` is indistinguishable from `1` and
+            # any runtime integer test would abort on the float case it exists
+            # to allow. The integer case is dispatched statically to cryoIDiv.
             H += ["function cryoDiv(a, b) {",
-                  "  if (b === 0) throw new Error('[Cryo Security] DivisaoPorZero');",
-                  "  return a / b;",
+                  "  return a / b;   // float division: +Inf, as the VM does",
                   "}", ""]
         if 'idiv' in self._helpers:
             H += ["function cryoIDiv(a, b) {",
-                  "  if (b === 0) throw new Error('[Cryo Security] DivByZero');",
+                  "  if (b === 0) throw new Error("
+                  "'[Cryo Security] DivByZero: integer division');",
                   "  return Math.trunc(a / b);   // integer division (truncates toward zero)",
                   "}", ""]
         if 'index' in self._helpers:
@@ -394,7 +406,8 @@ class CodeGenNode:
                   "}", ""]
         if 'mod' in self._helpers:
             H += ["function cryoMod(a, b) {",
-                  "  if (b === 0) throw new Error('[Cryo Security] DivisaoPorZero');",
+                  "  if (b === 0) throw new Error("
+                  "'[Cryo Security] DivByZero: modulo');",
                   "  return a % b;",
                   "}", ""]
         if 'unwrap' in self._helpers:
@@ -546,7 +559,7 @@ class CodeGenNode:
         elif isinstance(n, ForeignBlock):
             self._foreign(n)
         elif isinstance(n, CallExpr) and n.callee == 'throw':
-            arg = self._expr(n.args[0]) if n.args else '"erro"'
+            arg = self._expr(n.args[0]) if n.args else 'null'
             self._emit(f"throw {arg};")
         elif isinstance(n, TryExpr):
             self._node_try(n.operand)   # discarded value (statement)

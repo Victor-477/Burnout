@@ -669,7 +669,7 @@ check("node read nested bounds-check",
 check("node campo-array write bounds-check",
       "cryoSetIndex(" in gen_node("struct S{int[] xs;} S s = new S{xs:[1]}; s.xs[0] = 9;"))
 check("node len -> cryoLen", "cryoLen(" in gen_node('int n = len("abc");'))
-check("node switch with break automatico",
+check("node switch with automatic break",
       "break;" in gen_node("fn f(int d)->int ={ switch(d){ case 1: print(\"um\"); default: print(\"x\"); } }"))
 # library node -> require; bloco Node emitido; bloco Go omitido
 check("node library >node fs< -> require",
@@ -809,7 +809,7 @@ def _w(name, content):
         f.write(content)
     return p
 
-_w("util.cryo", 'const int BASE = 10\nfn double(int x) -> int ={ return x * 2; }\nprint("nao deve rodar");\n')
+_w("util.cryo", 'const int BASE = 10\nfn double(int x) -> int ={ return x * 2; }\nprint("must not run");\n')
 _w("fundo.cryo", 'fn triplo(int x) -> int ={ return x * 3; }\n')
 _w("meio.cryo", 'import "fundo.cryo"\nfn quad(int x) -> int ={ return triplo(x) + x; }\n')
 _w("ciclo_a.cryo", 'import "ciclo_b.cryo"\nfn fa() -> int ={ return 1; }\n')
@@ -961,10 +961,10 @@ check("optimized <= non-optimized (bytes)",
 # correctness: division integer not is folded (semantics de trunc/security fica p/ runtime)
 check("fold: div integer not folds (DIV presente)", "DIV" in _pdis("int x = 10 / 2; print(x);"))
 
-print("[phase5] saltos i32 + info de debug (pyro v2)")
-# a section de debug aparece in the disasm with "; linha N"
+print("[phase5] i32 jumps + debug info (pyro v2)")
+# the debug section shows up in the disassembly as "; line N"
 d = _pdis('fn f(int n)->int ={ return n * 2; } int x = f(3); print(x);')
-check("debug: disasm anota linhas", "; line" in d)
+check("debug: the disassembly annotates lines", "; line" in d)
 # tabela pc->linha in the header (flag debug) + inputs
 _bcj = gen_pyro('fn f(int n)->int ={ return n; } print(f(1));', encode=False)
 check("debug: flag 0x02 setado", (_bcj[5] & 0x02) == 2)
@@ -1005,7 +1005,7 @@ check("lsp: program valid without diagnostics",
       _lsp.compute_diagnostics("file:///x.cryo", _src_ok) == [])
 _d = _lsp.compute_diagnostics("file:///x.cryo", _src_bad)
 check("lsp: dois diagnostics (arity + undeclared)", len(_d) == 2)
-check("lsp: diagnostic traz range/linha 0-based",
+check("lsp: a diagnostic carries a 0-based line/range",
       all('range' in x and x['range']['start']['line'] >= 0 for x in _d))
 check("lsp: Error lexical becomes diagnostic with column",
       _lsp.compute_diagnostics("file:///x.cryo", "int x = @;")[0]['range']['start']['character'] >= 0)

@@ -5,18 +5,18 @@ Burnout compiles the **Cryo** source language (`.cryo`) to the target language
 the programmatic API to use the compiler within other Python projects — without
 depending on the CLI.
 
-Uso rápido::
+Quick use::
 
     import burnout
 
     # compiles a .cryo string and returns the target code (str for go/c/asm,
     # bytes for the pyro bytecode)
-    go_src = burnout.compile_source('print("ola");', backend="go")
+    go_src = burnout.compile_source('print("hi");', backend="go")
 
     # compiles a file and (optionally) executes
     burnout.compile_file("app.cryo", backend="pyro", run=True)
 
-    # front-end: tokens e AST
+    # front-end: tokens and AST
     toks = burnout.tokenize(open("app.cryo").read())
     ast  = burnout.parse_ast(open("app.cryo").read())
 

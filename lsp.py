@@ -91,7 +91,7 @@ _KEYWORD_DOC = {
     'try': "Error handling: `try { } catch (string e) { } finally { }`.",
     'import': "`import \"file.cryo\"` (module) or `import >Lang<` (language).",
     'library': "`library >lang name<` — imports a foreign library.",
-    'map': "Tipo mapa: `map<K, V>`.", 'future': "Pending result type.",
+    'map': "Map type: `map<K, V>`.", 'future': "Pending result type.",
     'unsafe': "Block without security instrumentation.",
     'safe': "Reactivates instrumentation inside an unsafe block.",
 }
@@ -154,8 +154,13 @@ def _word_at(text, line0, char0):
     return w or None
 
 
-_LEX_RE = re.compile(r'Linha (\d+), Col (\d+): (.*)', re.S)
-_PARSE_RE = re.compile(r'Linha (\d+): (.*)', re.S)
+# Matched against the compiler's own wording — `[Syntax Error] Line N, Col M:`
+# from the lexer and `[Syntax Error] Line N:` from the parser. These used to
+# read `Linha`, which nothing has emitted since the messages were translated,
+# so the match always failed and every syntax diagnostic landed on line 0
+# instead of on the mistake.
+_LEX_RE = re.compile(r'Line (\d+), Col (\d+): (.*)', re.S)
+_PARSE_RE = re.compile(r'Line (\d+): (.*)', re.S)
 
 
 def _diag(line0, ch0, ch1, message, severity=1):
@@ -207,7 +212,7 @@ def compute_diagnostics(uri, text):
             diags.append(_full_line_diag(text, line, msg) if line
                          else _diag(0, 0, 1, msg))
     except Exception as e:                       # never brings down the server
-        diags.append(_diag(0, 0, 1, f"análise: {e}"))
+        diags.append(_diag(0, 0, 1, f"analysis: {e}"))
     # foreign blocks
     try:
         verify_foreign(resolved)

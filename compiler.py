@@ -497,8 +497,8 @@ def compile_file(input_path: str,
     # ── automatic backend selection ──
     auto = (backend == 'auto')
     if auto:
-        backend, motivo = select_backend(load_ast(source, base_dir))
-        print(f"→ backend automático: {backend}  ({motivo})")
+        backend, reason = select_backend(load_ast(source, base_dir))
+        print(f"→ automatic backend: {backend}  ({reason})")
 
     # The sandbox now covers every PRIMARY executable backend — pyro (VM flag),
     # go and node (guards in the generated code). It stays inapplicable to c,

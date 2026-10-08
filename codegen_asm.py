@@ -256,8 +256,9 @@ class CodeGenAsm:
         for ptype, pname in fn.params:
             if self._is_struct(ptype):
                 raise CodeGenAsmError(
-                    f"funcao '{fn.name}': struct '{ptype}' como parametro por "
-                    f"value is not supported in assembly backend. Use --backend c.")
+                    f"function '{fn.name}': a struct ('{ptype}') passed by "
+                    f"value is not supported in the assembly backend. "
+                    f"Use --backend c.")
             names.append(pname)
             types[pname] = ptype
         self._collect_locals(fn.body, names, types)
