@@ -1531,6 +1531,38 @@ _p26.parse()
 check("26: a name declared with two types is treated as unknown",
       'xs' in _p26._ambiguous_decls)
 
+# ── C4: parse_int / parse_number are desugarings like the rest ──
+# test_parity covers the answers across backends; these cover the mechanism
+# and the one property that matters most — that the validator is a SUBSET of
+# the native's accept set, so the to_int it guards can never be reached with
+# input that would abort.
+print("[C4] parse_int / parse_number")
+check("parse_int is lowered, not left unknown",
+      '__cryo_parse_int' in gen_node('print(parse_int("1") ?? 0);' + chr(10)))
+check("parse_number is lowered too",
+      '__cryo_parse_number' in gen_node('print(parse_number("1") ?? 0.0);' + chr(10)))
+check("a user function of the same name still wins",
+      'return 7' in gen_node(
+          'fn parse_int(string s) -> int ={ return 7; }' + chr(10)
+          + 'print(parse_int("1"));' + chr(10)))
+check("the helper is emitted once however many calls",
+      gen_node('print(parse_int("1") ?? 0); print(parse_int("2") ?? 0);' + chr(10))
+      .count('function __cryo_parse_int') == 1)
+# The guarded native must be reached only after the validator has approved
+# the string, which is what keeps an abort out of reach. Both helpers end in
+# a single call to their native, and every rejection returns before it.
+_pi_src = Parser._STR_HELPERS['parse_int'][2]
+check("parse_int calls to_int exactly once, at the end",
+      _pi_src.count('to_int(') == 1
+      and _pi_src.rstrip().rstrip('}').rstrip().endswith('return to_int(t);'))
+_pn_src = Parser._STR_HELPERS['parse_number'][2]
+check("parse_number calls to_number exactly once, at the end",
+      _pn_src.count('to_number(') == 1
+      and _pn_src.rstrip().rstrip('}').rstrip().endswith('return to_number(t);'))
+check("parse_int checks the int64 limit, not just the characters",
+      '9223372036854775807' in _pi_src and '9223372036854775808' in _pi_src)
+
+
 
 
 
