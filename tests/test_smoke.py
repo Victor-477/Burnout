@@ -1876,6 +1876,30 @@ check("go: array of function values compiles", "[]func(int64) int64" in gen_go(_
 check("node: array of function values compiles", "cryoIndex(ops" in gen_node(_fn_arr_src))
 check("pyro: array of function values compiles", isinstance(gen_pyro(_fn_arr_src), (bytes, bytearray)))
 
+# ── EMP L-01: a function-typed local read only as a callee ──
+print("[L-01] the optimizer keeps a fn-typed local used only as a callee")
+from optimize import optimize as _opt_ast
+from ast_nodes import VarDecl as _VD, FunctionDecl as _FD2
+_l01 = ('struct M { string nome; fn(string)->string h; }\n'
+        'fn f(string p) -> string ={ return "f:" + p; }\n'
+        'fn chamar(M m, string p) -> string ={ fn(string)->string h = m.h; '
+        'return h(p); }\n'
+        'print(chamar(M { nome: "x", h: f }, "a"));\n')
+_ch = next(s for s in _opt_ast(parse_ast(_l01)).statements
+           if isinstance(s, _FD2) and s.name == 'chamar')
+check("optimizer: a local read only as a callee is not pruned",
+      any(isinstance(s, _VD) and s.name == 'h' for s in _ch.body))
+check("node: the optimised program still declares it",
+      "let h" in CodeGenNode().generate(_opt_ast(parse_ast(_l01))))
+_sh = ('fn dbl(int n) -> int ={ return n * 2; }\n'
+       'fn tri(int n) -> int ={ return n * 3; }\n'
+       'fn usa(int x) -> int ={ fn(int)->int dbl = tri; return dbl(x); }\n'
+       'print(usa(5));\n')
+_us = next(s for s in _opt_ast(parse_ast(_sh)).statements
+           if isinstance(s, _FD2) and s.name == 'usa')
+check("optimizer: a local fn value is not replaced by an inlined global",
+      "n * 2" not in repr(_us.body) and "dbl" in repr(_us.body))
+
 # ── 11.38: a user function named `main` ──────────────────
 # The synthetic top level is ALSO called 'main', and it used to be registered
 # in the function table under that name — overwriting a user's own `fn main()`.

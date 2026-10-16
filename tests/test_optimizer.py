@@ -130,6 +130,19 @@ CASES = [
      'cryoMulOvf'),
 ]
 
+FN_LOCAL_CALLEE = (
+    'struct M { string nome; fn(string)->string h; }\n'
+    'fn f(string p) -> string ={ return "f:" + p; }\n'
+    'fn chamar(M m, string p) -> string ={ fn(string)->string h = m.h; '
+    'return h(p); }\n'
+    'print(chamar(M { nome: "x", h: f }, "a"));\n')
+
+FN_LOCAL_SHADOW = (
+    'fn dbl(int n) -> int ={ return n * 2; }\n'
+    'fn tri(int n) -> int ={ return n * 3; }\n'
+    'fn usa(int x) -> int ={ fn(int)->int dbl = tri; return dbl(x); }\n'
+    'print(usa(5));\n')
+
 # Programs whose meaning must survive exactly. No claim about size — these are
 # here because getting any of them wrong fails silently.
 SEMANTIC = [
@@ -161,6 +174,15 @@ SEMANTIC = [
      'int a = 1;\nif (a > 0) { print("yes"); } else { print("no"); }\n'),
     ('a string built at runtime is unaffected',
      'string who = "world";\nprint("hello " + who);\n'),
+    # EMP L-01: `h` is read only as a callee, which is a plain name on the
+    # CallExpr rather than an Identifier — so it was counted as unread and its
+    # declaration pruned, leaving `h(p)` calling nothing.
+    ('a function-typed local used only as a callee is kept',
+     FN_LOCAL_CALLEE),
+    # The inliner's version of the same mistake: it inlined the top-level
+    # `dbl` over a local that happens to share its name.
+    ('a local fn value is not inlined as the top-level fn of that name',
+     FN_LOCAL_SHADOW),
 ]
 
 
@@ -215,6 +237,26 @@ def test_cross_backend(work):
     go = run_go(src, work)
     check("pyro and go agree, and are right", py == go == '600\n42\n14',
           f"pyro={py!r} go={go!r}")
+
+    # L-01 failed differently per backend — "function 'h' unknown" on pyro, a
+    # ReferenceError on node — so each one has to run it, not just compile it.
+    for label, src, want in (('called through', FN_LOCAL_CALLEE, 'f:a'),
+                             ('shadowing a top-level fn', FN_LOCAL_SHADOW, '15')):
+        outs = {'pyro': run_pyro(src, work), 'go': run_go(src, work)}
+        if shutil.which('node'):
+            cf = os.path.join(work, 'n.cryo')
+            js = os.path.join(work, 'n.js')
+            with open(cf, 'w', encoding='utf-8') as f:
+                f.write(src)
+            subprocess.run([sys.executable, CRYOC, cf, '--backend', 'node',
+                            '-o', js, '--no-banner'], capture_output=True,
+                           timeout=300)
+            r = subprocess.run(['node', js], capture_output=True, text=True,
+                               timeout=120, errors='replace')
+            outs['node'] = (r.stdout + r.stderr).replace('\r\n', '\n').strip()
+        for b, out in outs.items():
+            check(f"{b}: a function-typed local {label}", out == want,
+                  f"got {out!r}, want {want!r}")
 
 
 def test_flag(work):
