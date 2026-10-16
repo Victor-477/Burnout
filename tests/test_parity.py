@@ -1242,6 +1242,195 @@ agree("a module-level map from a function's return",
       'fn mk() -> map<int,int> ={ map<int,int> r = {}; r[5] = 6; return r; }\nmap<int,int> c = mk(); print(c);\n',
       backends=('pyro', 'node', 'go', 'c'), expect="{5: 6}")
 
+# ── C4: parsing that returns instead of killing the process ──
+#
+# to_int("abc") and to_number("abc") ABORT, and the abort is not catchable:
+# `try { to_int(s) } catch (string e)` does not run, the process ends. For a
+# server parsing user input that is a denial of service — one bad form field
+# ends the request loop for every tenant.
+#
+# parse_int/parse_number are front-end desugarings returning an optional, so
+# `parse_int(s) ?? 0` is the whole idiom. The validator is deliberately a
+# SUBSET of the native's accept set: more permissive and the call it guards
+# would abort, which is the thing being fixed.
+#
+# NOT on the c backend, and that is a real gap rather than an omission: the
+# C backend refuses to_int()/to_number() on a string outright, because its
+# runtime has no parse helper, so the desugaring has nothing to lower onto
+# there. Recorded as ISSUES/27.
+print("\n── C4: parse_int / parse_number ──")
+
+_PARSE = ('pyro', 'node', 'go')
+
+agree("parse_int takes what to_int takes",
+      'print(parse_int("42") ?? -1); print(parse_int("-42") ?? -1);\nprint(parse_int("+42") ?? -1); print(parse_int(" 7 ") ?? -1);\nprint(parse_int("007") ?? -1); print(parse_int("0") ?? -1);\n',
+      backends=_PARSE, expect="42\n-42\n42\n7\n7\n0")
+
+agree("…and returns null for what it does not, instead of aborting",
+      'print(parse_int("") ?? -1); print(parse_int("abc") ?? -1);\nprint(parse_int("4.2") ?? -1); print(parse_int("0x10") ?? -1);\nprint(parse_int("-") ?? -1);\n',
+      backends=_PARSE, expect="-1\n-1\n-1\n-1\n-1")
+
+# The overflow half, which is the part a character-only validator would miss:
+# to_int aborts on 99999999999999999999 exactly as it does on "abc".
+#
+# pyro and go ONLY. Not a parse_int defect — the node backend cannot
+# represent int64 at all, because a Cryo `int` is a JavaScript number there:
+# `int a = 9223372036854775807; print(a)` already prints
+# 9223372036854775000 with no conversion involved. Recorded as ISSUES/28.
+agree("the exact int64 limits parse, and one past them does not",
+      'print(parse_int("9223372036854775807") ?? -1);\nprint(parse_int("9223372036854775808") ?? -1);\nprint(parse_int("-9223372036854775808") ?? -1);\nprint(parse_int("-9223372036854775809") ?? -1);\nprint(parse_int("99999999999999999999") ?? -1);\n',
+      backends=('pyro', 'go'),
+      expect="9223372036854775807\n-1\n-9223372036854775808\n-1\n-1")
+
+# Leading zeros are stripped BEFORE the length test, or a padded field would
+# read as an overflow purely for being long.
+agree("a zero-padded number is its value, not an overflow",
+      'print(parse_int("00000000000000000000042") ?? -1);\n',
+      backends=_PARSE, expect="42")
+
+agree("parse_number takes plain decimals",
+      'print(parse_number("4.2") ?? -1.0); print(parse_number("-3.5") ?? -1.0);\nprint(parse_number(".5") ?? -1.0); print(parse_number("5.") ?? -1.0);\n',
+      backends=_PARSE, expect="4.2\n-3.5\n0.5\n5")
+
+# Narrower than to_number ON PURPOSE: no exponent, no NaN/Inf. to_number
+# rejects "1e999" for being out of range, and reproducing that here would
+# mean encoding the double range in the validator.
+agree("…and refuses everything else, exponents included",
+      'print(parse_number("abc") ?? -1.0); print(parse_number("1e3") ?? -1.0);\nprint(parse_number("1.2.3") ?? -1.0); print(parse_number(".") ?? -1.0);\nprint(parse_number("") ?? -1.0);\n',
+      backends=_PARSE, expect="-1\n-1\n-1\n-1\n-1")
+
+agree("parse_int and parse_number reach cpp too",
+      'print(parse_int("42") ?? -1); print(parse_int("abc") ?? -1);\nprint(parse_number("4.2") ?? -1.0); print(parse_number("x") ?? -1.0);\n',
+      backends=('pyro', 'cpp'), expect="42\n-1\n4.2\n-1")
+
+# The whole point: the program keeps running. An abort would end it before
+# the second line, so the second line IS the assertion.
+agree("a rejected parse does not end the program",
+      'int v = parse_int("nao-e-int") ?? 0;\nprint(v); print("ainda vivo");\n',
+      backends=_PARSE, expect="0\nainda vivo")
+
+# ── C1: checked_add / checked_sub / checked_mul ──────────────
+#
+# `a + b` itself still means two things — the compiled backends abort and
+# both VMs wrap silently — and that is ISSUES/29, which needs a safe-mode
+# bit the .pyro format does not have. These are requirement C1's other
+# accepted answer, and they agree everywhere today.
+#
+# The cases are BOUNDARIES, not samples. A guard that is one off at the
+# limit is indistinguishable from a correct one on ordinary input, and
+# ordinary input is all anybody tries.
+print("\n── C1: checked arithmetic ──")
+
+_CK = ('pyro', 'node', 'go')
+_MXMN = 'int MX = 9223372036854775807;\nint MN = -9223372036854775807 - 1;\n'
+
+agree("checked_add at and past the top",
+      _MXMN + 'print(checked_add(2, 3) ?? -999); print(checked_add(MX, 0) ?? -999);\nprint(checked_add(MX, 1) ?? -999);\n',
+      backends=('pyro', 'go'), expect="5\n9223372036854775807\n-999")
+
+agree("checked_add at and past the bottom",
+      _MXMN + 'print(checked_add(MN, 1) ?? -999); print(checked_add(MN, -1) ?? -999);\n',
+      backends=('pyro', 'go'), expect="-9223372036854775807\n-999")
+
+agree("checked_sub at both ends",
+      _MXMN + 'print(checked_sub(10, 3) ?? -999); print(checked_sub(MN, 1) ?? -999);\nprint(checked_sub(MX, -1) ?? -999); print(checked_sub(0, MN) ?? -999);\n',
+      backends=('pyro', 'go'), expect="7\n-999\n-999\n-999")
+
+# MIN * -1 is the case a guard written over absolute values gets wrong,
+# because abs(MIN) is itself the overflow. MIN * 1 is NOT an overflow and
+# must come back.
+agree("checked_mul and the MIN * -1 asymmetry",
+      _MXMN + 'print(checked_mul(6, 7) ?? -999); print(checked_mul(MX, 2) ?? -999);\nprint(checked_mul(MN, -1) ?? -999); print(checked_mul(-1, MN) ?? -999);\nprint(checked_mul(MN, 1) ?? -999);\n',
+      backends=('pyro', 'go'),
+      expect="42\n-999\n-999\n-999\n-9223372036854775808")
+
+# The sharpest pair in the whole set: -2^62 * 2 is EXACTLY MIN and must be
+# allowed, one step further must not. A conservative guard passes every
+# other case here and fails this one.
+agree("the guard is exact at MIN, not merely conservative",
+      'print(checked_mul(-4611686018427387904, 2) ?? -999);\nprint(checked_mul(-4611686018427387905, 2) ?? -999);\nprint(checked_mul(4611686018427387903, 2) ?? -999);\nprint(checked_mul(4611686018427387904, 2) ?? -999);\n',
+      backends=('pyro', 'go'),
+      expect="-9223372036854775808\n-999\n9223372036854775806\n-999")
+
+agree("zero short-circuits before any sign analysis",
+      _MXMN + 'print(checked_mul(0, MN) ?? -999); print(checked_mul(MN, 0) ?? -999);\n',
+      backends=('pyro', 'go'), expect="0\n0")
+
+agree("the sign combinations",
+      'print(checked_mul(-3, -4) ?? -999); print(checked_mul(3, -4) ?? -999);\nprint(checked_mul(-3, 4) ?? -999); print(checked_add(-5, -7) ?? -999);\n',
+      backends=_CK, expect="12\n-12\n-12\n-12")
+
+agree("checked arithmetic reaches cpp too",
+      'print(checked_add(2, 3) ?? -999); print(checked_mul(6, 7) ?? -999);\nprint(checked_mul(4611686018427387904, 2) ?? -999);\n',
+      backends=('pyro', 'cpp'), expect="5\n42\n-999")
+
+# ── the text helpers on text that is not ASCII ───────────────
+#
+# Every text case above is ASCII, which is exactly how four of these
+# helpers shipped corrupting UTF-8. They indexed with s[i] — a BYTE — so
+# reverse_str("Ação") came back as "o\xc2\xa3\xc3\x83A" and
+# common_prefix("ação", "açúcar") as the bytes 61 C3 A7 C3: a dangling lead
+# byte, because ã and ú SHARE one and the loop stopped between the halves of
+# a character. Fixed by walking split(s, ""), which is character-aware.
+#
+# These cases are the ones that were missing. The output is compared across
+# backends as usual, so a backend whose split() is byte-oriented fails here
+# rather than silently producing different mojibake.
+print("\n── text helpers on non-ASCII input ──")
+
+_U8 = ('pyro', 'node', 'go')
+
+agree("reverse_str reverses characters, not bytes",
+      u'print(reverse_str("Ação"));\n',
+      backends=_U8, expect=u"oãçA")
+
+agree("capitalize upper-cases a multi-byte first character",
+      u'print(capitalize("ótimo"));\n',
+      backends=_U8, expect=u"Ótimo")
+
+agree("title_case too",
+      u'print(title_case("ação ótima"));\n',
+      backends=_U8, expect=u"Ação Ótima")
+
+# The case that would not have been predicted by reading the loop: a shared
+# LEAD byte. ã is C3 A3 and ú is C3 BA, so a byte-wise comparison matches
+# the C3 and then stops, returning half a character.
+agree("common_prefix stops at a character, not inside one",
+      u'print("[" + common_prefix("ação", "açúcar") + "]");\n',
+      backends=_U8, expect=u"[aç]")
+
+agree("…and the result is the same length on every backend",
+      u'print(len(common_prefix("ação", "açúcar")));\n',
+      backends=_U8, expect="3")
+
+# split("", ...) is the primitive all four now rest on, so pin that it is
+# character-aware rather than trusting it.
+agree("split with an empty separator yields characters",
+      u'string[] cs = split("Ação", ""); print(len(cs)); print(cs);\n',
+      backends=_U8, expect=u"4\n[A, ç, ã, o]")
+
+agree("chars() agrees with it",
+      u'print(len(chars("Ação")));\n',
+      backends=_U8, expect="4")
+
+# The byte-oriented natives, pinned as they ARE rather than as D1 wants
+# them, so that ISSUES/30 changing them is a visible decision and not a
+# silent one.
+agree("len() still counts BYTES — ISSUES/30, not yet changed",
+      u'print(len("Ação Ônibus"));\n',
+      backends=_U8, expect="14")
+
+# The classifiers stay byte-wise, and that is safe: every byte of a
+# multi-byte character is >= 0x80, so it can never match an ASCII set and
+# there are no false positives.
+agree("is_alpha is ASCII-defined, and says so consistently",
+      u'print(is_alpha("ação")); print(is_alpha("acao"));\n',
+      backends=_U8, expect="false\ntrue")
+
+agree("the non-ASCII cases reach cpp too",
+      u'print(reverse_str("Ação")); print(capitalize("ótimo"));\nprint("[" + common_prefix("ação", "açúcar") + "]");\n',
+      backends=('pyro', 'cpp'), expect=u"oãçA\nÓtimo\n[aç]")
+
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))
 sys.exit(1 if _failed else 0)

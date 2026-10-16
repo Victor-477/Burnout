@@ -1562,6 +1562,66 @@ check("parse_number calls to_number exactly once, at the end",
 check("parse_int checks the int64 limit, not just the characters",
       '9223372036854775807' in _pi_src and '9223372036854775808' in _pi_src)
 
+# ── C1: checked_add / checked_sub / checked_mul ──
+# test_parity runs the boundaries across backends; these are the mechanism,
+# plus the one property that makes the helpers correct at all.
+print("[C1] checked arithmetic")
+check("checked_add is lowered",
+      '__cryo_checked_add' in gen_node('print(checked_add(1, 2) ?? 0);' + chr(10)))
+check("checked_mul is lowered",
+      '__cryo_checked_mul' in gen_node('print(checked_mul(1, 2) ?? 0);' + chr(10)))
+check("a user function of the same name still wins",
+      'return 7' in gen_node(
+          'fn checked_add(int a, int b) -> int ={ return 7; }' + chr(10)
+          + 'print(checked_add(1, 2));' + chr(10)))
+_ck_arity = ''
+try:
+    gen_node('print(checked_add(1) ?? 0);' + chr(10))
+except Exception as _e:
+    _ck_arity = str(_e)
+check("they take two arguments, and say so", 'takes 2 arguments' in _ck_arity)
+# NO GUARD MAY ITSELF OVERFLOW. A bound spelled `a + b > MAX` has already
+# done the thing it exists to prevent, so the helpers contain no bare
+# addition or multiplication outside the single guarded operation they end
+# with. Asserting it structurally, because reading the arithmetic back is
+# exactly the review that misses this.
+for _nm, _op in (('checked_add', '+'), ('checked_sub', '-'), ('checked_mul', '*')):
+    _src = Parser._STR_HELPERS[_nm][2]
+    _body = [l.strip() for l in _src.splitlines() if l.strip().startswith('if (')]
+    check(f"C1: no guard in {_nm} uses the operation it guards",
+          all((' %s ' % _op) not in l for l in _body))
+# MIN cannot be written as a literal: -9223372036854775808 is unary minus
+# applied to a value that does not fit. The helpers derive it instead.
+for _nm in ('checked_add', 'checked_sub', 'checked_mul'):
+    check(f"C1: {_nm} derives MIN rather than writing it out",
+          '-9223372036854775807 - 1' in Parser._STR_HELPERS[_nm][2]
+          and '-9223372036854775808' not in Parser._STR_HELPERS[_nm][2])
+
+# ── the text helpers walk characters, not bytes ──
+# reverse_str, capitalize, title_case and common_prefix indexed with s[i],
+# which is a byte, and produced INVALID UTF-8 on anything outside ASCII.
+# test_parity runs them; this pins the mechanism, so a later "simplify" that
+# goes back to s[i] fails here even if nobody writes an accented test case.
+print("[utf8] the text helpers rest on split(), not on byte indexing")
+import re as _re8
+for _nm, _params in (('reverse_str', 's'), ('capitalize', 's'),
+                     ('title_case', 's'), ('common_prefix', 'ab')):
+    _s = Parser._STR_HELPERS[_nm][2]
+    # A WORD BOUNDARY matters here: the fixed helpers index the character
+    # ARRAY as cs[i] / ca[i], and a plain `'s[i]' in src` test matches that
+    # substring and fails a correct helper. Found by this check failing
+    # three helpers that had just been verified by hand on 'Ação'.
+    _byte_ix = any(_re8.search(r'(?<![A-Za-z0-9_])%s\[' % _p, _s)
+                   for _p in _params)
+    check(f"utf8: {_nm} walks split(), not the string by byte",
+          'split(' in _s and not _byte_ix)
+# chars() is the one that was always right, and is now what the others rest
+# on, so its definition matters more than it did.
+check("utf8: chars() is split(s, \"\")",
+      'split(s, "")' in Parser._STR_HELPERS['chars'][2])
+
+
+
 
 
 
