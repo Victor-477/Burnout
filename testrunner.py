@@ -20,7 +20,10 @@ import tempfile
 
 _here = os.path.dirname(os.path.abspath(__file__))
 _root = os.path.dirname(_here)
-for _p in ('Cryo', 'Pyro'):
+# Both spellings: compiler.py and the documented checkout use lower case
+# (`cryo/`, `pyro/`), and on a case-sensitive filesystem the capitalised names
+# alone found nothing.
+for _p in ('Cryo', 'Pyro', 'cryo', 'pyro'):
     sys.path.insert(0, os.path.join(_root, _p))
 sys.path.insert(0, _here)
 
@@ -137,6 +140,17 @@ def _run_single(path, args):
         print(f"\n[cryoc test] {e}", file=sys.stderr)
         return 1
 
+    # `import "x.cryo"` (and `as ns`, and `@dep/...`) — the same resolution
+    # an ordinary compile does. The runner is built FIRST, from the entry
+    # file's own tests: a `test fn` inside an imported module belongs to that
+    # module's suite, not to every file that happens to import it.
+    from modules import resolve_modules, ModuleError
+    try:
+        ast = resolve_modules(ast, os.path.dirname(os.path.abspath(path)))
+    except ModuleError as e:
+        print(f"\n{e}", file=sys.stderr)
+        return 1
+
     print(f"[cryoc test] {path} — {len(tests)} test(s) on --backend {args.backend}\n")
     # The suite writes to this terminal from a CHILD process, which does not
     # share this one's buffer — without the flush the header lands after the
@@ -166,6 +180,12 @@ def _run(code, backend, work):
         with open(out, 'wb') as f:
             f.write(code)
         vm = _find_vm()
+        if vm is None:
+            # A fresh checkout has no VM yet. `cryoc --run` builds it on first
+            # use, so `cryoc test` does the same instead of refusing.
+            import compiler
+            compiler._run_pyro(out, _here, False, False)
+            vm = _find_vm()
         if vm is None:
             print("[cryoc test] no Pyro VM binary found — build Pyro/vm",
                   file=sys.stderr)

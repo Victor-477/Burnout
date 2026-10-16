@@ -2137,6 +2137,16 @@ class CodeGenGo:
         """Expression with knowledge of the target type (handles null)."""
         if isinstance(node, Literal) and node.kind == 'null':
             return zero_value(target)
+        # A literal takes its type from the slot it goes into. Through plain
+        # _expr it is []any{…} / map[any]any{…}, which Go refuses for a typed
+        # slot: `names = [];` with `string[] names`, or `total([1.0, 2.5])`
+        # with `fn total(number[] xs)`, failed with "cannot use []any{…} as
+        # []string value". Declarations and returns already did this; plain
+        # assignments and call arguments come through here.
+        if isinstance(node, ArrayLiteral) and target and target.endswith('[]'):
+            return self._array_literal(node, target)
+        if isinstance(node, MapLiteral) and target and is_map(target):
+            return self._map_literal(node, target)
         return self._assert_any(self._expr(node), self.te.infer(node), target)
 
     # 11.31 — an `any` value reaching a typed slot.

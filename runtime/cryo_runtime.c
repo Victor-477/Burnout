@@ -47,6 +47,15 @@ static char* cryo_read_line(FILE* f) {
     return buf;
 }
 
+/* abort() does not flush stdio. With stdout on a pipe (CI, `cryoc test`, any
+   caller capturing output) everything the program printed before a fatal
+   error was still in the buffer and was lost: a failing `cryoc test --backend c`
+   showed the assert and none of the per-test report above it. Flush first. */
+static void _cryo_abort(void) {
+    fflush(NULL);
+    abort();
+}
+
 /* Excecao global */
 CryoException _cryo_exc = {.active = false};
 
@@ -54,7 +63,7 @@ CryoException _cryo_exc = {.active = false};
 
 static void _cryo_fatal(const char* kind, const char* detail) {
     fprintf(stderr, "[Cryo Security] %s: %s\n", kind, detail);
-    abort();   /* aborts with core/backtrace instead of continuing corrupted */
+    _cryo_abort();   /* aborts with core/backtrace instead of continuing corrupted */
 }
 
 int64_t cryo_add_ovf(int64_t a, int64_t b) {
@@ -115,7 +124,7 @@ void cryo_assert(bool cond, const char* msg) {
         longjmp(_cryo_exc.buf, 1);
     }
     fprintf(stderr, "[Cryo Assert] %s\n", m);
-    abort();
+    _cryo_abort();
 }
 
 /* ---------- Security: null pointer guard ---------- */
@@ -124,7 +133,7 @@ void* cryo_check_null(void* p, const char* what) {
     if (!p) {
         fprintf(stderr, "[Cryo Security] NullPointer: access to '%s' null\n",
                 what ? what : "?");
-        abort();
+        _cryo_abort();
     }
     return p;
 }
@@ -388,7 +397,7 @@ char* cryo_arr_to_str_b(CryoArray* a) { return cryo_arr_join(a, cryo_arr_el_b, f
    are compared byte for byte by test_c_vm.py. */
 static void _cryo_unwrap_null(void) {
     fprintf(stderr, "[Cryo Security] unwrap of null value\n");
-    abort();
+    _cryo_abort();
 }
 
 int64_t* cryo_opt_i(int64_t v) {
