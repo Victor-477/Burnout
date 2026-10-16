@@ -43,8 +43,8 @@ Limitações encontradas:
 
 | Limitação | Situação |
 |---|---|
-| `m::f()` dentro de `try`/`switch`/`assert`/`unsafe`/`match`/`x!`/`expr?` dava "unknown function" | corrigido (PR no Cryo: `modules.py`) |
-| `cryoc test` ignorava `import`, então não dava para testar uma biblioteca com o runner da linguagem | corrigido (PR no Burnout: `testrunner.py`) |
+| `m::f()` dentro de `try`/`switch`/`assert`/`unsafe`/`match`/`x!`/`expr?` dava "unknown function" | corrigido na `dev` (Cryo `4bb524c`) |
+| `cryoc test` ignorava `import`, então não dava para testar uma biblioteca com o runner da linguagem | corrigido na `dev` (Burnout `9d0a2f1`) |
 | backend Go recusava `xs = []` e `f([1.0, 2.5])` com parâmetro tipado | corrigido (PR no Burnout: `codegen_go.py`) |
 | overflow de `int` dava a volta na Pyro VM e abortava no Go/C | corrigido (PR no Pyro) |
 | sem literal com expoente (`1e-12`), o que é incômodo numa biblioteca numérica | corrigido (PR no Cryo: os dois lexers) |

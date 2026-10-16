@@ -246,6 +246,8 @@ class CodeGenPyro:
         self._perms: Dict[str, list] = {}
         self._ntmp = 0
         self._cur_line = 0            # last marked line (avoids repeated markers)
+        self._ret_types: Dict[str, Optional[str]] = {}
+        self._cur_ret: Optional[str] = None
 
     # ── constants ──────────────────────────────────────────
 
@@ -373,8 +375,13 @@ class CodeGenPyro:
         for i, nm in enumerate(names):
             self._fnindex[nm] = i
 
+        # Declared return types, for `expr?`: on a `T?` it propagates null, on
+        # a Result enum it propagates the Err (see _try_prop).
+        self._ret_types = {fn.name: fn.return_type for fn in user_fns}
         for fn in user_fns:
+            self._cur_ret = fn.return_type
             self._compile_fn(fn.name, fn.params, fn.body)
+        self._cur_ret = None
         self._compile_fn('main', [], top, synthetic=True, index_key=_ENTRY_KEY)
 
         # lambdas discovered while compiling bodies are queued (with their index
@@ -536,16 +543,40 @@ class CodeGenPyro:
             raise CodeGenPyroError(
                 f"'{type(n).__name__}' not supported in the pyro backend (use --backend go).")
 
+    def _try_is_optional(self, operand) -> bool:
+        """Whether `operand?` works on an optional `T?` rather than a Result.
+
+        The operand's declared type when it is a call to a user function, else
+        the enclosing function's return type: `?` returns whatever it failed on,
+        so a function returning `T?` can only be propagating a null."""
+        if isinstance(operand, CallExpr) and operand.callee in self._ret_types:
+            t = self._ret_types[operand.callee] or ''
+        else:
+            t = self._cur_ret or ''
+        return t.endswith('?')
+
     def _try_prop(self, n):
         """Error propagation 'expr?' (Phase 8.3): evaluates the operand, and if the
         variant is Ok leaves the val0 payload on top; otherwise, the function
-        returns early with the value (Err). Requires a Result type enum (with 'tag').
+        returns early with the value (Err). On an optional `T?` a null returns
+        null early and any other value is left as is (node does the same).
         Leaves the Ok value on top of the stack."""
         self._ntmp += 1
         tmp = self._slot(f"__try{self._ntmp}")
         self._expr(n.operand)
         self._emit(OP_STORE, tmp)
         l_ok = self._label()
+        if self._try_is_optional(n.operand):
+            # Indexing "tag" here used to abort the VM with "indexing a
+            # non-indexable value" for every `maybe()?` on a T?.
+            self._emit(OP_LOAD, tmp)
+            self._emit(OP_NULL)
+            self._emit(OP_NE)
+            self._emit(OP_JMPT, l_ok)
+            self._emit(OP_NULL); self._emit(OP_RET)
+            self._place(l_ok)
+            self._emit(OP_LOAD, tmp)
+            return
         self._emit(OP_LOAD, tmp)
         self._emit(OP_CONST, self._const(TAG_STR, "tag"))
         self._emit(OP_INDEX)

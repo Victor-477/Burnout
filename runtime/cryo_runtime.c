@@ -47,23 +47,15 @@ static char* cryo_read_line(FILE* f) {
     return buf;
 }
 
-/* abort() does not flush stdio. With stdout on a pipe (CI, `cryoc test`, any
-   caller capturing output) everything the program printed before a fatal
-   error was still in the buffer and was lost: a failing `cryoc test --backend c`
-   showed the assert and none of the per-test report above it. Flush first. */
-static void _cryo_abort(void) {
-    fflush(NULL);
-    abort();
-}
-
 /* Excecao global */
 CryoException _cryo_exc = {.active = false};
 
 /* ---------- Security: checked arithmetic ---------- */
 
 static void _cryo_fatal(const char* kind, const char* detail) {
+    fflush(stdout);   /* abort() skips stdio flush: keep what was printed */
     fprintf(stderr, "[Cryo Security] %s: %s\n", kind, detail);
-    _cryo_abort();   /* aborts with core/backtrace instead of continuing corrupted */
+    abort();   /* aborts with core/backtrace instead of continuing corrupted */
 }
 
 int64_t cryo_add_ovf(int64_t a, int64_t b) {
@@ -123,17 +115,19 @@ void cryo_assert(bool cond, const char* msg) {
                  "[Cryo Assert] %s", m);
         longjmp(_cryo_exc.buf, 1);
     }
+    fflush(stdout);   /* abort() skips stdio flush: keep what was printed */
     fprintf(stderr, "[Cryo Assert] %s\n", m);
-    _cryo_abort();
+    abort();
 }
 
 /* ---------- Security: null pointer guard ---------- */
 
 void* cryo_check_null(void* p, const char* what) {
     if (!p) {
+        fflush(stdout);   /* abort() skips stdio flush: keep what was printed */
         fprintf(stderr, "[Cryo Security] NullPointer: access to '%s' null\n",
                 what ? what : "?");
-        _cryo_abort();
+        abort();
     }
     return p;
 }
@@ -396,8 +390,9 @@ char* cryo_arr_to_str_b(CryoArray* a) { return cryo_arr_join(a, cryo_arr_el_b, f
    formats as "kind: detail" — this message has no kind, and the two runtimes
    are compared byte for byte by test_c_vm.py. */
 static void _cryo_unwrap_null(void) {
+    fflush(stdout);   /* abort() skips stdio flush: keep what was printed */
     fprintf(stderr, "[Cryo Security] unwrap of null value\n");
-    _cryo_abort();
+    abort();
 }
 
 int64_t* cryo_opt_i(int64_t v) {
