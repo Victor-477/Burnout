@@ -95,6 +95,16 @@ print(s);
 
 int u = m::maybe(5)!;
 print(u);
+
+// Node types with no case of their own reach the generic rebuild.
+safe { print(m::two() * 10); }
+fn(int)->int twice = (int x) => x * m::two();
+print(twice(4));
+
+// `?` on a T? propagates null (it used to index "tag" and abort the VM).
+print(propagate(9)!);
+int? none = propagate(-1);
+print(none == null);
 '''
 
 TEST_FILE = '''import "lib.cryo" as m;
@@ -157,7 +167,7 @@ def main():
         check("no `ns::name` survives resolution", not left, ', '.join(left[:6]))
         kinds = {type(n).__name__ for n in walk(prog)}
         for k in ('TryCatch', 'Switch', 'SwitchCase', 'Assert', 'MatchStatement',
-                  'CastExpr', 'UnwrapExpr', 'TryExpr'):
+                  'CastExpr', 'UnwrapExpr', 'TryExpr', 'SafetyBlock', 'Lambda'):
             check(f"{k} is still in the tree", k in kinds)
 
         # Rebuilt nodes keep their source line (transform_node / carry_meta).
@@ -181,9 +191,11 @@ def main():
 
         write(work, 'every.cryo', EVERY_NODE)
         r = cryoc('every.cryo', '--backend', 'pyro', '--run', cwd=work)
-        # try 1, finally 2, switch 11, match 3, cast 7, unwrap 5
+        # try 1, finally 2, switch 11, match 3, cast 7, unwrap 5, safe 20,
+        # lambda 8, `?` on a value 9, `?` on null
+        want = ['1', '2', '11', '3', '7', '5', '20', '8', '9', 'true']
         check("every node type runs with the module's values",
-              r.stdout.strip().splitlines()[-6:] == ['1', '2', '11', '3', '7', '5'],
+              r.stdout.strip().splitlines()[-len(want):] == want,
               (r.stdout + r.stderr)[-500:])
 
         # ── cryoc test resolves imports ─────────────────────

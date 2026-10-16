@@ -53,6 +53,7 @@ CryoException _cryo_exc = {.active = false};
 /* ---------- Security: checked arithmetic ---------- */
 
 static void _cryo_fatal(const char* kind, const char* detail) {
+    fflush(stdout);   /* abort() skips stdio flush: keep what was printed */
     fprintf(stderr, "[Cryo Security] %s: %s\n", kind, detail);
     abort();   /* aborts with core/backtrace instead of continuing corrupted */
 }
@@ -114,6 +115,7 @@ void cryo_assert(bool cond, const char* msg) {
                  "[Cryo Assert] %s", m);
         longjmp(_cryo_exc.buf, 1);
     }
+    fflush(stdout);   /* abort() skips stdio flush: keep what was printed */
     fprintf(stderr, "[Cryo Assert] %s\n", m);
     abort();
 }
@@ -122,6 +124,7 @@ void cryo_assert(bool cond, const char* msg) {
 
 void* cryo_check_null(void* p, const char* what) {
     if (!p) {
+        fflush(stdout);   /* abort() skips stdio flush: keep what was printed */
         fprintf(stderr, "[Cryo Security] NullPointer: access to '%s' null\n",
                 what ? what : "?");
         abort();
@@ -387,6 +390,7 @@ char* cryo_arr_to_str_b(CryoArray* a) { return cryo_arr_join(a, cryo_arr_el_b, f
    formats as "kind: detail" — this message has no kind, and the two runtimes
    are compared byte for byte by test_c_vm.py. */
 static void _cryo_unwrap_null(void) {
+    fflush(stdout);   /* abort() skips stdio flush: keep what was printed */
     fprintf(stderr, "[Cryo Security] unwrap of null value\n");
     abort();
 }
