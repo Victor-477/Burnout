@@ -20,8 +20,9 @@ import tempfile
 
 _here = os.path.dirname(os.path.abspath(__file__))
 _root = os.path.dirname(_here)
-for _p in ('Cryo', 'Pyro'):
-    sys.path.insert(0, os.path.join(_root, _p))
+# Same front-end directory compiler.py uses. This used to be 'Cryo'/'Pyro',
+# which only resolved on a case-insensitive filesystem.
+sys.path.insert(0, os.path.join(_root, 'cryo'))
 sys.path.insert(0, _here)
 
 for _s in (sys.stdout, sys.stderr):
@@ -108,6 +109,7 @@ def _list_tests_file(fpath):
 def _run_single(path, args):
     from lexer import Lexer, LexerError
     from parser import Parser, ParseError
+    from modules import resolve_modules, ModuleError
     import testing
 
     src = open(path, encoding='utf-8').read()
@@ -135,6 +137,15 @@ def _run_single(path, args):
         testing.build_runner(ast)
     except testing.TestError as e:
         print(f"\n[cryoc test] {e}", file=sys.stderr)
+        return 1
+
+    # `import "x.cryo" [as m]`, resolved against the test file's directory as
+    # compiler.compile_source does. After build_runner, so the suite is made of
+    # this file's tests only — an imported module's own `test fn`s are not run.
+    try:
+        ast = resolve_modules(ast, os.path.dirname(os.path.abspath(path)))
+    except ModuleError as e:
+        print(f"\n{e}", file=sys.stderr)
         return 1
 
     print(f"[cryoc test] {path} — {len(tests)} test(s) on --backend {args.backend}\n")
@@ -241,6 +252,8 @@ def _find_vm():
     for c in (os.path.join(_root, 'build', 'pyrovm' + exe),
               os.path.join(_root, 'build', 'pyrovm_cpp' + exe),
               os.path.join(_root, 'build', 'pyrovm_cs' + exe),
+              os.path.join(_root, 'pyro', 'vm', 'pyrovm_go' + exe),
+              os.path.join(_root, 'pyro', 'vm', 'pyrovm' + exe),
               os.path.join(_root, 'Pyro', 'vm', 'pyrovm_go' + exe),
               os.path.join(_root, 'Pyro', 'vm', 'pyrovm' + exe)):
         if os.path.isfile(c):
