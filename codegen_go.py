@@ -263,8 +263,14 @@ class TypeEnv:
             # failed. Found by the differential generator on its first real
             # run, and it had gone unnoticed because a compile-only check never
             # runs the Go compiler over the result.
+            # concat: either operand may be the literal, so take the one
+            # whose type is actually known.
+            if (node.callee == 'concat' and node.args
+                    and 'concat' not in self._fns):
+                ts = [self.infer(x) for x in node.args]
+                return next((t for t in ts if t.endswith('[]')), ts[0])
             if node.callee in ('abs', 'clamp', 'min', 'max', 'sort', 'reverse',
-                               'slice', 'concat') and node.args:
+                               'slice') and node.args:
                 return self.infer(node.args[0])
             return builtin or self.fn_ret(node.callee)
         if isinstance(node, StructInit):
@@ -305,6 +311,7 @@ class CodeGenGo:
         self._global_defs: List[str] = []
         self._fn_defs:     List[str] = []
         self._main:        List[str] = []
+        self._main_started = False   # a top-level statement is already in main
         self._cur:  List[str] = self._main
         self._indent = 1
         self._safe_stack: List[bool] = []
@@ -364,7 +371,10 @@ class CodeGenGo:
                 self._cur, self._indent = self._global_defs, 0
                 self._const(node)
             elif isinstance(node, VarDecl):
-                self._cur, self._indent = self._global_defs, 0
+                if self._main_started and node.value is not None:
+                    self._cur, self._indent = self._main, 1
+                else:
+                    self._cur, self._indent = self._global_defs, 0
                 self._var(node, module=True)
             elif isinstance(node, SkillDecl):
                 self._skills.append(node)   # registered; emitted in _assemble
@@ -377,6 +387,7 @@ class CodeGenGo:
             else:
                 self._cur, self._indent = self._main, 1
                 self._gen(node)
+                self._main_started = True
         return self._assemble()
 
     def _pre_scan(self, stmts):
@@ -487,6 +498,7 @@ class CodeGenGo:
                   '\treturn "{" + strings.Join(parts, ", ") + "}"', "}", "",
                   "func cryoStr(v any) string {",
                   '\tif v == nil { return "null" }',
+                  '\tif reflect.TypeOf(v).String() == "*runtime.PanicNilError" { return "null" }',
                   "\tswitch x := v.(type) {",
                   "\tcase string:",
                   "\t\treturn x",
@@ -1759,29 +1771,46 @@ class CodeGenGo:
         vt = n.var_type
         name = gid(n.name)
 
+        # Go runs package-level initialisers at package init, BEFORE main().
+        # Once a top-level statement has been emitted into main, a later
+        # module var initialised at package scope would see the state from
+        # before that statement ran: `int[] a = []; a.push(1); int[] b = a;`
+        # left b empty on go and not on pyro/node. From that point on the
+        # var is declared at package scope and assigned in main, in source
+        # order.
+        in_main = module and self._main_started and n.value is not None
+        if in_main:
+            self._global_defs.append(f"var {name} {gt}")
+
+        def bind(val, short=False):
+            if in_main:
+                self._emit(f"{name} = {val}")
+            elif short and not module:
+                self._emit(f"{name} := {val}")
+            else:
+                self._emit(f"var {name} {gt} = {val}")
+
         if isinstance(n.value, TryExpr):
             okv = self._go_try(n.value.operand)
-            self._emit(f"var {name} {gt} = {okv}")
+            bind(okv)
             if not module:
                 self._emit(f"_ = {name}")
             return
 
         if isinstance(n.value, ArrayLiteral):
-            lit = self._array_literal(n.value, vt)
-            self._emit(f"var {name} {gt} = {lit}" if module else f"{name} := {lit}")
+            bind(self._array_literal(n.value, vt), short=True)
         elif isinstance(n.value, MapLiteral):
-            self._emit(f"var {name} {gt} = {self._map_literal(n.value, vt)}")
+            bind(self._map_literal(n.value, vt))
         elif is_map(vt) and n.value is None:
             # map without value: initializes empty and writable
-            self._emit(f"var {name} {gt} = {gt}{{}}" if module else f"{name} := {gt}{{}}")
+            bind(f"{gt}{{}}", short=True)
         elif is_optional(vt) and n.value is not None:
-            self._emit(f"var {name} {gt} = {self._to_optional(n.value, vt)}")
+            bind(self._to_optional(n.value, vt))
         elif is_future(vt) and isinstance(n.value, SpawnExpr):
             # uses the declared element type (avoids 'chan any' by failed inference)
-            self._emit(f"var {name} {gt} = {self._spawn(n.value, future_elem(vt))}")
+            bind(self._spawn(n.value, future_elem(vt)))
         elif n.value is not None:
-            val = self._expr_typed(n.value, vt)
-            self._emit(f"var {name} {gt} = {val}")
+            bind(self._expr_typed(n.value, vt))
         else:
             self._emit(f"var {name} {gt}")
         if not module:
@@ -2086,6 +2115,7 @@ class CodeGenGo:
                 self._helpers.add('str')
                 self._emit("if r := recover(); r != nil {")
                 self._indent += 1
+                self._emit('if reflect.TypeOf(r).String() == "*runtime.PanicNilError" { r = nil }')
                 var = n.catch_name or "_cryo_err"
                 self._emit(f"{gid(var)} := cryoStr(r)")
                 self._emit(f"_ = {gid(var)}")
@@ -2137,6 +2167,16 @@ class CodeGenGo:
         """Expression with knowledge of the target type (handles null)."""
         if isinstance(node, Literal) and node.kind == 'null':
             return zero_value(target)
+        # A literal takes its type from the slot it lands in. Through plain
+        # _expr, `xs = [];` on a `string[]` came out as `xs = []any{}` and Go
+        # refused the assignment; the same held for a literal argument.
+        if isinstance(node, ArrayLiteral):
+            return self._array_literal(node, target)
+        if isinstance(node, MapLiteral):
+            return self._map_literal(node, target)
+        if (isinstance(node, CallExpr) and node.callee == 'concat'
+                and len(node.args) == 2 and 'concat' not in self.te._fns):
+            return self._concat(node, target)
         return self._assert_any(self._expr(node), self.te.infer(node), target)
 
     # 11.31 — an `any` value reaching a typed slot.
@@ -2319,6 +2359,21 @@ class CodeGenGo:
         inner = self._expr(node.expr)
         self._helpers.add('future')
         return f"cryoSpawn(func() {gt} {{ return {inner} }})"
+
+    def _concat(self, node: CallExpr, target: Optional[str]) -> str:
+        """cryoConcat is generic over []T, so a literal operand has to be
+        spelled with the OTHER operand's type: `concat(xs, ["a"])` with
+        `[]any{"a"}` does not unify with a []string. When both operands are
+        literals, the slot the result goes into decides."""
+        self._helpers.add('concat')
+        a = node.args
+        t = self.te.infer(node)
+        if not t.endswith('[]'):
+            t = target if target and target.endswith('[]') else None
+        if not t:
+            return f"cryoConcat({self._expr(a[0])}, {self._expr(a[1])})"
+        return (f"cryoConcat({self._expr_typed(a[0], t)}, "
+                f"{self._expr_typed(a[1], t)})")
 
     def _map_literal(self, node: MapLiteral, map_type: Optional[str]) -> str:
         if map_type and is_map(map_type):
@@ -2617,8 +2672,7 @@ class CodeGenGo:
             self._imports.add('slices')
             return f"int64(slices.Index({self._expr(a[0])}, {self._expr(a[1])}))"
         if c == 'concat' and len(a) == 2:
-            self._helpers.add('concat')
-            return f"cryoConcat({self._expr(a[0])}, {self._expr(a[1])})"
+            return self._concat(node, None)
         if c == 'count' and len(a) == 2:
             self._helpers.add('count')
             return f"cryoCount({self._expr(a[0])}, {self._expr(a[1])})"

@@ -1531,6 +1531,38 @@ agree("? propagation over an optional agrees across backends",
       'print(u(-5) ?? 0);\n',
       backends=('pyro', 'node', 'go', 'cpp'), expect="42\n0")
 
+# ── go: an untyped array literal takes its type from the slot ──
+# `xs = [];` and `concat(xs, ["a"])` on a `string[]` came out as `[]any{…}`
+# on go, which Go will neither assign to a []string nor unify with one in the
+# generic cryoConcat. Found by the EMP's event queue (nucleo/eventos.cryo).
+print("\n── go: array literals typed by their context ──")
+agree("[] assigned to a typed array, and concat with a literal",
+      'string[] xs = [];\n'
+      'fn f() -> int ={ xs = concat(xs, ["a"]); int n = len(xs); xs = []; return n + len(xs); }\n'
+      'print(f());\n',
+      expect="1")
+agree("concat of two literals into a typed slot",
+      'string[] s = concat(["x"], ["y"]);\nprint(s);\n'
+      'int[] n = [];\nn = concat([1], n);\nprint(n);\n',
+      expect="[x, y]\n[1]")
+agree("an array literal as a typed call argument",
+      'fn total(int[] v) -> int ={ if (len(v) == 0) { return 0; } return v[0] + len(v); }\n'
+      'print(total([]));\nprint(total([2, 3]));\n',
+      expect="0\n4")
+
+# ── go: module vars initialised in source order ──
+# Go runs package-level initialisers before main(), so a module var declared
+# AFTER a top-level statement saw the state from before that statement ran.
+print("\n── go: module var initialisers run in source order ──")
+agree("a module var sees the statements above it",
+      'int[] a = [];\na.push(1);\nint[] b = a;\nprint(len(b));\n',
+      expect="1")
+agree("…including a call with side effects, and functions still see it",
+      'int n = 1;\nfn bump() -> int ={ n = n + 1; return n; }\n'
+      'print("start");\nint m = bump();\nfn get_m() -> int ={ return m; }\n'
+      'map<string,int> d = {"a": n};\nprint(get_m());\nprint(d["a"]);\n',
+      expect="start\n2\n2")
+
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))
 sys.exit(1 if _failed else 0)
