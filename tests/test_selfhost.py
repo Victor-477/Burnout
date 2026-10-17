@@ -731,5 +731,29 @@ check_selfhost('fn dbl(int x) -> int ={ return x * 2; } '
                'fn(int)->int c = pick(true); print(c(10));',         # 20
                "funcvalues", lines_fn=_out_lines)
 
+# exponent literals: both lexers must agree on where a number ends. `2e` is NOT
+# an exponent (no digit follows), so it stays INT_LIT 2 + IDENT e, and the `e`
+# in the token text is lower-cased so `2E-4` and `2e-4` lex to the same thing.
+SAMPLE_EXP = ('number a = 1.5e3; number b = 2E-4; number c = 1e10; number d = 6.022e+23; '
+              'number e = 1_000e-3; int x = 2; number f = x * e; number g = 2e;')
+print("\n[exponent] float literals with an exponent")
+exp_e = reference_tokens(SAMPLE_EXP)
+got_e, res_e = selfhost_tokens(SAMPLE_EXP)
+if got_e != exp_e:
+    for i in range(max(len(got_e), len(exp_e))):
+        g = got_e[i] if i < len(got_e) else "<missing>"
+        e = exp_e[i] if i < len(exp_e) else "<extra>"
+        if g != e:
+            print(f"    divergence at position {i}: expected {e!r}, got {g!r}")
+            break
+check("exponent sample: token stream identical to the reference lexer",
+      res_e.returncode == 0 and got_e == exp_e)
+check("1.5e3 is one FLOAT_LIT token", 'FLOAT_LIT 1.5e3' in exp_e)
+check("2E-4 lexes as FLOAT_LIT 2e-4", 'FLOAT_LIT 2e-4' in exp_e)
+
+check_selfhost('number a = 1.5e3; print(a); print(2E-2 * 100.0); print(1e3 + 1.0); '
+               'number big = 6.022e+23; print(big > 1e23); print(2.5e0);',
+               "exponents", lines_fn=_out_lines)
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

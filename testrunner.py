@@ -178,6 +178,12 @@ def _run(code, backend, work):
             f.write(code)
         vm = _find_vm()
         if vm is None:
+            # A fresh checkout has no VM yet. `cryoc --run` builds it on first
+            # use, so `cryoc test` does the same instead of refusing.
+            import compiler
+            compiler._run_pyro(out, _here, False, False)
+            vm = _find_vm()
+        if vm is None:
             print("[cryoc test] no Pyro VM binary found — build Pyro/vm",
                   file=sys.stderr)
             return 2
