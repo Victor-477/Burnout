@@ -1399,9 +1399,9 @@ agree("common_prefix stops at a character, not inside one",
       u'print("[" + common_prefix("ação", "açúcar") + "]");\n',
       backends=_U8, expect=u"[aç]")
 
-agree("…and the result is the same length on every backend",
-      u'print(len(common_prefix("ação", "açúcar")));\n',
-      backends=_U8, expect="3")
+agree("…and the result is a whole number of characters",
+      u'print(char_len(common_prefix("ação", "açúcar")));\n',
+      backends=_U8, expect="2")
 
 # split("", ...) is the primitive all four now rest on, so pin that it is
 # character-aware rather than trusting it.
@@ -1416,9 +1416,24 @@ agree("chars() agrees with it",
 # The byte-oriented natives, pinned as they ARE rather than as D1 wants
 # them, so that ISSUES/30 changing them is a visible decision and not a
 # silent one.
-agree("len() still counts BYTES — ISSUES/30, not yet changed",
+# node is EXCLUDED here and that IS the finding, not an exemption: len() on
+# a string counts CHARACTERS on node (11) and BYTES on the other four (14).
+# Both are asserted, so ISSUES/30 cannot be settled by changing one of them
+# without this failing.
+agree("len() counts BYTES on pyro and go — ISSUES/30",
       u'print(len("Ação Ônibus"));\n',
-      backends=_U8, expect="14")
+      backends=('pyro', 'go'), expect="14")
+
+# NOT agree(): it needs two backends to compare and SILENTLY SKIPS with
+# fewer, so this read as a passing assertion about node while running
+# nothing at all. One backend means asserting its output directly.
+_n30 = tempfile.mkdtemp(prefix='cryo_par_')
+_n30_out = run_backend(_n30, u'print(len("Ação Ônibus"));\n', 'node')
+if _n30_out is None:
+    print("  skip len() on node (node not available)")
+else:
+    check("…and CHARACTERS on node, which is the divergence",
+          _n30_out == "11", repr(_n30_out))
 
 # The classifiers stay byte-wise, and that is safe: every byte of a
 # multi-byte character is >= 0x80, so it can never match an ASCII set and
@@ -1427,10 +1442,14 @@ agree("is_alpha is ASCII-defined, and says so consistently",
       u'print(is_alpha("ação")); print(is_alpha("acao"));\n',
       backends=_U8, expect="false\ntrue")
 
-agree("the non-ASCII cases reach cpp too",
-      u'print(reverse_str("Ação")); print(capitalize("ótimo"));\nprint("[" + common_prefix("ação", "açúcar") + "]");\n',
-      backends=('pyro', 'cpp'), expect=u"oãçA\nÓtimo\n[aç]")
-
+# cpp gets reverse_str and common_prefix, which are pure character walks,
+# but NOT capitalize: upper() is ASCII-only on c and cpp, so "ótimo" comes
+# back unchanged there (ISSUES/31). Asserting the casing here would be
+# asserting a bug away; asserting the character walk is the real question,
+# since that is what the split fix changed.
+agree("the character walks reach cpp too",
+      u'print(reverse_str("Ação"));\nprint("[" + common_prefix("ação", "açúcar") + "]");\n',
+      backends=('pyro', 'cpp'), expect=u"oãçA\n[aç]")
 # ── D1 (part): counting and slicing by character ─────────────
 #
 # len() counts BYTES and that is ISSUES/30, asserted as it is just above.
@@ -1444,7 +1463,11 @@ print("\n── D1: char_len / char_at / char_slice ──")
 
 agree("char_len counts characters where len counts bytes",
       u'print(char_len("Ação Ônibus")); print(len("Ação Ônibus"));\nprint(char_len("")); print(char_len("abc"));\n',
-      backends=_U8, expect="11\n14\n0\n3")
+      backends=('pyro', 'go'), expect="11\n14\n0\n3")
+
+agree("char_len agrees everywhere, whatever len() does",
+      u'print(char_len("Ação Ônibus")); print(char_len("")); print(char_len("abc"));\n',
+      backends=_U8, expect="11\n0\n3")
 
 agree("char_at reaches a multi-byte character",
       u'print(char_at("Ação", 0)); print(char_at("Ação", 2));\n',

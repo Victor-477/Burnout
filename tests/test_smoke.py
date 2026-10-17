@@ -1620,6 +1620,25 @@ for _nm, _params in (('reverse_str', 's'), ('capitalize', 's'),
 check("utf8: chars() is split(s, \"\")",
       'split(s, "")' in Parser._STR_HELPERS['chars'][2])
 
+# ── D1: the character helpers rest on split(), like the rest ──
+print("[D1] char_len / char_at / char_slice")
+for _nm in ('char_len', 'char_at', 'char_slice'):
+    check(f"D1: {_nm} is lowered",
+          '__cryo_' + _nm in gen_node(
+              {'char_len': 'print(char_len("a"));',
+               'char_at': 'print(char_at("a", 0));',
+               'char_slice': 'print(char_slice("a", 0, 1));'}[_nm] + chr(10)))
+    check(f"D1: {_nm} counts with split(), not len()",
+          'split(' in Parser._STR_HELPERS[_nm][2])
+# char_slice must not be able to overflow its own bound when handed a huge
+# length — `a + n` is guarded by `n < ln - a`, the same discipline as
+# checked_add.
+_cs = Parser._STR_HELPERS['char_slice'][2]
+check("D1: char_slice guards a + n before computing it",
+      'n < ln - a' in _cs and 'a + n' in _cs
+      and _cs.index('n < ln - a') < _cs.index('a + n'))
+
+
 
 
 
