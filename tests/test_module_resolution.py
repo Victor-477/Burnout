@@ -121,6 +121,63 @@ test fn alias_in_try() ={
 '''
 
 
+# L-17 — a qualified type INSIDE a composite type: `k::T[]`, `k::T?`,
+# `map<string,k::T>`, `fn(k::T)->int`, a struct field, a for-each variable, a
+# lambda parameter. Only a type that was exactly `k::T` used to be mangled, so
+# Go got the raw `::` text (`syntax error: unexpected :`). The module side had
+# the same gap the other way round: its own `T[]` stayed `T[]` after `T` became
+# `k__T`. Everything runs inside functions — the Go backend initialises
+# top-level variables before the top-level statements run.
+COMPOSITE_LIB = '''pub struct T { int v; }
+struct Hidden { int v; }
+pub struct Bag { T one; T[] many; map<string,T> byname; }
+pub fn mk(int v) -> T ={ return T { v: v }; }
+pub fn sum(T[] xs) -> int ={ int s = 0; for (T t in xs) { s = s + t.v; } return s; }
+pub fn pick(T[] xs) -> T? ={ if (len(xs) > 0) { return xs[0]; } return null; }
+pub fn each(T[] xs, fn(T)->int f) -> int ={
+    int s = 0;
+    for (T t in xs) { s = s + f(t); }
+    return s;
+}
+pub fn bag() -> Bag ={
+    T[] xs = [mk(2), mk(3)];
+    map<string,T> m = {};
+    m["a"] = mk(4);
+    return Bag { one: mk(1), many: xs, byname: m };
+}
+'''
+
+COMPOSITE = '''import "lib.cryo" as k;
+
+struct Holder { k::T one; k::T[] list; }
+
+fn apply(fn(k::T)->int f, k::T t) -> int ={ return f(t); }
+fn first(k::T[] xs) -> k::T? ={ if (len(xs) > 0) { return xs[0]; } return null; }
+
+fn run() -> int ={
+    k::T[] a = [k::mk(1), k::mk(2)];
+    map<string,k::T> m = {};
+    m["x"] = k::mk(5);
+    fn(k::T)->int g = (k::T t) => t.v * 10;
+    print(apply(g, m["x"]));
+    for (k::T t in a) { print(t.v); }
+    Holder h = Holder { one: k::mk(7), list: a };
+    print(h.one.v);
+    print(k::sum(h.list));
+    k::T? f = first(a);
+    print(f!.v);
+    k::Bag b = k::bag();
+    print(b.one.v + k::sum(b.many) + b.byname["a"].v);
+    print(k::each(a, (k::T t) => t.v + 100));
+    k::T? p = k::pick(a);
+    print(p!.v);
+    return 0;
+}
+run();
+'''
+COMPOSITE_WANT = ['50', '1', '2', '7', '3', '1', '10', '203', '1']
+
+
 def write(d, name, src):
     with open(os.path.join(d, name), 'w', encoding='utf-8') as f:
         f.write(src)
@@ -220,6 +277,68 @@ def main():
         r = cryoc('test', bad, cwd=work)
         check("a missing module is a clean module error",
               r.returncode != 0 and 'module not found' in r.stderr, r.stderr[-300:])
+
+        # ── L-17: qualified names inside composite types ────
+        print("\n── ns::T inside composite types (L-17) ──")
+        cd = os.path.join(work, 'composite')
+        os.makedirs(cd)
+        write(cd, 'lib.cryo', COMPOSITE_LIB)
+        write(cd, 'main.cryo', COMPOSITE)
+        prog = resolve_modules(Parser(Lexer(COMPOSITE).tokenize()).parse(), cd)
+        left = leftover_qualified(prog)
+        check("no `ns::` survives in any type string", not left, ', '.join(left[:6]))
+        by_name = {getattr(n, 'name', None): n for n in prog.statements}
+        holder = by_name.get('Holder')
+        check("struct fields of the entry program are mangled",
+              holder is not None and
+              [f.field_type for f in holder.fields] == ['k__T', 'k__T[]'],
+              holder and [f.field_type for f in holder.fields])
+        apply_fn = by_name.get('apply')
+        check("fn-typed parameter is mangled",
+              apply_fn is not None and apply_fn.params[0][0] == 'fn(k__T)->int',
+              apply_fn and apply_fn.params)
+        check("optional return type is mangled",
+              by_name.get('first') is not None and by_name['first'].return_type == 'k__T?')
+        # the module's own composites follow its mangling
+        bag = by_name.get('k__Bag')
+        check("module struct fields use the mangled own type",
+              bag is not None and [f.field_type for f in bag.fields] ==
+              ['k__T', 'k__T[]', 'map<string,k__T>'],
+              bag and [f.field_type for f in bag.fields])
+        each = by_name.get('k__each')
+        check("module fn params use the mangled own type",
+              each is not None and each.params ==
+              [('k__T[]', 'xs'), ('fn(k__T)->int', 'f')], each and each.params)
+        check("module optional return uses the mangled own type",
+              by_name.get('k__pick') is not None and by_name['k__pick'].return_type == 'k__T?')
+
+        from modules import _rename_type                  # noqa: E402
+        check("only TYPE names are renamed inside a composite",
+              _rename_type('map<string,T>', {'map': 'k__map', 'T': 'k__T'},
+                           {'T': 'k__T'}) == 'map<string,k__T>')
+        check("another module's `ns::T` is left to its own alias",
+              _rename_type('j::T[]', {'T': 'k__T'}, {'T': 'k__T'}) == 'j::T[]')
+
+        for backend in ('pyro', 'node', 'go'):
+            if backend == 'node' and not shutil.which('node'):
+                check("node is installed (needed for the L-17 parity run)", False)
+                continue
+            if backend == 'go' and not shutil.which('go'):
+                check("go is installed (needed for the L-17 parity run)", False)
+                continue
+            r = cryoc('main.cryo', '--backend', backend, '--run', '--no-cache', cwd=cd)
+            got = r.stdout.strip().splitlines()[-len(COMPOSITE_WANT):]
+            check(f"composite qualified types compile and run on {backend}",
+                  got == COMPOSITE_WANT, (r.stdout + r.stderr)[-600:])
+
+        for src, msg in (('import "lib.cryo" as k;\nk::Hidden[] h = [];\n', "is not pub"),
+                         ('import "lib.cryo" as k;\nmap<string,k::Nope> m = {};\n',
+                          "unknown type 'Nope'")):
+            try:
+                resolve_modules(Parser(Lexer(src).tokenize()).parse(), cd)
+                check(f"composite type: {msg}", False, "no error raised")
+            except Exception as e:                       # ModuleError
+                check(f"composite type: {msg}", msg in str(e), str(e))
     finally:
         shutil.rmtree(work, ignore_errors=True)
 
