@@ -3,7 +3,7 @@
 #  .cryo  ->  .js  (JavaScript CommonJS, executable with `node`)
 #
 #  Covers the CORE of the language: scalars, strings, bool, arrays,
-#  maps, structs (objetos), enums, functions, controle de fluxo,
+#  maps, structs (as objects), enums, functions, control flow,
 #  operators, print/assert, JSON, and foreign blocks/libraries
 #  of JavaScript (>Node( ... ) / >JS( ... ) and `library >node x<`).
 #
@@ -153,8 +153,14 @@ class _Types:
 
 
 class CodeGenNode:
-    def __init__(self, safe: bool = True):
+    def __init__(self, safe: bool = True, sandbox: bool = False):
         self.safe = safe
+        # Phase 7 — the runtime sandbox reaches node too. It used to be
+        # pyro and go only, and node FAILED OPEN: the same --sandbox
+        # program that pyro and go refused would happily write the file
+        # here. Golden rule 1 is parity across pyro/go/node, and a
+        # security control is the worst place to be the odd one out.
+        self._sandbox = sandbox
         self._t = _Types()
         self._requires: List[str] = []
         self._enums:    List[str] = []
@@ -309,6 +315,19 @@ class CodeGenNode:
                   "  return v;",
                   "}",
                   "function cryoJSONEncode(v) { return JSON.stringify(cryoJSONSort(v)); }", ""]
+        if 'sandbox' in self._helpers:
+            # Mirrors cryoSandboxGuard() in the go backend, including the
+            # PYRO_SANDBOX=1 override: the environment can only TIGHTEN the
+            # baked-in value, never loosen it.
+            baked = 'true' if self._sandbox else 'false'
+            H += [f"const cryoSandbox = {baked} || process.env.PYRO_SANDBOX === \"1\";",
+                  "function cryoSandboxGuard(op) {",
+                  "  if (cryoSandbox) {",
+                  '    console.error("[Cryo Security] Sandbox: " + op +'
+                  ' " blocked by sandbox policy");',
+                  "    process.exit(1);",
+                  "  }",
+                  "}", ""]
         if 'len' in self._helpers:
             H += ["function cryoLen(x) {",
                   "  if (x == null) return 0;",
@@ -316,13 +335,25 @@ class CodeGenNode:
                   "  return Object.keys(x).length;",
                   "}", ""]
         if 'div' in self._helpers:
+            # NOT a guarded division. This helper is reached only when the
+            # operands are not statically both `int`, i.e. float division —
+            # and float division by zero is IEEE on every other engine: the
+            # Pyro VM and the go backend both yield +Inf, which
+            # PYRO_RUNTIME.md §1 specifies. Throwing here made `1.0 / 0.0`
+            # print `+Inf` on pyro and abort on node, and the message it threw
+            # was in Portuguese on top of that.
+            #
+            # It cannot do better by inspecting the values: JavaScript has one
+            # number type, so a genuine `1.0` is indistinguishable from `1` and
+            # any runtime integer test would abort on the float case it exists
+            # to allow. The integer case is dispatched statically to cryoIDiv.
             H += ["function cryoDiv(a, b) {",
-                  "  if (b === 0) throw new Error('[Cryo Security] DivisaoPorZero');",
-                  "  return a / b;",
+                  "  return a / b;   // float division: +Inf, as the VM does",
                   "}", ""]
         if 'idiv' in self._helpers:
             H += ["function cryoIDiv(a, b) {",
-                  "  if (b === 0) throw new Error('[Cryo Security] DivByZero');",
+                  "  if (b === 0) throw new Error("
+                  "'[Cryo Security] DivByZero: integer division');",
                   "  return Math.trunc(a / b);   // integer division (truncates toward zero)",
                   "}", ""]
         if 'index' in self._helpers:
@@ -375,7 +406,8 @@ class CodeGenNode:
                   "}", ""]
         if 'mod' in self._helpers:
             H += ["function cryoMod(a, b) {",
-                  "  if (b === 0) throw new Error('[Cryo Security] DivisaoPorZero');",
+                  "  if (b === 0) throw new Error("
+                  "'[Cryo Security] DivByZero: modulo');",
                   "  return a % b;",
                   "}", ""]
         if 'unwrap' in self._helpers:
@@ -527,7 +559,7 @@ class CodeGenNode:
         elif isinstance(n, ForeignBlock):
             self._foreign(n)
         elif isinstance(n, CallExpr) and n.callee == 'throw':
-            arg = self._expr(n.args[0]) if n.args else '"erro"'
+            arg = self._expr(n.args[0]) if n.args else 'null'
             self._emit(f"throw {arg};")
         elif isinstance(n, TryExpr):
             self._node_try(n.operand)   # discarded value (statement)
@@ -918,23 +950,41 @@ class CodeGenNode:
             return f"(fs.existsSync({A(0)}) ? fs.readdirSync({A(0)}).sort() : [])"
         if c == 'make_dir' and len(a) == 1:
             self._require('fs')
-            return f"((function(){{ try {{ fs.mkdirSync({A(0)}, {{ recursive: true }}); return true; }} catch(e) {{ return false; }} }})())"
+            self._helpers.add('sandbox')
+            # (guard(), expr) — the comma operator, PARENTHESISED. Without the
+            # parens `let x = guard(), expr` parses as two declarations.
+            return f"(cryoSandboxGuard('make_dir()'), " + f"((function(){{ try {{ fs.mkdirSync({A(0)}, {{ recursive: true }}); return true; }} catch(e) {{ return false; }} }})()))"
         if c == 'delete_file' and len(a) == 1:
             self._require('fs')
-            return f"((function(){{ try {{ if (fs.statSync({A(0)}).isDirectory()) return false; fs.unlinkSync({A(0)}); return true; }} catch(e) {{ return false; }} }})())"
+            self._helpers.add('sandbox')
+            # (guard(), expr) — the comma operator, PARENTHESISED. Without the
+            # parens `let x = guard(), expr` parses as two declarations.
+            return f"(cryoSandboxGuard('delete_file()'), " + f"((function(){{ try {{ if (fs.statSync({A(0)}).isDirectory()) return false; fs.unlinkSync({A(0)}); return true; }} catch(e) {{ return false; }} }})()))"
         if c == 'file_size' and len(a) == 1:
             self._require('fs')
             return f"((function(){{ try {{ return fs.statSync({A(0)}).size; }} catch(e) {{ return -1; }} }})())"
         if c == 'write_file' and len(a) == 2:
             self._require('fs')
-            return f"((function(){{ try {{ fs.writeFileSync({A(0)}, {A(1)}); return true; }} catch(e) {{ return false; }} }})())"
+            self._helpers.add('sandbox')
+            # (guard(), expr) — the comma operator, PARENTHESISED. Without the
+            # parens `let x = guard(), expr` parses as two declarations.
+            return f"(cryoSandboxGuard('write_file()'), " + f"((function(){{ try {{ fs.writeFileSync({A(0)}, {A(1)}); return true; }} catch(e) {{ return false; }} }})()))"
         if c == 'read_file' and len(a) == 1:
             self._require('fs')
-            return f"((function(){{ try {{ return fs.readFileSync({A(0)}, 'utf8'); }} catch(e) {{ return \"\"; }} }})())"
+            self._helpers.add('sandbox')
+            # (guard(), expr) — the comma operator, PARENTHESISED. Without the
+            # parens `let x = guard(), expr` parses as two declarations.
+            return f"(cryoSandboxGuard('read_file()'), " + f"((function(){{ try {{ return fs.readFileSync({A(0)}, 'utf8'); }} catch(e) {{ return \"\"; }} }})()))"
         if c == 'env' and len(a) == 1:
-            return f"(process.env[{A(0)}] || \"\")"
+            self._helpers.add('sandbox')
+            # (guard(), expr) — the comma operator, PARENTHESISED. Without the
+            # parens `let x = guard(), expr` parses as two declarations.
+            return f"(cryoSandboxGuard('env()'), " + f"(process.env[{A(0)}] || \"\"))"
         if c == 'exec' and len(a) == 1:
-            return f"((function(){{ try {{ return require('child_process').execSync({A(0)}, {{ encoding: 'utf8' }}); }} catch(e) {{ return e.stdout || \"\"; }} }})())"
+            self._helpers.add('sandbox')
+            # (guard(), expr) — the comma operator, PARENTHESISED. Without the
+            # parens `let x = guard(), expr` parses as two declarations.
+            return f"(cryoSandboxGuard('exec()'), " + f"((function(){{ try {{ return require('child_process').execSync({A(0)}, {{ encoding: 'utf8' }}); }} catch(e) {{ return e.stdout || \"\"; }} }})()))"
         if c == 'args' and len(a) == 0:
             return "process.argv.slice(2)"
         # user function call

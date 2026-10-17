@@ -24,6 +24,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstdio>
+#include <functional>   // std::function — Cryo's fn(T)->R
 #include <cstdlib>
 #include <iostream>
 #include <map>
@@ -142,6 +143,72 @@ template <class T> std::string str(const std::shared_ptr<T>& p) {
 }
 
 template <class T> void print(const T& v) { std::cout << str(v) << std::endl; }
+
+// ── JSON encoding (12.10) ──
+
+inline std::string json_quote(const std::string& s) {
+    std::string out = "\"";
+    for (size_t i = 0; i < s.size(); ++i) {
+        char c = s[i];
+        if (c == '"') out += "\\\"";
+        else if (c == '\\') out += "\\\\";
+        else if (c == '\b') out += "\\b";
+        else if (c == '\f') out += "\\f";
+        else if (c == '\n') out += "\\n";
+        else if (c == '\r') out += "\\r";
+        else if (c == '\t') out += "\\t";
+        else out += c;
+    }
+    out += "\"";
+    return out;
+}
+
+inline std::string json_encode(bool v) { return v ? "true" : "false"; }
+inline std::string json_encode(int64_t v) { return str(v); }
+inline std::string json_encode(int v) { return str(v); }
+inline std::string json_encode(double v) { return str(v); }
+inline std::string json_encode(const std::string& v) { return json_quote(v); }
+inline std::string json_encode(const char* v) { return json_quote(std::string(v)); }
+inline std::string json_encode(std::nullptr_t) { return "null"; }
+
+template <class T> std::string json_encode(const Arr<T>& a);
+template <class K, class V> std::string json_encode(const Map<K, V>& m);
+template <class T> std::string json_encode(const std::shared_ptr<T>& p);
+
+template <class T> std::string json_encode(const Arr<T>& a) {
+    if (!a) return "null";
+    std::string out = "[";
+    for (size_t i = 0; i < a->size(); ++i) {
+        if (i) out += ",";
+        out += json_encode((*a)[i]);
+    }
+    return out + "]";
+}
+
+template <class K, class V> std::string json_encode(const Map<K, V>& m) {
+    if (!m) return "null";
+    std::vector<std::pair<std::string, std::string> > pairs;
+    for (typename std::map<K, V>::const_iterator it = m->begin(); it != m->end(); ++it) {
+        pairs.push_back(std::make_pair(str(it->first), json_encode(it->second)));
+    }
+    std::sort(pairs.begin(), pairs.end(),
+              [](const std::pair<std::string, std::string>& a,
+                 const std::pair<std::string, std::string>& b) {
+                  return a.first < b.first;
+              });
+    std::string out = "{";
+    for (size_t i = 0; i < pairs.size(); ++i) {
+        if (i) out += ",";
+        out += json_quote(pairs[i].first) + ":" + pairs[i].second;
+    }
+    return out + "}";
+}
+
+template <class T> std::string json_encode(const std::shared_ptr<T>& p) {
+    if (!p) return "null";
+    return json_encode(*p);
+}
+
 
 // ── throw / catch ──
 //
@@ -342,10 +409,29 @@ inline std::string replace_all(const std::string& s, const std::string& old,
 }
 inline Arr<std::string> split(const std::string& s, const std::string& sep) {
     Arr<std::string> out = arr<std::string>();
-    // An empty separator splits into characters, matching split_str() in the
-    // Pyro runtime — which is what chars() relies on.
+    // An empty separator splits into CHARACTERS, which is what chars() relies
+    // on — and this loop used to step one BYTE at a time, so split("Ação", "")
+    // gave six elements with four half-characters in the middle.
+    //
+    // The comment here used to claim it matched "split_str() in the Pyro
+    // runtime". It did match it — and that one was byte-wise too, so the
+    // comment recorded a belief about a shared behaviour that neither side
+    // actually had. The Go VM and the go/node backends give four, because
+    // Go's strings.Split on an empty separator steps runes.
+    //
+    // A malformed sequence yields one byte and moves on: nothing is lost and
+    // the loop cannot stall on data that came from a file or a socket.
     if (sep.empty()) {
-        for (size_t i = 0; i < s.size(); ++i) out->push_back(std::string(1, s[i]));
+        for (size_t i = 0; i < s.size(); ) {
+            unsigned char c = static_cast<unsigned char>(s[i]);
+            size_t n = 1;
+            if      ((c & 0xE0) == 0xC0) n = 2;
+            else if ((c & 0xF0) == 0xE0) n = 3;
+            else if ((c & 0xF8) == 0xF0) n = 4;
+            if (i + n > s.size()) n = 1;          // truncated at the end
+            out->push_back(s.substr(i, n));
+            i += n;
+        }
         return out;
     }
     size_t pos = 0;

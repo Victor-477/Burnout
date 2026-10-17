@@ -43,6 +43,11 @@ for _p in ('Cryo', 'Pyro'):
     sys.path.insert(0, os.path.join(_root, _p))
 sys.path.insert(0, _here)
 
+try:
+    import readline
+except ImportError:
+    pass
+
 for _s in (sys.stdout, sys.stderr):
     if hasattr(_s, 'reconfigure'):
         try:
@@ -56,6 +61,7 @@ Type an expression to see its value; `:help` for commands, `:quit` to leave."""
 HELP = """  :help            this
   :list            the statements that persist (what gets replayed)
   :reset           forget them and start over
+  :load PATH       load a .cryo file into the session
   :backend NAME    pyro (default), go, node or c
   :quit  /  :q     leave
 
@@ -288,6 +294,19 @@ def main(argv=None):
             elif cmd == ':reset':
                 rp.prelude.clear()
                 print('  forgotten.')
+            elif cmd == ':load':
+                path = rest.strip()
+                if not path:
+                    print('  usage: :load path/to/file.cryo')
+                elif not os.path.isfile(path):
+                    print(f'  no such file: {path}')
+                else:
+                    try:
+                        content = open(path, encoding='utf-8').read()
+                        if rp.evaluate(content):
+                            print(f'  loaded {path}')
+                    except Exception as e:
+                        print(f'  failed to load {path}: {e}')
             elif cmd == ':backend':
                 if rest.strip() in ('pyro', 'go', 'node', 'c'):
                     rp.backend = rest.strip()

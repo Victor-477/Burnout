@@ -53,6 +53,7 @@ CryoException _cryo_exc = {.active = false};
 /* ---------- Security: checked arithmetic ---------- */
 
 static void _cryo_fatal(const char* kind, const char* detail) {
+    fflush(stdout);   /* abort() skips stdio flush: keep what was printed */
     fprintf(stderr, "[Cryo Security] %s: %s\n", kind, detail);
     abort();   /* aborts with core/backtrace instead of continuing corrupted */
 }
@@ -60,35 +61,35 @@ static void _cryo_fatal(const char* kind, const char* detail) {
 int64_t cryo_add_ovf(int64_t a, int64_t b) {
     int64_t r;
     if (__builtin_add_overflow(a, b, &r))
-        _cryo_fatal("Overflow", "integer addition overflow");
+        _cryo_fatal("Overflow", "integer addition");
     return r;
 }
 
 int64_t cryo_sub_ovf(int64_t a, int64_t b) {
     int64_t r;
     if (__builtin_sub_overflow(a, b, &r))
-        _cryo_fatal("Overflow", "integer subtraction overflow");
+        _cryo_fatal("Overflow", "integer subtraction");
     return r;
 }
 
 int64_t cryo_mul_ovf(int64_t a, int64_t b) {
     int64_t r;
     if (__builtin_mul_overflow(a, b, &r))
-        _cryo_fatal("Overflow", "integer multiplication overflow");
+        _cryo_fatal("Overflow", "integer multiplication");
     return r;
 }
 
 int64_t cryo_idiv_chk(int64_t a, int64_t b) {
     if (b == 0)
-        _cryo_fatal("DivByZero", "integer division by zero");
+        _cryo_fatal("DivByZero", "integer division");
     if (a == INT64_MIN && b == -1)
-        _cryo_fatal("Overflow", "INT64_MIN / -1 overflows");
+        _cryo_fatal("Overflow", "INT64_MIN / -1");
     return a / b;
 }
 
 int64_t cryo_imod_chk(int64_t a, int64_t b) {
     if (b == 0)
-        _cryo_fatal("DivByZero", "modulo by zero");
+        _cryo_fatal("DivByZero", "modulo");
     if (a == INT64_MIN && b == -1)
         return 0;
     return a % b;
@@ -114,6 +115,7 @@ void cryo_assert(bool cond, const char* msg) {
                  "[Cryo Assert] %s", m);
         longjmp(_cryo_exc.buf, 1);
     }
+    fflush(stdout);   /* abort() skips stdio flush: keep what was printed */
     fprintf(stderr, "[Cryo Assert] %s\n", m);
     abort();
 }
@@ -122,6 +124,7 @@ void cryo_assert(bool cond, const char* msg) {
 
 void* cryo_check_null(void* p, const char* what) {
     if (!p) {
+        fflush(stdout);   /* abort() skips stdio flush: keep what was printed */
         fprintf(stderr, "[Cryo Security] NullPointer: access to '%s' null\n",
                 what ? what : "?");
         abort();
@@ -387,6 +390,7 @@ char* cryo_arr_to_str_b(CryoArray* a) { return cryo_arr_join(a, cryo_arr_el_b, f
    formats as "kind: detail" — this message has no kind, and the two runtimes
    are compared byte for byte by test_c_vm.py. */
 static void _cryo_unwrap_null(void) {
+    fflush(stdout);   /* abort() skips stdio flush: keep what was printed */
     fprintf(stderr, "[Cryo Security] unwrap of null value\n");
     abort();
 }
@@ -430,6 +434,32 @@ char* cryo_str_slice(const char* s, int64_t start, int64_t end) {
     char* out = malloc(out_len + 1);
     strncpy(out, s + start, out_len);
     out[out_len] = '\0';
+    return out;
+}
+
+/* `s[i]` — a ONE-CHARACTER STRING, and out of range ABORTS.
+ *
+ * The C backend used to compile a string index to cryo_array_get(), the array
+ * accessor, which read an array header off the char pointer and segfaulted
+ * (0xC0000005). The obvious repair is cryo_str_slice(s, i, i+1), and it is
+ * wrong in one specific way: slice CLAMPS, so `"abc"[9]` would have returned
+ * "" while the Pyro VM, node and go all abort with the text below. That is a
+ * fail-open answer to an out-of-range read, which is the one direction a
+ * bounds check must never fail.
+ *
+ * The message is the VM's, verbatim, with no index or length appended —
+ * matching go's cryoStrIndex rather than cryo_array_get's richer array text,
+ * because agreeing with the other engines matters more here than detail. */
+char* cryo_str_index(const char* s, int64_t i) {
+    int64_t n = (int64_t)strlen(s ? s : "");
+    if (i < 0 || i >= n) {
+        fprintf(stderr,
+                "[Cryo Security] IndexError: string index out of bounds\n");
+        exit(1);
+    }
+    char* out = malloc(2);
+    out[0] = s[i];
+    out[1] = '\0';
     return out;
 }
 
@@ -572,11 +602,35 @@ CryoArray* cryo_str_split(const char* s, const char* sep) {
     CryoArray* arr = cryo_array_new();
     size_t seplen = strlen(sep);
     if (seplen == 0) {
-        for (const char* p = s; *p; p++) {
-            char* ch = malloc(2);
+        /* ONE CHARACTER per element, not one byte.
+         *
+         * This stepped p++ and emitted a 1-byte string, so split("Ação", "")
+         * gave six elements, four of which were half-characters. The Go VM
+         * and the go/node backends give four, because Go's strings.Split with
+         * an empty separator steps RUNES — so this engine disagreed with them
+         * on the primitive that chars() is built from, and every front-end
+         * helper resting on chars() (reverse_str, capitalize, title_case,
+         * common_prefix, char_len, char_at, char_slice) was corrupting text
+         * here while being correct there.
+         *
+         * A malformed sequence — a stray continuation byte, an invalid lead,
+         * or a sequence cut short by the terminator — yields ONE BYTE and
+         * moves on. That loses nothing and cannot loop forever, which
+         * matters because this walks data from files and sockets. */
+        for (const unsigned char* p = (const unsigned char*)s; *p; ) {
+            int n = 1;
+            unsigned char c = *p;
+            if      ((c & 0xE0) == 0xC0) n = 2;
+            else if ((c & 0xF0) == 0xE0) n = 3;
+            else if ((c & 0xF8) == 0xF0) n = 4;
+            for (int k = 1; k < n; k++) {
+                if (!p[k]) { n = k; break; }      /* truncated at the end */
+            }
+            char* ch = malloc((size_t)n + 1);
             if (!ch) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
-            ch[0] = *p; ch[1] = '\0';
+            memcpy(ch, p, (size_t)n); ch[n] = '\0';
             cryo_push_str(arr, ch);
+            p += n;
         }
         return arr;
     }

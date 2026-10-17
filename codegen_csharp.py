@@ -1177,6 +1177,9 @@ class CodeGenCSharp:
         if c == 'remove' and len(a) == 2:
             return f"Cryo.Remove({E(0)}, {E(1)})"
 
+        if c == 'json_encode' and len(a) == 1:
+            return f"Cryo.JSONEncode({E(0)})"
+
         # ── I/O the C# backend can honestly do ──
         if c == 'input' and not a:
             return "(Console.ReadLine() ?? \"\")"

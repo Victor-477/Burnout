@@ -3,7 +3,7 @@
 #  Burnout — engine/CLI of the Cryo system
 #
 #  Orchestrates the front-end (CRYO) and the backends (PYRO).
-#  Uso (a partir da project root):
+#  Usage (from the project root):
 #    python burnout/cryoc.py cryo/examples/example_pyro.cryo --run
 #    python burnout/cryoc.py cryo/examples/app.cryo --backend c -v
 #

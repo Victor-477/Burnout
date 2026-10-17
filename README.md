@@ -77,17 +77,28 @@ python Burnout/cryoc.py --lsp
 
 # 6. Compile to WebAssembly for the browser
 python Burnout/cryoc.py Cryo/examples/fullstack/client.cryo --backend wasm -o app.wasm
+
+# 7. Run unit test suite (test fn declarations)
+python Burnout/cryoc.py test Cryo/examples/example_testing.cryo
+# List tests without running:
+python Burnout/cryoc.py test Cryo/examples/example_testing.cryo --list
+
+# 8. Start interactive REPL
+python Burnout/cryoc.py repl
 ```
 
 ### The unified `pyro` command
 
 ```bash
 python Burnout/pyro.py build app.cryo -o app.exe
+python Burnout/pyro.py test app_tests.cryo
+python Burnout/pyro.py repl
 ```
 
 `build` produces a standalone native binary, `run` runs natively (falling back to
-the VM when no C toolchain is present), `vm` interprets the bytecode, and `c`
-emits the AOT C source. Each accepts `.cryo` or `.pyro`.
+the VM when no C toolchain is present), `vm` interprets the bytecode, `c`
+emits the AOT C source, `test` runs the test framework suite (`test fn`), and
+`repl` starts the interactive Cryo REPL. Each accepts `.cryo` or `.pyro`.
 
 Because `pyro_runtime.c` uses sockets for `http_serve`, native links on Windows
 also need `-lws2_32`; the CLI adds it automatically.

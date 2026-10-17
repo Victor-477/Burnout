@@ -51,7 +51,7 @@ def _split_type_pair(s: str):
             depth -= 1
         elif c == ',' and depth == 0:
             return s[:i].strip(), s[i + 1:].strip()
-    raise CodeGenGoError(f"tipo map malformado: '{s}'")
+    raise CodeGenGoError(f"malformed map type: '{s}'")
 
 
 def _split_top_commas(s: str):
@@ -619,6 +619,7 @@ class CodeGenGo:
                   "\treturn fu.v",
                   "}", ""]
         if 'anycast' in self._helpers:
+            self._imports.add('fmt')
             # 11.31 — an `any` reaching a typed slot. go is the only backend
             # where the interface is explicit, so this supplies what pyro and
             # node do implicitly.
@@ -900,7 +901,7 @@ class CodeGenGo:
         if 'httpget' in self._helpers:
             self._imports.update(('net/http', 'io'))
             H += ["func cryoHTTPGet(url string) string {",
-                  '\tcryoSandboxGuard("http_get")',
+                  '\tcryoSandboxGuard("http_get()")',
                   "\tresp, err := http.Get(url)",
                   '\tif err != nil { return "" }',
                   "\tdefer resp.Body.Close()",
@@ -909,7 +910,7 @@ class CodeGenGo:
         if 'httppost' in self._helpers:
             self._imports.update(('net/http', 'io', 'strings'))
             H += ["func cryoHTTPPost(url, body string) string {",
-                  '\tcryoSandboxGuard("http_post")',
+                  '\tcryoSandboxGuard("http_post()")',
                   '\tresp, err := http.Post(url, "application/json", strings.NewReader(body))',
                   '\tif err != nil { return "" }',
                   "\tdefer resp.Body.Close()",
@@ -919,7 +920,7 @@ class CodeGenGo:
             self._imports.add('os')
             H += ["// cryoWriteBytes: writes an int[] as bytes to a file.",
                   "func cryoWriteBytes(path string, data []int64) bool {",
-                  '\tcryoSandboxGuard("write_bytes")',
+                  '\tcryoSandboxGuard("write_bytes()")',
                   "\tbuf := make([]byte, len(data))",
                   "\tfor i, v := range data { buf[i] = byte(v & 0xFF) }",
                   "\treturn os.WriteFile(path, buf, 0644) == nil", "}", ""]
@@ -1400,7 +1401,7 @@ class CodeGenGo:
             self._imports.update(('os/exec', 'runtime'))
             H += ["// cryoOpen: opens a file/URL in the OS default app (browser).",
                   "func cryoOpen(target string) bool {",
-                  '\tcryoSandboxGuard("pyro_open")',
+                  '\tcryoSandboxGuard("pyro_open()")',
                   "\tvar c *exec.Cmd",
                   "\tswitch runtime.GOOS {",
                   '\tcase "windows":',
@@ -1413,8 +1414,8 @@ class CodeGenGo:
                   "\treturn c.Start() == nil", "}", ""]
         if 'exec' in self._helpers:
             self._imports.update(('os/exec', 'runtime'))
-            H += ["func cryoExec(command string) string {",
-                  '\tcryoSandboxGuard("pyro_exec")',
+            H += ["func cryoExec(op string, command string) string {",
+                  "\tcryoSandboxGuard(op)",
                   "\tvar c *exec.Cmd",
                   '\tif runtime.GOOS == "windows" {',
                   '\t\tc = exec.Command("cmd", "/c", command)',
@@ -1680,6 +1681,8 @@ class CodeGenGo:
         self._indent += 1
         for s in n.body:
             self._gen(s)
+        if ret and (not n.body or not isinstance(n.body[-1], Return)):
+            self._emit('panic("unreachable")')
         self._indent -= 1
         self.te.pop()
         self._emit("}")
@@ -2694,7 +2697,7 @@ class CodeGenGo:
         # ── Pyro: direct machine access ──
         if c == 'pyro_exec' and len(a) == 1:
             self._helpers.update(('exec', 'sandbox'))
-            return f"cryoExec({self._expr(a[0])})"
+            return f'cryoExec("pyro_exec()", {self._expr(a[0])})'
         if c == 'pyro_env' and len(a) == 1:
             self._imports.add('os')
             return f"os.Getenv({self._expr(a[0])})"
@@ -2716,7 +2719,7 @@ class CodeGenGo:
         if c == 'pyro_write_file' and len(a) == 2:
             self._imports.add('os')
             self._helpers.add('sandbox')
-            return (f'func() bool {{ cryoSandboxGuard("pyro_write_file"); '
+            return (f'func() bool {{ cryoSandboxGuard("pyro_write_file()"); '
                     f"return os.WriteFile({self._expr(a[0])}, "
                     f"[]byte({self._expr(a[1])}), 0644) == nil }}()")
         if c == 'pyro_open' and len(a) == 1:
@@ -2735,11 +2738,11 @@ class CodeGenGo:
         if c == 'make_dir' and len(a) == 1:
             self._imports.add('os')
             self._helpers.add('sandbox')
-            return f"func() bool {{ cryoSandboxGuard(\"make_dir\"); return os.MkdirAll({self._expr(a[0])}, 0755) == nil }}()"
+            return f"func() bool {{ cryoSandboxGuard(\"make_dir()\"); return os.MkdirAll({self._expr(a[0])}, 0755) == nil }}()"
         if c == 'delete_file' and len(a) == 1:
             self._imports.add('os')
             self._helpers.add('sandbox')
-            return (f"func() bool {{ cryoSandboxGuard(\"delete_file\"); "
+            return (f"func() bool {{ cryoSandboxGuard(\"delete_file()\"); "
                     f"st, err := os.Stat({self._expr(a[0])}); "
                     f"if err == nil && st.IsDir() {{ return false }}; "
                     f"return os.Remove({self._expr(a[0])}) == nil }}()")
@@ -2749,18 +2752,23 @@ class CodeGenGo:
         if c == 'write_file' and len(a) == 2:
             self._imports.add('os')
             self._helpers.add('sandbox')
-            return (f"func() bool {{ cryoSandboxGuard(\"write_file\"); "
+            return (f"func() bool {{ cryoSandboxGuard(\"write_file()\"); "
                     f"return os.WriteFile({self._expr(a[0])}, []byte({self._expr(a[1])}), 0644) == nil }}()")
         if c == 'read_file' and len(a) == 1:
             self._imports.add('os')
-            return f"func() string {{ b, err := os.ReadFile({self._expr(a[0])}); if err != nil {{ return \"\" }}; return string(b) }}()"
+            # Phase 7 — this was UNGATED. Under --sandbox the VM and node
+            # refused while go read the file and returned its contents, so the
+            # same program disclosed data on one backend and not the others.
+            # The VM gates it with capFS(read=True); this matches.
+            self._helpers.add('sandbox')
+            return f"func() string {{ cryoSandboxGuard(\"read_file()\"); b, err := os.ReadFile({self._expr(a[0])}); if err != nil {{ return \"\" }}; return string(b) }}()"
         if c == 'env' and len(a) == 1:
             self._imports.add('os')
             self._helpers.add('sandbox')
-            return f"func() string {{ cryoSandboxGuard(\"env\"); return os.Getenv({self._expr(a[0])}) }}()"
+            return f"func() string {{ cryoSandboxGuard(\"env()\"); return os.Getenv({self._expr(a[0])}) }}()"
         if c == 'exec' and len(a) == 1:
             self._helpers.update(('exec', 'sandbox'))
-            return f"cryoExec({self._expr(a[0])})"
+            return f'cryoExec("exec()", {self._expr(a[0])})'
         if c == 'args' and len(a) == 0:
             self._imports.add('os')
             return "os.Args[1:]"

@@ -568,5 +568,139 @@ for path in AUDITED:
         print(f"    {os.path.basename(path)}: {missing}")
     check(f"{os.path.basename(path)}: all isinstance() AST names imported", not missing)
 
+
+
+# ── 3. static audit: inside isinstance(n, X), every n.attr is a field of X ──
+#
+# The check that generalises two [Internal Error] crashes found in 2026-10:
+#
+#   Cryo/optimize.py   read node.is_safe  — SafetyBlock's field is `safe`
+#   Cryo/parser.py     read node.expr     — UnaryExpr's field is `operand`
+#
+# Both are AttributeError the moment the branch is reached, so they are not
+# "wrong output" bugs a parity suite can see: the compiler aborts with
+# [Internal Error] on input the analyser accepts. The first broke every
+# program containing a `safe {}`/`unsafe {}` block, the second every
+# comprehension containing a unary operator.
+#
+# Neither name had to agree with anything, which is the root cause worth
+# naming: the nodes are dataclasses constructed POSITIONALLY, so a reader that
+# invents a field name is never contradicted at construction. And the branch
+# right next to the UnaryExpr one really does use `.expr`, so the wrong name
+# looked right.
+#
+# Scope: only `if isinstance(var, SomeNode):` bodies, only attributes read on
+# that same variable, and nothing under a nested isinstance on the variable
+# (there the inner class applies). That keeps the audit specific enough to be
+# believed — it reported exactly these two, and nothing else, across fifteen
+# modules.
+_AUDITED_ATTRS = AUDITED + [
+    os.path.join(_root, "Cryo", "optimize.py"),
+    os.path.join(_root, "Cryo", "parser.py"),
+    os.path.join(_root, "Cryo", "format.py"),
+    os.path.join(_root, "Cryo", "modules.py"),
+    os.path.join(_root, "Cryo", "generics.py"),
+    os.path.join(_root, "Cryo", "traits.py"),
+    os.path.join(_root, "Burnout", "codegen_cpp.py"),
+    os.path.join(_root, "Burnout", "codegen_csharp.py"),
+]
+
+
+def _ast_node_fields():
+    """{ClassName: set(field and method names)}, bases folded in."""
+    tree = pyast.parse(open(_AST_NODES, encoding="utf-8").read())
+    fields, bases = {}, {}
+    for st in tree.body:
+        if not isinstance(st, pyast.ClassDef):
+            continue
+        own = set()
+        for s in st.body:
+            if isinstance(s, pyast.AnnAssign) and isinstance(s.target, pyast.Name):
+                own.add(s.target.id)
+            elif isinstance(s, pyast.Assign):
+                own |= {t.id for t in s.targets if isinstance(t, pyast.Name)}
+            elif isinstance(s, (pyast.FunctionDef, pyast.AsyncFunctionDef)):
+                own.add(s.name)
+        fields[st.name] = own
+        bases[st.name] = [b.id for b in st.bases if isinstance(b, pyast.Name)]
+    for name in fields:
+        seen, stack = set(), list(bases.get(name, []))
+        while stack:
+            b = stack.pop()
+            if b in seen or b not in fields:
+                continue
+            seen.add(b)
+            fields[name] |= fields[b]
+            stack.extend(bases.get(b, []))
+    return fields
+
+
+_NODE_FIELDS = _ast_node_fields()
+
+
+def _isinstance_narrowing(test):
+    """(var, [classes]) for `isinstance(var, C)` or `(C1, C2)`, else None."""
+    if not (isinstance(test, pyast.Call) and isinstance(test.func, pyast.Name)
+            and test.func.id == "isinstance" and len(test.args) == 2):
+        return None
+    var, cls = test.args
+    if not isinstance(var, pyast.Name):
+        return None
+    elts = cls.elts if isinstance(cls, pyast.Tuple) else [cls]
+    names = [e.id for e in elts if isinstance(e, pyast.Name)]
+    # Every name must be a known AST node, or we cannot judge the union.
+    if not names or any(n not in _NODE_FIELDS for n in names):
+        return None
+    return var.id, names
+
+
+def misread_node_fields(path):
+    out = []
+    tree = pyast.parse(open(path, encoding="utf-8").read())
+    for node in pyast.walk(tree):
+        if not isinstance(node, pyast.If):
+            continue
+        narrowed = _isinstance_narrowing(node.test)
+        if not narrowed:
+            continue
+        var, names = narrowed
+        allowed = set()
+        for n in names:
+            allowed |= _NODE_FIELDS[n]
+        # Attributes under a nested isinstance on the SAME variable belong to
+        # the inner class, not this one.
+        shadowed = set()
+        for sub in node.body:
+            for d in pyast.walk(sub):
+                if isinstance(d, pyast.If):
+                    inner = _isinstance_narrowing(d.test)
+                    if inner and inner[0] == var:
+                        for dd in pyast.walk(d):
+                            if (isinstance(dd, pyast.Attribute)
+                                    and isinstance(dd.value, pyast.Name)
+                                    and dd.value.id == var):
+                                shadowed.add(id(dd))
+        for sub in node.body:
+            for d in pyast.walk(sub):
+                if (isinstance(d, pyast.Attribute)
+                        and isinstance(d.value, pyast.Name)
+                        and d.value.id == var
+                        and id(d) not in shadowed
+                        and d.attr not in allowed
+                        and not d.attr.startswith("__")):
+                    out.append(f"line {d.lineno}: {var}.{d.attr} "
+                               f"(as {'/'.join(names)})")
+    return sorted(set(out))
+
+
+print("\n-- static audit: node.attr matches the node's fields --")
+for path in _AUDITED_ATTRS:
+    if not os.path.exists(path):
+        continue
+    bad = misread_node_fields(path)
+    for b in bad:
+        print(f"    {os.path.basename(path)}: {b}")
+    check(f"{os.path.basename(path)}: every node.attr is a real field", not bad)
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

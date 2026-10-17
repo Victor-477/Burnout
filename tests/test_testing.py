@@ -167,6 +167,29 @@ def main():
                      'test fn t() ={ assert(passed == 99, "untouched"); }\n')
         check("a program may declare `passed` and `failed`", r.returncode == 0,
               (r.stdout + r.stderr)[-300:])
+
+        # ── test fn parameter rejection ────────────────────
+        print("\n── test fn cannot declare parameters ──")
+        r = run_test(work, 'test fn with_param(int x) ={ assert(x == 1, "bad"); }\n')
+        check("test fn with parameters is rejected", r.returncode != 0)
+        check("and explains that test functions must not declare parameters",
+              "must not declare parameters" in (r.stderr + r.stdout),
+              (r.stderr + r.stdout)[:200])
+
+        # ── multi-file and directory discovery ─────────────
+        print("\n── directory test discovery ──")
+        test_dir = os.path.join(work, 'pkg_tests')
+        os.makedirs(test_dir, exist_ok=True)
+        with open(os.path.join(test_dir, 't1.cryo'), 'w', encoding='utf-8') as f:
+            f.write('test fn t1() ={ assert(1 == 1, "t1"); }\n')
+        with open(os.path.join(test_dir, 't2.cryo'), 'w', encoding='utf-8') as f:
+            f.write('test fn t2() ={ assert(2 == 2, "t2"); }\n')
+        r_dir = subprocess.run([sys.executable, CRYOC, 'test', test_dir, '--backend', 'pyro'],
+                               capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=900)
+        check("directory test run succeeds", r_dir.returncode == 0, r_dir.stdout[-300:])
+        check("both test files are executed",
+              'ok   t1' in r_dir.stdout and 'ok   t2' in r_dir.stdout,
+              r_dir.stdout[-300:])
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

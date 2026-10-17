@@ -190,7 +190,7 @@ def test_errors(work):
 # work there — but it must REFUSE, not miscompile. Precision and grouping avoid
 # those builtins deliberately, so they do work.
 def test_c_backend(work):
-    print("\n── C backend: precision works, width refuses ──")
+    print("\n── C backend: precision, grouping and width agree with the VM ──")
     src = ('number x = 3.14159;\nnumber t = 1234567.891;\n'
            'print("${x:.2f}");\nprint("${t:,.2f}");\n')
     # The work directory is shared by every case in this file, so a binary from
@@ -212,10 +212,19 @@ def test_c_backend(work):
             check("C agrees with pyro on the digits",
                   out == '3.14\n1,234,567.89', f"C gave {out!r}")
 
+    # Same stale-binary hazard as above: remove the exe before trusting it.
+    wexe = os.path.join(work, 'w.exe' if sys.platform == 'win32' else 'w')
+    if os.path.isfile(wexe):
+        os.remove(wexe)
     rc, log = compile_to('print("${42:>8d}");\n', work, 'c', 'w.c')
-    check("a width is refused with a backend suggestion",
-          rc != 0 and 'not supported in the C backend' in log
-          and '--backend go, node or pyro' in log, log[-200:])
+    check("a width compiles on C", rc == 0, log[-200:])
+    if rc == 0 and os.path.isfile(wexe):
+        p = subprocess.run([wexe], capture_output=True, text=True,
+                           timeout=120, errors='replace')
+        # NOT .strip(): that would eat the leading padding under test
+        got = p.stdout.replace('\r\n', '\n').rstrip()
+        # right-aligned in a field of 8 — byte for byte what the VM prints
+        check("C agrees with pyro on a width", got == '      42', f"C gave {got!r}")
 
 
 # ── to_number/to_int on the C backend ────────────────────────

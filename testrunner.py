@@ -20,8 +20,9 @@ import tempfile
 
 _here = os.path.dirname(os.path.abspath(__file__))
 _root = os.path.dirname(_here)
-for _p in ('Cryo', 'Pyro'):
-    sys.path.insert(0, os.path.join(_root, _p))
+# Same front-end directory compiler.py uses. This used to be 'Cryo'/'Pyro',
+# which only resolved on a case-insensitive filesystem.
+sys.path.insert(0, os.path.join(_root, 'cryo'))
 sys.path.insert(0, _here)
 
 for _s in (sys.stdout, sys.stderr):
@@ -36,9 +37,9 @@ def main(argv=None):
     ap = argparse.ArgumentParser(
         prog='cryoc test',
         description='Run the `test fn` declarations in a Cryo file.')
-    ap.add_argument('input', help='the .cryo file to test')
+    ap.add_argument('input', nargs='+', help='the .cryo file(s) or directory to test')
     ap.add_argument('--backend', default='pyro',
-                    choices=['pyro', 'go', 'node', 'c'],
+                    choices=['pyro', 'go', 'node', 'c', 'cpp', 'csharp'],
                     help='which backend to run the suite on (default: pyro)')
     ap.add_argument('--unsafe', action='store_true',
                     help='turn off safety instrumentation')
@@ -46,15 +47,72 @@ def main(argv=None):
                     help='list the tests without running them')
     args = ap.parse_args(argv)
 
-    if not os.path.isfile(args.input):
-        print(f"[cryoc test] no such file: {args.input}", file=sys.stderr)
+    files = []
+    for item in args.input:
+        if os.path.isdir(item):
+            found = []
+            for root, _, fnames in os.walk(item):
+                for fn in sorted(fnames):
+                    if fn.endswith('.cryo'):
+                        found.append(os.path.join(root, fn))
+            if not found:
+                print(f"[cryoc test] no .cryo files found in directory: {item}", file=sys.stderr)
+                return 2
+            files.extend(found)
+        elif os.path.isfile(item):
+            files.append(item)
+        else:
+            print(f"[cryoc test] no such file: {item}", file=sys.stderr)
+            return 2
+
+    if not files:
+        print("[cryoc test] no input files", file=sys.stderr)
         return 2
 
+    if len(files) == 1:
+        return _run_single(files[0], args)
+
+    total_rc = 0
+    if args.list:
+        total_tests = 0
+        for fpath in files:
+            rc, count = _list_tests_file(fpath)
+            total_tests += count
+            if rc != 0:
+                total_rc = rc
+        print(f"\n{total_tests} test(s) total")
+        return total_rc
+
+    for fpath in files:
+        rc = _run_single(fpath, args)
+        if rc != 0:
+            total_rc = rc
+    return total_rc
+
+
+def _list_tests_file(fpath):
     from lexer import Lexer, LexerError
     from parser import Parser, ParseError
     import testing
+    try:
+        src = open(fpath, encoding='utf-8').read()
+        ast = Parser(Lexer(src).tokenize()).parse()
+        tests = testing.collect(ast)
+        for t in tests:
+            print(f"  {t.name}  ({fpath}:{getattr(t, 'line', 0)})")
+        return 0, len(tests)
+    except Exception as e:
+        print(f"[cryoc test] error in {fpath}: {e}", file=sys.stderr)
+        return 1, 0
 
-    src = open(args.input, encoding='utf-8').read()
+
+def _run_single(path, args):
+    from lexer import Lexer, LexerError
+    from parser import Parser, ParseError
+    from modules import resolve_modules, ModuleError
+    import testing
+
+    src = open(path, encoding='utf-8').read()
     try:
         ast = Parser(Lexer(src).tokenize()).parse()
     except (LexerError, ParseError) as e:
@@ -64,20 +122,33 @@ def main(argv=None):
     tests = testing.collect(ast)
     if args.list:
         for t in tests:
-            print(f"  {t.name}  ({args.input}:{getattr(t, 'line', 0)})")
+            print(f"  {t.name}  ({path}:{getattr(t, 'line', 0)})")
         print(f"\n{len(tests)} test(s)")
         return 0
     if not tests:
         # Not an error worth a stack trace, but not a pass either: a file with
         # no tests reporting success is how a suite silently stops running.
-        print(f"[cryoc test] {args.input}: no tests found.\n"
+        print(f"[cryoc test] {path}: no tests found.\n"
               f"  Declare one with:  test fn name() ={{ assert(…, \"…\"); }}",
               file=sys.stderr)
         return 1
 
-    testing.build_runner(ast)
+    try:
+        testing.build_runner(ast)
+    except testing.TestError as e:
+        print(f"\n[cryoc test] {e}", file=sys.stderr)
+        return 1
 
-    print(f"[cryoc test] {args.input} — {len(tests)} test(s) on --backend {args.backend}\n")
+    # `import "x.cryo" [as m]`, resolved against the test file's directory as
+    # compiler.compile_source does. After build_runner, so the suite is made of
+    # this file's tests only — an imported module's own `test fn`s are not run.
+    try:
+        ast = resolve_modules(ast, os.path.dirname(os.path.abspath(path)))
+    except ModuleError as e:
+        print(f"\n{e}", file=sys.stderr)
+        return 1
+
+    print(f"[cryoc test] {path} — {len(tests)} test(s) on --backend {args.backend}\n")
     # The suite writes to this terminal from a CHILD process, which does not
     # share this one's buffer — without the flush the header lands after the
     # results it introduces.
@@ -89,7 +160,7 @@ def main(argv=None):
     try:
         code = compiler._compile_resolved(
             ast, args.backend, not args.unsafe, compiler.default_abi(),
-            True, False, 'html', None, src, args.input)
+            True, False, 'html', None, src, path)
         return _run(code, args.backend, work)
     except Exception as e:
         print(f"\n[cryoc test] {type(e).__name__}: {e}", file=sys.stderr)
@@ -122,28 +193,67 @@ def _run(code, backend, work):
             f.write(code)
         return subprocess.run(['go', 'run', out], cwd=work).returncode
     # c: the backend emits source; compile it the way the driver does
-    out = os.path.join(work, 'suite.c')
-    with open(out, 'w', encoding='utf-8') as f:
-        f.write(code)
-    import shutil
-    cc = next((c for c in ('gcc', 'clang', 'cc') if shutil.which(c)), None)
-    if cc is None:
-        print("[cryoc test] no C toolchain found", file=sys.stderr)
-        return 2
-    exe = os.path.join(work, 'suite' + ('.exe' if sys.platform == 'win32' else ''))
-    rt = os.path.join(_here, 'runtime', 'cryo_runtime.c')
-    libs = ['-lm'] + (['-lws2_32'] if sys.platform == 'win32' else [])
-    r = subprocess.run([cc, '-O2', '-std=c11', '-I', os.path.join(_here, 'runtime'),
-                        '-o', exe, out, rt] + libs, capture_output=True, text=True)
-    if r.returncode != 0:
-        print(r.stderr[-800:], file=sys.stderr)
-        return 1
-    return subprocess.run([exe]).returncode
+    if backend == 'c':
+        out = os.path.join(work, 'suite.c')
+        with open(out, 'w', encoding='utf-8') as f:
+            f.write(code)
+        import shutil
+        cc = next((c for c in ('gcc', 'clang', 'cc') if shutil.which(c)), None)
+        if cc is None:
+            print("[cryoc test] no C toolchain found", file=sys.stderr)
+            return 2
+        exe = os.path.join(work, 'suite' + ('.exe' if sys.platform == 'win32' else ''))
+        rt = os.path.join(_here, 'runtime', 'cryo_runtime.c')
+        libs = ['-lm'] + (['-lws2_32'] if sys.platform == 'win32' else [])
+        r = subprocess.run([cc, '-O2', '-std=c11', '-I', os.path.join(_here, 'runtime'),
+                            '-o', exe, out, rt] + libs, capture_output=True, text=True)
+        if r.returncode != 0:
+            print(r.stderr[-800:], file=sys.stderr)
+            return 1
+        return subprocess.run([exe]).returncode
+    if backend == 'cpp':
+        out = os.path.join(work, 'suite.cpp')
+        with open(out, 'w', encoding='utf-8') as f:
+            f.write(code)
+        import compiler
+        cxx, cxx_dir = compiler.find_cxx()
+        if cxx is None:
+            cxx, cxx_dir = 'g++', None
+        exe = os.path.join(work, 'suite' + ('.exe' if sys.platform == 'win32' else ''))
+        rt_dir = os.path.join(_here, 'runtime')
+        cmd = [cxx, '-std=c++14', '-O2', '-I', rt_dir, out, '-o', exe]
+        if 'clang' not in os.path.basename(cxx).lower():
+            cmd += ['-static-libgcc', '-static-libstdc++']
+        build_env = None
+        if cxx_dir:
+            build_env = dict(os.environ)
+            build_env['PATH'] = cxx_dir + os.pathsep + build_env.get('PATH', '')
+        r = subprocess.run(cmd, capture_output=True, text=True, env=build_env)
+        if r.returncode != 0:
+            print(r.stderr[-800:], file=sys.stderr)
+            return 1
+        return subprocess.run([exe]).returncode
+    if backend == 'csharp':
+        out = os.path.join(work, 'suite.cs')
+        with open(out, 'w', encoding='utf-8') as f:
+            f.write(code)
+        import compiler
+        proj = compiler._csharp_project(out)
+        if proj is None:
+            print("[cryoc test] dotnet not found — cannot run C# suite", file=sys.stderr)
+            return 2
+        return subprocess.run(['dotnet', 'run', '--project', proj,
+                               '-v', 'quiet', '--nologo']).returncode
+    return 1
 
 
 def _find_vm():
     exe = '.exe' if sys.platform == 'win32' else ''
     for c in (os.path.join(_root, 'build', 'pyrovm' + exe),
+              os.path.join(_root, 'build', 'pyrovm_cpp' + exe),
+              os.path.join(_root, 'build', 'pyrovm_cs' + exe),
+              os.path.join(_root, 'pyro', 'vm', 'pyrovm_go' + exe),
+              os.path.join(_root, 'pyro', 'vm', 'pyrovm' + exe),
               os.path.join(_root, 'Pyro', 'vm', 'pyrovm_go' + exe),
               os.path.join(_root, 'Pyro', 'vm', 'pyrovm' + exe)):
         if os.path.isfile(c):

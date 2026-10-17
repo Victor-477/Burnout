@@ -547,17 +547,20 @@ check("disasm shows 'sandbox' nas flags", "sandbox" in _dis_sbx)
 print("[go] sandbox (--sandbox)")
 _go_sbx = gen_go('string o = pyro_exec("ls");', sandbox=True)
 check("go --sandbox: var cryoSandbox = true", "var cryoSandbox = true" in _go_sbx)
+# Phase 7 — cryoExec takes the op name as a parameter; the guard itself is
+# `cryoSandboxGuard(op)` and the name is supplied per call site, so exec() no
+# longer reports itself as pyro_exec().
 check("go --sandbox: guard in cryoExec",
-      'cryoSandboxGuard("pyro_exec")' in _go_sbx)
+      'cryoSandboxGuard(op)' in _go_sbx and 'cryoExec("pyro_exec()"' in _go_sbx)
 _go_plain = gen_go('string b = http_get("http://x");')
 check("go without --sandbox: baked false + override by env",
       "var cryoSandbox = false" in _go_plain and
       'os.Getenv("PYRO_SANDBOX")' in _go_plain)
 check("go: http_get gets sandbox guard",
-      'cryoSandboxGuard("http_get")' in _go_plain)
+      'cryoSandboxGuard("http_get()")' in _go_plain)
 _go_wf = gen_go('bool ok = pyro_write_file("a.txt", "d");', sandbox=True)
 check("go: pyro_write_file guarded by sandbox",
-      'cryoSandboxGuard("pyro_write_file")' in _go_wf)
+      'cryoSandboxGuard("pyro_write_file()")' in _go_wf)
 check("go without builtin sensitive not emits sandbox",
       "cryoSandbox" not in gen_go('int x = 1; print(x);'))
 
@@ -666,7 +669,7 @@ check("node read nested bounds-check",
 check("node campo-array write bounds-check",
       "cryoSetIndex(" in gen_node("struct S{int[] xs;} S s = new S{xs:[1]}; s.xs[0] = 9;"))
 check("node len -> cryoLen", "cryoLen(" in gen_node('int n = len("abc");'))
-check("node switch with break automatico",
+check("node switch with automatic break",
       "break;" in gen_node("fn f(int d)->int ={ switch(d){ case 1: print(\"um\"); default: print(\"x\"); } }"))
 # library node -> require; bloco Node emitido; bloco Go omitido
 check("node library >node fs< -> require",
@@ -806,7 +809,7 @@ def _w(name, content):
         f.write(content)
     return p
 
-_w("util.cryo", 'const int BASE = 10\nfn double(int x) -> int ={ return x * 2; }\nprint("nao deve rodar");\n')
+_w("util.cryo", 'const int BASE = 10\nfn double(int x) -> int ={ return x * 2; }\nprint("must not run");\n')
 _w("fundo.cryo", 'fn triplo(int x) -> int ={ return x * 3; }\n')
 _w("meio.cryo", 'import "fundo.cryo"\nfn quad(int x) -> int ={ return triplo(x) + x; }\n')
 _w("ciclo_a.cryo", 'import "ciclo_b.cryo"\nfn fa() -> int ={ return 1; }\n')
@@ -958,10 +961,10 @@ check("optimized <= non-optimized (bytes)",
 # correctness: division integer not is folded (semantics de trunc/security fica p/ runtime)
 check("fold: div integer not folds (DIV presente)", "DIV" in _pdis("int x = 10 / 2; print(x);"))
 
-print("[phase5] saltos i32 + info de debug (pyro v2)")
-# a section de debug aparece in the disasm with "; linha N"
+print("[phase5] i32 jumps + debug info (pyro v2)")
+# the debug section shows up in the disassembly as "; line N"
 d = _pdis('fn f(int n)->int ={ return n * 2; } int x = f(3); print(x);')
-check("debug: disasm anota linhas", "; line" in d)
+check("debug: the disassembly annotates lines", "; line" in d)
 # tabela pc->linha in the header (flag debug) + inputs
 _bcj = gen_pyro('fn f(int n)->int ={ return n; } print(f(1));', encode=False)
 check("debug: flag 0x02 setado", (_bcj[5] & 0x02) == 2)
@@ -1002,7 +1005,7 @@ check("lsp: program valid without diagnostics",
       _lsp.compute_diagnostics("file:///x.cryo", _src_ok) == [])
 _d = _lsp.compute_diagnostics("file:///x.cryo", _src_bad)
 check("lsp: dois diagnostics (arity + undeclared)", len(_d) == 2)
-check("lsp: diagnostic traz range/linha 0-based",
+check("lsp: a diagnostic carries a 0-based line/range",
       all('range' in x and x['range']['start']['line'] >= 0 for x in _d))
 check("lsp: Error lexical becomes diagnostic with column",
       _lsp.compute_diagnostics("file:///x.cryo", "int x = @;")[0]['range']['start']['character'] >= 0)
@@ -1310,7 +1313,7 @@ _dwb = disasm_pyro.disassemble(gen_pyro(_wb, encode=False))
 check("pyro: write_bytes becomes NATIVE 27 (argc 2)", "NATIVE 27 2" in _dwb)
 check("go: write_bytes uses cryoWriteBytes", "cryoWriteBytes(" in gen_go(_wb))
 check("go: write_bytes guarded by sandbox",
-      'cryoSandboxGuard("write_bytes")' in gen_go(_wb))
+      'cryoSandboxGuard("write_bytes()")' in gen_go(_wb))
 try:
     from semantic import check as _sem_check
     _sem_check(ast_of(_wb))   # not deve acusar 'function unknown'
@@ -1319,6 +1322,346 @@ except Exception:
     check("semantics: write_bytes is builtin known", False)
 
 # ── range-based for loops (Phase 10.1) ──────────────────────
+# ── a bare throw() has ONE default, decided in the front end ──
+# It used to have three: pyro threw null, node threw the string "erro", and
+# the go backend indexed args[0] and crashed the compiler with
+# "[Internal Error] list index out of range" — an internal error on input the
+# analyser accepts. Desugared in the parser now, so every backend sees the
+# same explicit null (golden rule 2).
+# ── text helpers are DESUGARINGS, with the properties that implies ──
+# These three are not about the answer — test_parity covers that across the
+# backends. They are about the mechanism: a helper must not displace a user's
+# own function, must not be emitted twice, and must report a wrong argument
+# count as a syntax error rather than compiling into something surprising.
+print("[text] helper desugarings behave like helpers")
+check("a user function of the same name wins",
+      'return false' in gen_node(
+          'fn is_digit(string s) -> bool ={ return false; }' + chr(10)
+          + 'print(is_digit("1"));' + chr(10)))
+check("the helper is emitted once however many calls",
+      gen_node('print(is_digit("1")); print(is_digit("2"));' + chr(10))
+      .count('function __cryo_is_digit') == 1)
+_arity_msg = ''
+try:
+    gen_node('print(count_of("abc"));' + chr(10))
+except Exception as _e:
+    _arity_msg = str(_e)
+check("a wrong argument count is refused, and says how many",
+      'takes 2 arguments' in _arity_msg)
+# The second set brought helpers taking two and three arguments, so the arity
+# check is now a table rather than a hardcoded 1. Both branches are worth
+# pinning: the count must be right, and the noun must agree with it.
+_arity3 = ''
+try:
+    gen_node('print(replace_last("abc", "-"));' + chr(10))
+except Exception as _e:
+    _arity3 = str(_e)
+check("a 3-argument helper reports 3", 'takes 3 arguments' in _arity3)
+_arity1 = ''
+try:
+    gen_node('print(is_blank("a", "b"));' + chr(10))
+except Exception as _e:
+    _arity1 = str(_e)
+check("a 1-argument helper says 'argument', singular",
+      'takes 1 argument,' in _arity1)
+# Two helpers called together must each be emitted once: registration is
+# per-helper, and a shared flag would emit the second one never or twice.
+_two = gen_node('print(capitalize("a")); print(word_count("a b"));' + chr(10))
+check("two different helpers are each emitted once",
+      _two.count('function __cryo_capitalize') == 1
+      and _two.count('function __cryo_word_count') == 1)
+# is_blank is written OVER trim() rather than over its own whitespace loop, so
+# that it and is_space/trim cannot disagree about what whitespace is. That is
+# the property a later "inline it for speed" would silently break, so assert
+# the mechanism and not just the answer.
+check("is_blank is built on trim, so it cannot disagree with it",
+      'trim()' in gen_node('print(is_blank(" "));' + chr(10)))
+
+# ── the C backend's string index ──
+# `s[i]` compiled to cryo_array_get(), the ARRAY accessor, reading an array
+# header off a char pointer: a segfault, not a build failure. These are the
+# codegen-level checks; test_parity runs the program on all four engines and
+# compares, including the out-of-range abort.
+print("[c] a string index is a string, not an array read")
+_cidx = gen_c('string s = "abc"; print(s[1]);' + chr(10))
+check("c: s[i] uses the string accessor",
+      'cryo_str_index(' in _cidx)
+check("c: s[i] no longer reaches the array accessor",
+      'cryo_array_get(' not in _cidx)
+# cryo_str_slice would clamp, so "abc"[9] would be "" while every other engine
+# aborts. Fail-open on an out-of-range read is the one answer a bounds check
+# must not give, so assert the helper that aborts is the one being called.
+check("c: and not the clamping slice, which would fail open",
+      'cryo_str_slice(' not in _cidx)
+_sassign = ''
+try:
+    gen_c('string s = "abc"; s[1] = "z";' + chr(10))
+except Exception as _e:
+    _sassign = str(_e)
+check("c: writing through a string index is refused, not emitted",
+      'immutable' in _sassign)
+
+# ── nine builtins the C backend refused but had already implemented ──
+# clamp, sign, gcd, hypot, starts_with, ends_with, repeat, pad_start and
+# pad_end were implemented by ISSUES/09 and never removed from `_call`'s
+# deny-list, which runs first — so the C backend refused nine builtins whose
+# implementations were sitting right below the refusal, unreachable.
+#
+# Asserting the EMITTED CALL rather than just "it did not raise": a deny-list
+# entry and a missing dispatch arm look identical from outside, and these are
+# only interesting because the dispatch was always there.
+print("[c] nine builtins the deny-list hid from their own implementations")
+for _name, _src, _want in (
+        ('starts_with', 'print(starts_with("ab", "a"));', 'cryo_str_starts_with('),
+        ('ends_with',   'print(ends_with("ab", "b"));',   'cryo_str_ends_with('),
+        ('repeat',      'print(repeat("ab", 2));',        'cryo_str_repeat('),
+        ('pad_start',   'print(pad_start("7", 3, "0"));', 'cryo_str_pad_start('),
+        ('pad_end',     'print(pad_end("7", 3, "0"));',   'cryo_str_pad_end('),
+        ('clamp',       'print(clamp(5, 1, 3));',         'cryo_clamp_'),
+        ('sign',        'print(sign(-7));',               'cryo_sign_'),
+        ('gcd',         'print(gcd(12, 18));',            'cryo_gcd('),
+        ('hypot',       'print(hypot(3.0, 4.0));',        'cryo_hypot('),
+):
+    try:
+        _got = gen_c(_src + chr(10))
+    except Exception as _e:
+        _got = f'<refused: {_e}>'
+    check(f"c: {_name} reaches its runtime helper", _want in _got)
+# The ones that really do need a host the C backend has not got stay refused.
+_still = ''
+try:
+    gen_c('print(http_get("http://x"));' + chr(10))
+except Exception as _e:
+    _still = str(_e)
+check("c: a builtin needing a host is still refused",
+      'not supported in the C backend' in _still)
+
+# ── a comprehension with a unary operator does not crash the compiler ──
+# Cryo/parser.py's _extract_identifiers read node.expr on a UnaryExpr whose
+# field is `operand`, so these aborted with "[Internal Error] 'UnaryExpr'
+# object has no attribute 'expr'". Asserting it COMPILES, because the failure
+# was an exception out of the parser rather than wrong output.
+print("[10.3] unary operators inside a comprehension")
+for _label, _src in (
+        ('negated element', 'int[] xs = [1,2,3]; int[] ys = [-x for x in xs];'),
+        ('negated guard',
+         'int[] xs = [1,2,3]; bool f = false; int[] ys = [x for x in xs if !f];'),
+        ('negation in a map comprehension',
+         'int[] xs = [1,2,3]; map<int,int> m = {x: -x for x in xs};'),
+):
+    try:
+        gen_pyro(_src + chr(10))
+        _ok = True
+    except Exception as _e:
+        _ok = False
+        print(f"       {_label}: {_e}")
+    check(f"10.3: {_label} compiles", _ok)
+# SafetyBlock had the same shape: optimize.py read node.is_safe for a field
+# called `safe`, so any program with a `safe {}`/`unsafe {}` block aborted
+# once the optimizer ran — which it does by default.
+from optimize import optimize as _optimize_ast
+try:
+    _optimize_ast(ast_of('safe { int x = 1; print(x); } unsafe { print("u"); }'))
+    _sb_ok = True
+except Exception as _e:
+    _sb_ok = False
+    print(f"       safe/unsafe block: {_e}")
+check("11.21: the optimizer walks a safe/unsafe block", _sb_ok)
+
+# ── ISSUES/26: the comprehension lowering stops saying `any` ──
+# test_parity runs these on five backends; these are about the lowering, and
+# in particular about the SAFETY PROPERTY: where the type cannot be read the
+# lowering is unchanged, so no backend that worked before can start failing.
+print("[26] a comprehension's lowering carries types")
+from lexer import Lexer as _L26
+from parser import Parser as _P26
+
+
+def _comp26(src):
+    """The synthetic comprehension helper for `src`."""
+    p = _P26(_L26(src).tokenize())
+    p.parse()
+    for fn in p.synthetic_fns:
+        if fn.name.startswith(('__list_comp_', '__map_comp_')):
+            return fn
+    return None
+
+
+_h = _comp26('int[] xs = [1,2,3]; int[] ys = [x * 2 for x in xs];' + chr(10))
+check("26: the result type comes from the declaration",
+      _h is not None and _h.return_type == 'int[]')
+check("26: the captured iterable keeps its declared type",
+      _h is not None and ('int[]', 'xs') in _h.params)
+_fe = [s for s in (_h.body if _h else []) if type(s).__name__ == 'ForEach']
+check("26: the loop variable is typed from the iterable",
+      len(_fe) == 1 and _fe[0].var_type == 'int')
+# A range is always int, so the program no longer has to write it out — this
+# was a hard ParseError ("range loop variable must be 'int', got 'any'").
+_hr = _comp26('int[] ys = [x * 2 for x in 1..=3];' + chr(10))
+check("26: a range comprehension needs no declared loop variable",
+      _hr is not None and _hr.return_type == 'int[]')
+# A literal iterable is bound to a typed local: c has no inline array literal
+# and cpp dereferenced a temporary shared_ptr, printing garbage.
+_hl = _comp26('int[] ys = [x * 2 for x in [1,2,3]];' + chr(10))
+_decls = [s for s in (_hl.body if _hl else []) if type(s).__name__ == 'VarDecl']
+check("26: an array literal is bound to a typed local first",
+      any(d.var_type == 'int[]' and d.name.startswith('__it_') for d in _decls))
+check("26: and that local is NOT passed in as a parameter",
+      _hl is not None
+      and not any(n.startswith('__it_') for _t, n in _hl.params))
+# The capture scan reads the ORIGINAL iterable, so names inside the literal
+# are still captured.
+_hc = _comp26('int a = 1; int b = 2; int[] ys = [v + 1 for v in [a, b]];' + chr(10))
+check("26: names inside the literal are still captured",
+      _hc is not None
+      and {n for _t, n in _hc.params} == {'a', 'b'})
+# THE SAFETY PROPERTY. No declaration to read and an element expression that
+# is not the loop variable: the lowering must stay exactly as it was, because
+# a half-guessed type is how backends come to disagree.
+_ha = _comp26('int[] xs = [1,2,3]; any z = [v * 2 for v in xs];' + chr(10))
+check("26: an unreadable result type still falls back to any[]",
+      _ha is not None and _ha.return_type == 'any[]')
+# A name declared twice with two types is ambiguous, and ambiguous means
+# unknown — the map is flat, so this is the guard that makes being wrong
+# about scope impossible rather than unlikely.
+_p26 = _P26(_L26('fn f(string[] xs) -> int ={ return 1; }' + chr(10)
+                 + 'int[] xs = [1,2,3]; int[] ys = [x for x in xs];' + chr(10)
+                 ).tokenize())
+_p26.parse()
+check("26: a name declared with two types is treated as unknown",
+      'xs' in _p26._ambiguous_decls)
+
+# ── C4: parse_int / parse_number are desugarings like the rest ──
+# test_parity covers the answers across backends; these cover the mechanism
+# and the one property that matters most — that the validator is a SUBSET of
+# the native's accept set, so the to_int it guards can never be reached with
+# input that would abort.
+print("[C4] parse_int / parse_number")
+check("parse_int is lowered, not left unknown",
+      '__cryo_parse_int' in gen_node('print(parse_int("1") ?? 0);' + chr(10)))
+check("parse_number is lowered too",
+      '__cryo_parse_number' in gen_node('print(parse_number("1") ?? 0.0);' + chr(10)))
+check("a user function of the same name still wins",
+      'return 7' in gen_node(
+          'fn parse_int(string s) -> int ={ return 7; }' + chr(10)
+          + 'print(parse_int("1"));' + chr(10)))
+check("the helper is emitted once however many calls",
+      gen_node('print(parse_int("1") ?? 0); print(parse_int("2") ?? 0);' + chr(10))
+      .count('function __cryo_parse_int') == 1)
+# The guarded native must be reached only after the validator has approved
+# the string, which is what keeps an abort out of reach. Both helpers end in
+# a single call to their native, and every rejection returns before it.
+_pi_src = Parser._STR_HELPERS['parse_int'][2]
+check("parse_int calls to_int exactly once, at the end",
+      _pi_src.count('to_int(') == 1
+      and _pi_src.rstrip().rstrip('}').rstrip().endswith('return to_int(t);'))
+_pn_src = Parser._STR_HELPERS['parse_number'][2]
+check("parse_number calls to_number exactly once, at the end",
+      _pn_src.count('to_number(') == 1
+      and _pn_src.rstrip().rstrip('}').rstrip().endswith('return to_number(t);'))
+check("parse_int checks the int64 limit, not just the characters",
+      '9223372036854775807' in _pi_src and '9223372036854775808' in _pi_src)
+
+# ── C1: checked_add / checked_sub / checked_mul ──
+# test_parity runs the boundaries across backends; these are the mechanism,
+# plus the one property that makes the helpers correct at all.
+print("[C1] checked arithmetic")
+check("checked_add is lowered",
+      '__cryo_checked_add' in gen_node('print(checked_add(1, 2) ?? 0);' + chr(10)))
+check("checked_mul is lowered",
+      '__cryo_checked_mul' in gen_node('print(checked_mul(1, 2) ?? 0);' + chr(10)))
+check("a user function of the same name still wins",
+      'return 7' in gen_node(
+          'fn checked_add(int a, int b) -> int ={ return 7; }' + chr(10)
+          + 'print(checked_add(1, 2));' + chr(10)))
+_ck_arity = ''
+try:
+    gen_node('print(checked_add(1) ?? 0);' + chr(10))
+except Exception as _e:
+    _ck_arity = str(_e)
+check("they take two arguments, and say so", 'takes 2 arguments' in _ck_arity)
+# NO GUARD MAY ITSELF OVERFLOW. A bound spelled `a + b > MAX` has already
+# done the thing it exists to prevent, so the helpers contain no bare
+# addition or multiplication outside the single guarded operation they end
+# with. Asserting it structurally, because reading the arithmetic back is
+# exactly the review that misses this.
+for _nm, _op in (('checked_add', '+'), ('checked_sub', '-'), ('checked_mul', '*')):
+    _src = Parser._STR_HELPERS[_nm][2]
+    _body = [l.strip() for l in _src.splitlines() if l.strip().startswith('if (')]
+    check(f"C1: no guard in {_nm} uses the operation it guards",
+          all((' %s ' % _op) not in l for l in _body))
+# MIN cannot be written as a literal: -9223372036854775808 is unary minus
+# applied to a value that does not fit. The helpers derive it instead.
+for _nm in ('checked_add', 'checked_sub', 'checked_mul'):
+    check(f"C1: {_nm} derives MIN rather than writing it out",
+          '-9223372036854775807 - 1' in Parser._STR_HELPERS[_nm][2]
+          and '-9223372036854775808' not in Parser._STR_HELPERS[_nm][2])
+
+# ── the text helpers walk characters, not bytes ──
+# reverse_str, capitalize, title_case and common_prefix indexed with s[i],
+# which is a byte, and produced INVALID UTF-8 on anything outside ASCII.
+# test_parity runs them; this pins the mechanism, so a later "simplify" that
+# goes back to s[i] fails here even if nobody writes an accented test case.
+print("[utf8] the text helpers rest on split(), not on byte indexing")
+import re as _re8
+for _nm, _params in (('reverse_str', 's'), ('capitalize', 's'),
+                     ('title_case', 's'), ('common_prefix', 'ab')):
+    _s = Parser._STR_HELPERS[_nm][2]
+    # A WORD BOUNDARY matters here: the fixed helpers index the character
+    # ARRAY as cs[i] / ca[i], and a plain `'s[i]' in src` test matches that
+    # substring and fails a correct helper. Found by this check failing
+    # three helpers that had just been verified by hand on 'Ação'.
+    _byte_ix = any(_re8.search(r'(?<![A-Za-z0-9_])%s\[' % _p, _s)
+                   for _p in _params)
+    check(f"utf8: {_nm} walks split(), not the string by byte",
+          'split(' in _s and not _byte_ix)
+# chars() is the one that was always right, and is now what the others rest
+# on, so its definition matters more than it did.
+check("utf8: chars() is split(s, \"\")",
+      'split(s, "")' in Parser._STR_HELPERS['chars'][2])
+
+# ── D1: the character helpers rest on split(), like the rest ──
+print("[D1] char_len / char_at / char_slice")
+for _nm in ('char_len', 'char_at', 'char_slice'):
+    check(f"D1: {_nm} is lowered",
+          '__cryo_' + _nm in gen_node(
+              {'char_len': 'print(char_len("a"));',
+               'char_at': 'print(char_at("a", 0));',
+               'char_slice': 'print(char_slice("a", 0, 1));'}[_nm] + chr(10)))
+    check(f"D1: {_nm} counts with split(), not len()",
+          'split(' in Parser._STR_HELPERS[_nm][2])
+# char_slice must not be able to overflow its own bound when handed a huge
+# length — `a + n` is guarded by `n < ln - a`, the same discipline as
+# checked_add.
+_cs = Parser._STR_HELPERS['char_slice'][2]
+check("D1: char_slice guards a + n before computing it",
+      'n < ln - a' in _cs and 'a + n' in _cs
+      and _cs.index('n < ln - a') < _cs.index('a + n'))
+
+
+
+
+
+
+
+
+
+
+print("[throw] a bare throw() defaults to null everywhere")
+_thr = 'try { throw(); } catch (string e) { print(e); }'
+check("bare throw() compiles on go (used to crash the compiler)",
+      'panic(' in gen_go(_thr))
+# Assert the DESUGAR itself: the parser must hand every backend an explicit
+# null argument, which is what makes the three agree.
+_thr_ast = ast_of('throw();')
+_thr_call = _thr_ast.statements[0]
+check("the parser gives throw() an explicit null argument",
+      getattr(_thr_call, 'callee', None) == 'throw'
+      and len(_thr_call.args) == 1
+      and getattr(_thr_call.args[0], 'kind', None) == 'null')
+check("node no longer invents the Portuguese default 'erro'",
+      '"erro"' not in gen_node(_thr))
+
 print("[phase10] range for-loops")
 _rng = 'int s = 0; for (int i in 0..5) { s += i; } print(s);'
 _rngi = 'int s = 0; for (int i in 1..=5) { s += i; } print(s);'
@@ -1378,8 +1721,17 @@ def expect_c_reject(src, label):
         gen_c(src); check(label, False)
     except Exception as e:
         check(label, "backend" in str(e).lower())
-expect_c_reject('print(clamp(1, 0, 2));', "c: clamp rejected with clear error")
-expect_c_reject('print(repeat("x", 2));', "c: repeat rejected with clear error")
+# These two used to assert that the C backend REFUSED clamp and repeat.
+# That was testing the deny-list, not a limitation: the runtime has
+# cryo_clamp_i/f and cryo_str_repeat, and the dispatch below the deny-list
+# always emitted them. An assertion that pins a refusal with a working
+# implementation behind it is protecting the bug, so these now assert what
+# the backend can actually do. expect_c_reject stays — the function-value
+# refusal below is real.
+check("c: clamp reaches cryo_clamp_*",
+      'cryo_clamp_' in gen_c('print(clamp(1, 0, 2));' + chr(10)))
+check("c: repeat reaches cryo_str_repeat",
+      'cryo_str_repeat(' in gen_c('print(repeat("x", 2));' + chr(10)))
 # semantics: all seven are known builtins (no 'unknown function')
 try:
     from semantic import check as _sem_check2
@@ -1430,7 +1782,9 @@ _n2 = gen_node(_s2)
 check("node: pad_start uses padStart", ".padStart(" in _n2)
 check("node: concat spreads", "..." in _n2)
 check("node: sum uses reduce", ".reduce(" in _n2)
-expect_c_reject('print(pad_start("7", 3, "0"));', "c: pad_start rejected")
+# Was a refusal assertion; cryo_str_pad_start has existed since 10.4.
+check("c: pad_start reaches cryo_str_pad_start",
+      'cryo_str_pad_start(' in gen_c('print(pad_start("7", 3, "0"));' + chr(10)))
 check("c: sum compiles", "cryo_sum_" in gen_c('int[] a=[1]; print(sum(a));'))
 try:
     from semantic import check as _sem_check4
@@ -1632,6 +1986,30 @@ print(ops[0](5));
 check("go: array of function values compiles", "[]func(int64) int64" in gen_go(_fn_arr_src))
 check("node: array of function values compiles", "cryoIndex(ops" in gen_node(_fn_arr_src))
 check("pyro: array of function values compiles", isinstance(gen_pyro(_fn_arr_src), (bytes, bytearray)))
+
+# ── EMP L-01: a function-typed local read only as a callee ──
+print("[L-01] the optimizer keeps a fn-typed local used only as a callee")
+from optimize import optimize as _opt_ast
+from ast_nodes import VarDecl as _VD, FunctionDecl as _FD2
+_l01 = ('struct M { string nome; fn(string)->string h; }\n'
+        'fn f(string p) -> string ={ return "f:" + p; }\n'
+        'fn chamar(M m, string p) -> string ={ fn(string)->string h = m.h; '
+        'return h(p); }\n'
+        'print(chamar(M { nome: "x", h: f }, "a"));\n')
+_ch = next(s for s in _opt_ast(parse_ast(_l01)).statements
+           if isinstance(s, _FD2) and s.name == 'chamar')
+check("optimizer: a local read only as a callee is not pruned",
+      any(isinstance(s, _VD) and s.name == 'h' for s in _ch.body))
+check("node: the optimised program still declares it",
+      "let h" in CodeGenNode().generate(_opt_ast(parse_ast(_l01))))
+_sh = ('fn dbl(int n) -> int ={ return n * 2; }\n'
+       'fn tri(int n) -> int ={ return n * 3; }\n'
+       'fn usa(int x) -> int ={ fn(int)->int dbl = tri; return dbl(x); }\n'
+       'print(usa(5));\n')
+_us = next(s for s in _opt_ast(parse_ast(_sh)).statements
+           if isinstance(s, _FD2) and s.name == 'usa')
+check("optimizer: a local fn value is not replaced by an inlined global",
+      "n * 2" not in repr(_us.body) and "dbl" in repr(_us.body))
 
 # ── 11.38: a user function named `main` ──────────────────
 # The synthetic top level is ALSO called 'main', and it used to be registered
