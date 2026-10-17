@@ -161,6 +161,19 @@ def agree(label, src, backends=('pyro', 'node', 'go'), expect=None):
         return
     vals = set(got.values())
     detail = '; '.join(f"{b}={v!r}" for b, v in got.items())
+    # A TIMEOUT IS NOT A DISAGREEMENT, and it used to read as one:
+    # under memory pressure a `go run` hung for its full 900s and the
+    # failure printed as "a string index has its own wording" with
+    # go='<no message: <timeout>>' buried in the detail, so it looked
+    # like a wording defect. The case completed in 1.1s on its own.
+    # Still a failure — a hang is not a pass — but named.
+    _stalled = [b for b, v in got.items() if '<timeout>' in str(v)]
+    if _stalled:
+        _who = ', '.join(_stalled)
+        check(label + " — TIMED OUT on " + _who
+              + " (a stall, not a disagreement; re-run it alone)",
+              False, detail)
+        return
     check(label + f"  [{', '.join(got)}]", len(vals) == 1, detail)
     if expect is not None and vals:
         check(label + " — and the agreed output is right",
@@ -532,6 +545,16 @@ def aborts_with(label, src, needle, backends=('pyro', 'node', 'go')):
         print(f"  skip {label} (fewer than two backends available)")
         return
     detail = '; '.join(f"{b}={v!r}" for b, v in got.items())
+    # Same guard as agree(): a stall is not a message mismatch. This is the
+    # function the misleading failure came out of — "a string index has its
+    # own wording" with go='<no message: <timeout>>' reads as a wording
+    # defect when the program actually runs in 1.1s.
+    _stalled = [b for b, v in got.items() if '<timeout>' in str(v)]
+    if _stalled:
+        check(label + ' — TIMED OUT on ' + ', '.join(_stalled)
+              + ' (a stall, not a disagreement; re-run it alone)',
+              False, detail)
+        return
     check(label + f"  [{', '.join(got)}]", len(set(got.values())) == 1, detail)
     check(label + " — and it is the VM's wording",
           all(needle in v for v in got.values()), detail)
@@ -1492,6 +1515,21 @@ aborts_with("char_at past the end aborts, it does not return empty",
 agree("the character helpers reach cpp too",
       u'print(char_len("Ação")); print(char_at("Ação", 2));\nprint("[" + char_slice("Ação", 1, 2) + "]");\n',
       backends=('pyro', 'cpp'), expect=u"4\nã\n[çã]")
+
+# ── ISSUES/22: thrown null renders as "null" ──────────────────
+print("\n── ISSUES/22: thrown null renders as null ──")
+agree("thrown null renders as null (not empty map/struct)",
+      'try { throw(null); } catch (string e) { print("caught: " + e); }\n',
+      backends=('pyro', 'node', 'go'), expect="caught: null")
+
+# ── ISSUES/24: ? on optional ──────────────────────────────────
+print("\n── ISSUES/24: ? propagation over an optional ──")
+agree("? propagation over an optional agrees across backends",
+      'fn lk(int x) -> int? ={ if (x > 0) { return x; } return null; }\n'
+      'fn u(int x) -> int? ={ int v = lk(x)?; return v * 2; }\n'
+      'print(u(21) ?? 0);\n'
+      'print(u(-5) ?? 0);\n',
+      backends=('pyro', 'node', 'go', 'cpp'), expect="42\n0")
 
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))
