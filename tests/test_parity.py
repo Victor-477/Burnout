@@ -54,7 +54,7 @@ def _compile(work, src, backend, out):
         f.write(src)
     r = subprocess.run([sys.executable, CRYOC, p, '--backend', backend,
                         '-o', out, '--no-banner', '--no-cache'],
-                       capture_output=True, text=True, timeout=900)
+                       capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=900)
     return r
 
 
@@ -73,14 +73,14 @@ def run_backend(work, src, backend, expect_fail=False):
             out = os.path.join(work, 'p.pyro')
             if _compile(work, src, 'pyro', out).returncode != 0:
                 return '<compile failed>'
-            r = subprocess.run([VM, out], capture_output=True, text=True, timeout=300)
+            r = subprocess.run([VM, out], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=300)
         elif backend == 'node':
             if not shutil.which('node'):
                 return None
             out = os.path.join(work, 'p.js')
             if _compile(work, src, 'node', out).returncode != 0:
                 return '<compile failed>'
-            r = subprocess.run(['node', out], capture_output=True, text=True, timeout=300)
+            r = subprocess.run(['node', out], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=300)
         elif backend == 'go':
             if not shutil.which('go'):
                 return None
@@ -89,7 +89,7 @@ def run_backend(work, src, backend, expect_fail=False):
                 return '<compile failed>'
             # `go run`, not just codegen: 11.33 produced perfectly plausible Go
             # that the Go compiler then rejected.
-            r = subprocess.run(['go', 'run', out], capture_output=True, text=True,
+            r = subprocess.run(['go', 'run', out], capture_output=True, text=True, encoding='utf-8', errors='replace',
                                timeout=900, cwd=work)
             if r.returncode != 0 and not expect_fail:
                 return '<go build failed> ' + r.stderr.strip()[:160]
@@ -110,7 +110,7 @@ def run_backend(work, src, backend, expect_fail=False):
                 return None
             r = subprocess.run(['dotnet', 'run', '--project', proj,
                                 '-v', 'quiet', '--nologo'],
-                               capture_output=True, text=True, timeout=600)
+                               capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600)
         elif backend == 'cpp':
             # find_cxx, not shutil.which: a MinGW that is installed but not on
             # PATH is the normal state of a Windows box, and the compiler
@@ -127,7 +127,7 @@ def run_backend(work, src, backend, expect_fail=False):
             exe = os.path.splitext(out)[0] + EXE
             if not os.path.isfile(exe):
                 return '<compile failed>'
-            r = subprocess.run([exe], capture_output=True, text=True, timeout=300)
+            r = subprocess.run([exe], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=300)
         elif backend == 'c':
             if not shutil.which('gcc'):
                 return None
@@ -136,7 +136,7 @@ def run_backend(work, src, backend, expect_fail=False):
             exe = os.path.splitext(out)[0] + EXE
             if cr.returncode != 0 or not os.path.isfile(exe):
                 return '<compile failed>'
-            r = subprocess.run([exe], capture_output=True, text=True, timeout=300)
+            r = subprocess.run([exe], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=300)
         else:
             return None
     except subprocess.TimeoutExpired:
@@ -1430,6 +1430,45 @@ agree("is_alpha is ASCII-defined, and says so consistently",
 agree("the non-ASCII cases reach cpp too",
       u'print(reverse_str("Ação")); print(capitalize("ótimo"));\nprint("[" + common_prefix("ação", "açúcar") + "]");\n',
       backends=('pyro', 'cpp'), expect=u"oãçA\nÓtimo\n[aç]")
+
+# ── D1 (part): counting and slicing by character ─────────────
+#
+# len() counts BYTES and that is ISSUES/30, asserted as it is just above.
+# These are the additive half: split(s, "") is already character-aware, so
+# char_len/char_at/char_slice are desugarings over it.
+#
+# The ERP case this exists for: NF-e field limits are stated in characters,
+# so len() rejects a legitimate accented product name early and substr()
+# can cut a character in half.
+print("\n── D1: char_len / char_at / char_slice ──")
+
+agree("char_len counts characters where len counts bytes",
+      u'print(char_len("Ação Ônibus")); print(len("Ação Ônibus"));\nprint(char_len("")); print(char_len("abc"));\n',
+      backends=_U8, expect="11\n14\n0\n3")
+
+agree("char_at reaches a multi-byte character",
+      u'print(char_at("Ação", 0)); print(char_at("Ação", 2));\n',
+      backends=_U8, expect=u"A\nã")
+
+agree("char_slice does not cut a character in half",
+      u'print("[" + char_slice("Ação Ônibus", 0, 4) + "]");\nprint("[" + char_slice("Ação", 1, 2) + "]");\n',
+      backends=_U8, expect=u"[Ação]\n[çã]")
+
+# Clamping, like substr: past the end, before the start, negative length.
+agree("char_slice clamps in every direction",
+      u'print("[" + char_slice("Ação", 2, 99) + "]");\nprint("[" + char_slice("Ação", 99, 2) + "]");\nprint("[" + char_slice("Ação", -3, 2) + "]");\nprint("[" + char_slice("Ação", 1, -5) + "]");\n',
+      backends=_U8, expect=u"[ão]\n[]\n[Aç]\n[]")
+
+# char_at ABORTS out of range, as s[i] does. Returning "" would be the
+# fail-open answer to a read past the end.
+aborts_with("char_at past the end aborts, it does not return empty",
+            u'print(char_at("Ação", 9));\n',
+            '[Cryo Security] IndexError',
+            backends=_U8)
+
+agree("the character helpers reach cpp too",
+      u'print(char_len("Ação")); print(char_at("Ação", 2));\nprint("[" + char_slice("Ação", 1, 2) + "]");\n',
+      backends=('pyro', 'cpp'), expect=u"4\nã\n[çã]")
 
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))

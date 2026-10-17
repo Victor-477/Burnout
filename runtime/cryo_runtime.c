@@ -602,11 +602,35 @@ CryoArray* cryo_str_split(const char* s, const char* sep) {
     CryoArray* arr = cryo_array_new();
     size_t seplen = strlen(sep);
     if (seplen == 0) {
-        for (const char* p = s; *p; p++) {
-            char* ch = malloc(2);
+        /* ONE CHARACTER per element, not one byte.
+         *
+         * This stepped p++ and emitted a 1-byte string, so split("Ação", "")
+         * gave six elements, four of which were half-characters. The Go VM
+         * and the go/node backends give four, because Go's strings.Split with
+         * an empty separator steps RUNES — so this engine disagreed with them
+         * on the primitive that chars() is built from, and every front-end
+         * helper resting on chars() (reverse_str, capitalize, title_case,
+         * common_prefix, char_len, char_at, char_slice) was corrupting text
+         * here while being correct there.
+         *
+         * A malformed sequence — a stray continuation byte, an invalid lead,
+         * or a sequence cut short by the terminator — yields ONE BYTE and
+         * moves on. That loses nothing and cannot loop forever, which
+         * matters because this walks data from files and sockets. */
+        for (const unsigned char* p = (const unsigned char*)s; *p; ) {
+            int n = 1;
+            unsigned char c = *p;
+            if      ((c & 0xE0) == 0xC0) n = 2;
+            else if ((c & 0xF0) == 0xE0) n = 3;
+            else if ((c & 0xF8) == 0xF0) n = 4;
+            for (int k = 1; k < n; k++) {
+                if (!p[k]) { n = k; break; }      /* truncated at the end */
+            }
+            char* ch = malloc((size_t)n + 1);
             if (!ch) { fprintf(stderr, "[Cryo] malloc failed\n"); exit(1); }
-            ch[0] = *p; ch[1] = '\0';
+            memcpy(ch, p, (size_t)n); ch[n] = '\0';
             cryo_push_str(arr, ch);
+            p += n;
         }
         return arr;
     }
