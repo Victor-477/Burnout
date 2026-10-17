@@ -1563,6 +1563,48 @@ agree("…including a call with side effects, and functions still see it",
       'map<string,int> d = {"a": n};\nprint(get_m());\nprint(d["a"]);\n',
       expect="start\n2\n2")
 
+# ── M1: an accented path, as the FILESYSTEM sees it ──────────
+#
+# This cannot be an agree() case, and that is the whole point. The C
+# runtimes passed a UTF-8 path to fopen/stat, which take the process ANSI
+# codepage on Windows, so write_file("Produção.txt", …) created
+# "ProduÃ§Ã£o.txt" on disk — and then file_exists, read_file and file_size
+# ALL AGREED, because they mangled the name the same way. Every assertion a
+# program can make about its own file passed, before the fix and after it.
+#
+# So the test has to look at the DIRECTORY, from outside the program. Each
+# backend writes into a directory of its own and the name on disk is
+# compared — to the other backends and to the literal the program used.
+print("\n── M1: accented paths reach the filesystem intact ──")
+
+_M1_NAME = u"Produ\u00e7\u00e3o.txt"
+_m1_seen = {}
+for _b in ('pyro', 'node', 'go', 'c'):
+    _d = tempfile.mkdtemp(prefix='cryo_m1_')
+    _p = (_d + '/' + _M1_NAME).replace('\\', '/')
+    _src = (u'string p = "%s";\n' % _p
+            + u'print(write_file(p, "conteudo"));\n'
+            + u'print(read_file(p));\n')
+    _o = run_backend(_d, _src, _b)
+    if _o is None:
+        _skipped += 1
+        continue
+    # The program's own view, which was never the problem.
+    check("M1/%s: the program's round trip works" % _b,
+          _o == "true\nconteudo", repr(_o))
+    # The filesystem's view, which was.
+    _names = [n for n in os.listdir(_d) if n.startswith('Produ')]
+    _m1_seen[_b] = _names[0] if len(_names) == 1 else repr(_names)
+
+if len(_m1_seen) >= 2:
+    _detail = '; '.join('%s=%r' % kv for kv in _m1_seen.items())
+    check("M1: every backend writes the SAME name on disk",
+          len(set(_m1_seen.values())) == 1, _detail)
+    check("M1: and it is the name the program asked for",
+          all(v == _M1_NAME for v in _m1_seen.values()), _detail)
+else:
+    print("  skip M1 (fewer than two backends available)")
+
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))
 sys.exit(1 if _failed else 0)
