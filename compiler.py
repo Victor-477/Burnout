@@ -398,6 +398,9 @@ def _run_pyro(pyro_path: str, compiler_dir: str, run: bool, verbose: bool):
             print(f"✓ Pyro VM: {pyrovm}")
         if run:
             print(f"\n── Running (Pyro VM): {pyro_path} ───────────────────")
+            # The child writes to the same stdout but not through this
+            # buffer: unflushed, a piped header lands AFTER the program output.
+            sys.stdout.flush()
             subprocess.run([pyrovm, pyro_path])
     except FileNotFoundError:
         if verbose:
@@ -607,6 +610,7 @@ def compile_file(input_path: str,
         if run:
             try:
                 print(f"\n── Running (Node): {output_path} ───────────────────")
+                sys.stdout.flush()
                 subprocess.run(['node', output_path])
             except FileNotFoundError:
                 print("⚠ node not found — .js generated but not executed",
@@ -628,6 +632,7 @@ def compile_file(input_path: str,
                       file=sys.stderr)
                 return output_path
             print(f"\n── Running (dotnet): {output_path} ───────────────────")
+            sys.stdout.flush()
             subprocess.run(['dotnet', 'run', '--project', proj,
                             '-v', 'quiet', '--nologo'])
         return output_path
@@ -679,6 +684,7 @@ def compile_file(input_path: str,
                     print(f"[{tool} warnings]\n{result.stderr}", file=sys.stderr)
             if run:
                 print(f"\n── Running: {bin_path} ───────────────────")
+                sys.stdout.flush()
                 subprocess.run([bin_path])
         else:
             print(f"[{tool}] Error:\n{result.stderr}", file=sys.stderr)

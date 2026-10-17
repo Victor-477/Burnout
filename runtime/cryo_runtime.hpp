@@ -409,10 +409,29 @@ inline std::string replace_all(const std::string& s, const std::string& old,
 }
 inline Arr<std::string> split(const std::string& s, const std::string& sep) {
     Arr<std::string> out = arr<std::string>();
-    // An empty separator splits into characters, matching split_str() in the
-    // Pyro runtime — which is what chars() relies on.
+    // An empty separator splits into CHARACTERS, which is what chars() relies
+    // on — and this loop used to step one BYTE at a time, so split("Ação", "")
+    // gave six elements with four half-characters in the middle.
+    //
+    // The comment here used to claim it matched "split_str() in the Pyro
+    // runtime". It did match it — and that one was byte-wise too, so the
+    // comment recorded a belief about a shared behaviour that neither side
+    // actually had. The Go VM and the go/node backends give four, because
+    // Go's strings.Split on an empty separator steps runes.
+    //
+    // A malformed sequence yields one byte and moves on: nothing is lost and
+    // the loop cannot stall on data that came from a file or a socket.
     if (sep.empty()) {
-        for (size_t i = 0; i < s.size(); ++i) out->push_back(std::string(1, s[i]));
+        for (size_t i = 0; i < s.size(); ) {
+            unsigned char c = static_cast<unsigned char>(s[i]);
+            size_t n = 1;
+            if      ((c & 0xE0) == 0xC0) n = 2;
+            else if ((c & 0xF0) == 0xE0) n = 3;
+            else if ((c & 0xF8) == 0xF0) n = 4;
+            if (i + n > s.size()) n = 1;          // truncated at the end
+            out->push_back(s.substr(i, n));
+            i += n;
+        }
         return out;
     }
     size_t pos = 0;

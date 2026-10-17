@@ -54,7 +54,7 @@ def _compile(work, src, backend, out):
         f.write(src)
     r = subprocess.run([sys.executable, CRYOC, p, '--backend', backend,
                         '-o', out, '--no-banner', '--no-cache'],
-                       capture_output=True, text=True, timeout=900)
+                       capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=900)
     return r
 
 
@@ -73,14 +73,14 @@ def run_backend(work, src, backend, expect_fail=False):
             out = os.path.join(work, 'p.pyro')
             if _compile(work, src, 'pyro', out).returncode != 0:
                 return '<compile failed>'
-            r = subprocess.run([VM, out], capture_output=True, text=True, timeout=300)
+            r = subprocess.run([VM, out], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=300)
         elif backend == 'node':
             if not shutil.which('node'):
                 return None
             out = os.path.join(work, 'p.js')
             if _compile(work, src, 'node', out).returncode != 0:
                 return '<compile failed>'
-            r = subprocess.run(['node', out], capture_output=True, text=True, timeout=300)
+            r = subprocess.run(['node', out], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=300)
         elif backend == 'go':
             if not shutil.which('go'):
                 return None
@@ -89,7 +89,7 @@ def run_backend(work, src, backend, expect_fail=False):
                 return '<compile failed>'
             # `go run`, not just codegen: 11.33 produced perfectly plausible Go
             # that the Go compiler then rejected.
-            r = subprocess.run(['go', 'run', out], capture_output=True, text=True,
+            r = subprocess.run(['go', 'run', out], capture_output=True, text=True, encoding='utf-8', errors='replace',
                                timeout=900, cwd=work)
             if r.returncode != 0 and not expect_fail:
                 return '<go build failed> ' + r.stderr.strip()[:160]
@@ -110,7 +110,7 @@ def run_backend(work, src, backend, expect_fail=False):
                 return None
             r = subprocess.run(['dotnet', 'run', '--project', proj,
                                 '-v', 'quiet', '--nologo'],
-                               capture_output=True, text=True, timeout=600)
+                               capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600)
         elif backend == 'cpp':
             # find_cxx, not shutil.which: a MinGW that is installed but not on
             # PATH is the normal state of a Windows box, and the compiler
@@ -127,7 +127,7 @@ def run_backend(work, src, backend, expect_fail=False):
             exe = os.path.splitext(out)[0] + EXE
             if not os.path.isfile(exe):
                 return '<compile failed>'
-            r = subprocess.run([exe], capture_output=True, text=True, timeout=300)
+            r = subprocess.run([exe], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=300)
         elif backend == 'c':
             if not shutil.which('gcc'):
                 return None
@@ -136,7 +136,7 @@ def run_backend(work, src, backend, expect_fail=False):
             exe = os.path.splitext(out)[0] + EXE
             if cr.returncode != 0 or not os.path.isfile(exe):
                 return '<compile failed>'
-            r = subprocess.run([exe], capture_output=True, text=True, timeout=300)
+            r = subprocess.run([exe], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=300)
         else:
             return None
     except subprocess.TimeoutExpired:
@@ -1241,6 +1241,257 @@ agree("a module-level map copied from another map",
 agree("a module-level map from a function's return",
       'fn mk() -> map<int,int> ={ map<int,int> r = {}; r[5] = 6; return r; }\nmap<int,int> c = mk(); print(c);\n',
       backends=('pyro', 'node', 'go', 'c'), expect="{5: 6}")
+
+# ── C4: parsing that returns instead of killing the process ──
+#
+# to_int("abc") and to_number("abc") ABORT, and the abort is not catchable:
+# `try { to_int(s) } catch (string e)` does not run, the process ends. For a
+# server parsing user input that is a denial of service — one bad form field
+# ends the request loop for every tenant.
+#
+# parse_int/parse_number are front-end desugarings returning an optional, so
+# `parse_int(s) ?? 0` is the whole idiom. The validator is deliberately a
+# SUBSET of the native's accept set: more permissive and the call it guards
+# would abort, which is the thing being fixed.
+#
+# NOT on the c backend, and that is a real gap rather than an omission: the
+# C backend refuses to_int()/to_number() on a string outright, because its
+# runtime has no parse helper, so the desugaring has nothing to lower onto
+# there. Recorded as ISSUES/27.
+print("\n── C4: parse_int / parse_number ──")
+
+_PARSE = ('pyro', 'node', 'go')
+
+agree("parse_int takes what to_int takes",
+      'print(parse_int("42") ?? -1); print(parse_int("-42") ?? -1);\nprint(parse_int("+42") ?? -1); print(parse_int(" 7 ") ?? -1);\nprint(parse_int("007") ?? -1); print(parse_int("0") ?? -1);\n',
+      backends=_PARSE, expect="42\n-42\n42\n7\n7\n0")
+
+agree("…and returns null for what it does not, instead of aborting",
+      'print(parse_int("") ?? -1); print(parse_int("abc") ?? -1);\nprint(parse_int("4.2") ?? -1); print(parse_int("0x10") ?? -1);\nprint(parse_int("-") ?? -1);\n',
+      backends=_PARSE, expect="-1\n-1\n-1\n-1\n-1")
+
+# The overflow half, which is the part a character-only validator would miss:
+# to_int aborts on 99999999999999999999 exactly as it does on "abc".
+#
+# pyro and go ONLY. Not a parse_int defect — the node backend cannot
+# represent int64 at all, because a Cryo `int` is a JavaScript number there:
+# `int a = 9223372036854775807; print(a)` already prints
+# 9223372036854775000 with no conversion involved. Recorded as ISSUES/28.
+agree("the exact int64 limits parse, and one past them does not",
+      'print(parse_int("9223372036854775807") ?? -1);\nprint(parse_int("9223372036854775808") ?? -1);\nprint(parse_int("-9223372036854775808") ?? -1);\nprint(parse_int("-9223372036854775809") ?? -1);\nprint(parse_int("99999999999999999999") ?? -1);\n',
+      backends=('pyro', 'go'),
+      expect="9223372036854775807\n-1\n-9223372036854775808\n-1\n-1")
+
+# Leading zeros are stripped BEFORE the length test, or a padded field would
+# read as an overflow purely for being long.
+agree("a zero-padded number is its value, not an overflow",
+      'print(parse_int("00000000000000000000042") ?? -1);\n',
+      backends=_PARSE, expect="42")
+
+agree("parse_number takes plain decimals",
+      'print(parse_number("4.2") ?? -1.0); print(parse_number("-3.5") ?? -1.0);\nprint(parse_number(".5") ?? -1.0); print(parse_number("5.") ?? -1.0);\n',
+      backends=_PARSE, expect="4.2\n-3.5\n0.5\n5")
+
+# Narrower than to_number ON PURPOSE: no exponent, no NaN/Inf. to_number
+# rejects "1e999" for being out of range, and reproducing that here would
+# mean encoding the double range in the validator.
+agree("…and refuses everything else, exponents included",
+      'print(parse_number("abc") ?? -1.0); print(parse_number("1e3") ?? -1.0);\nprint(parse_number("1.2.3") ?? -1.0); print(parse_number(".") ?? -1.0);\nprint(parse_number("") ?? -1.0);\n',
+      backends=_PARSE, expect="-1\n-1\n-1\n-1\n-1")
+
+agree("parse_int and parse_number reach cpp too",
+      'print(parse_int("42") ?? -1); print(parse_int("abc") ?? -1);\nprint(parse_number("4.2") ?? -1.0); print(parse_number("x") ?? -1.0);\n',
+      backends=('pyro', 'cpp'), expect="42\n-1\n4.2\n-1")
+
+# The whole point: the program keeps running. An abort would end it before
+# the second line, so the second line IS the assertion.
+agree("a rejected parse does not end the program",
+      'int v = parse_int("nao-e-int") ?? 0;\nprint(v); print("ainda vivo");\n',
+      backends=_PARSE, expect="0\nainda vivo")
+
+# ── C1: checked_add / checked_sub / checked_mul ──────────────
+#
+# `a + b` itself still means two things — the compiled backends abort and
+# both VMs wrap silently — and that is ISSUES/29, which needs a safe-mode
+# bit the .pyro format does not have. These are requirement C1's other
+# accepted answer, and they agree everywhere today.
+#
+# The cases are BOUNDARIES, not samples. A guard that is one off at the
+# limit is indistinguishable from a correct one on ordinary input, and
+# ordinary input is all anybody tries.
+print("\n── C1: checked arithmetic ──")
+
+_CK = ('pyro', 'node', 'go')
+_MXMN = 'int MX = 9223372036854775807;\nint MN = -9223372036854775807 - 1;\n'
+
+agree("checked_add at and past the top",
+      _MXMN + 'print(checked_add(2, 3) ?? -999); print(checked_add(MX, 0) ?? -999);\nprint(checked_add(MX, 1) ?? -999);\n',
+      backends=('pyro', 'go'), expect="5\n9223372036854775807\n-999")
+
+agree("checked_add at and past the bottom",
+      _MXMN + 'print(checked_add(MN, 1) ?? -999); print(checked_add(MN, -1) ?? -999);\n',
+      backends=('pyro', 'go'), expect="-9223372036854775807\n-999")
+
+agree("checked_sub at both ends",
+      _MXMN + 'print(checked_sub(10, 3) ?? -999); print(checked_sub(MN, 1) ?? -999);\nprint(checked_sub(MX, -1) ?? -999); print(checked_sub(0, MN) ?? -999);\n',
+      backends=('pyro', 'go'), expect="7\n-999\n-999\n-999")
+
+# MIN * -1 is the case a guard written over absolute values gets wrong,
+# because abs(MIN) is itself the overflow. MIN * 1 is NOT an overflow and
+# must come back.
+agree("checked_mul and the MIN * -1 asymmetry",
+      _MXMN + 'print(checked_mul(6, 7) ?? -999); print(checked_mul(MX, 2) ?? -999);\nprint(checked_mul(MN, -1) ?? -999); print(checked_mul(-1, MN) ?? -999);\nprint(checked_mul(MN, 1) ?? -999);\n',
+      backends=('pyro', 'go'),
+      expect="42\n-999\n-999\n-999\n-9223372036854775808")
+
+# The sharpest pair in the whole set: -2^62 * 2 is EXACTLY MIN and must be
+# allowed, one step further must not. A conservative guard passes every
+# other case here and fails this one.
+agree("the guard is exact at MIN, not merely conservative",
+      'print(checked_mul(-4611686018427387904, 2) ?? -999);\nprint(checked_mul(-4611686018427387905, 2) ?? -999);\nprint(checked_mul(4611686018427387903, 2) ?? -999);\nprint(checked_mul(4611686018427387904, 2) ?? -999);\n',
+      backends=('pyro', 'go'),
+      expect="-9223372036854775808\n-999\n9223372036854775806\n-999")
+
+agree("zero short-circuits before any sign analysis",
+      _MXMN + 'print(checked_mul(0, MN) ?? -999); print(checked_mul(MN, 0) ?? -999);\n',
+      backends=('pyro', 'go'), expect="0\n0")
+
+agree("the sign combinations",
+      'print(checked_mul(-3, -4) ?? -999); print(checked_mul(3, -4) ?? -999);\nprint(checked_mul(-3, 4) ?? -999); print(checked_add(-5, -7) ?? -999);\n',
+      backends=_CK, expect="12\n-12\n-12\n-12")
+
+agree("checked arithmetic reaches cpp too",
+      'print(checked_add(2, 3) ?? -999); print(checked_mul(6, 7) ?? -999);\nprint(checked_mul(4611686018427387904, 2) ?? -999);\n',
+      backends=('pyro', 'cpp'), expect="5\n42\n-999")
+
+# ── the text helpers on text that is not ASCII ───────────────
+#
+# Every text case above is ASCII, which is exactly how four of these
+# helpers shipped corrupting UTF-8. They indexed with s[i] — a BYTE — so
+# reverse_str("Ação") came back as "o\xc2\xa3\xc3\x83A" and
+# common_prefix("ação", "açúcar") as the bytes 61 C3 A7 C3: a dangling lead
+# byte, because ã and ú SHARE one and the loop stopped between the halves of
+# a character. Fixed by walking split(s, ""), which is character-aware.
+#
+# These cases are the ones that were missing. The output is compared across
+# backends as usual, so a backend whose split() is byte-oriented fails here
+# rather than silently producing different mojibake.
+print("\n── text helpers on non-ASCII input ──")
+
+_U8 = ('pyro', 'node', 'go')
+
+agree("reverse_str reverses characters, not bytes",
+      u'print(reverse_str("Ação"));\n',
+      backends=_U8, expect=u"oãçA")
+
+agree("capitalize upper-cases a multi-byte first character",
+      u'print(capitalize("ótimo"));\n',
+      backends=_U8, expect=u"Ótimo")
+
+agree("title_case too",
+      u'print(title_case("ação ótima"));\n',
+      backends=_U8, expect=u"Ação Ótima")
+
+# The case that would not have been predicted by reading the loop: a shared
+# LEAD byte. ã is C3 A3 and ú is C3 BA, so a byte-wise comparison matches
+# the C3 and then stops, returning half a character.
+agree("common_prefix stops at a character, not inside one",
+      u'print("[" + common_prefix("ação", "açúcar") + "]");\n',
+      backends=_U8, expect=u"[aç]")
+
+agree("…and the result is a whole number of characters",
+      u'print(char_len(common_prefix("ação", "açúcar")));\n',
+      backends=_U8, expect="2")
+
+# split("", ...) is the primitive all four now rest on, so pin that it is
+# character-aware rather than trusting it.
+agree("split with an empty separator yields characters",
+      u'string[] cs = split("Ação", ""); print(len(cs)); print(cs);\n',
+      backends=_U8, expect=u"4\n[A, ç, ã, o]")
+
+agree("chars() agrees with it",
+      u'print(len(chars("Ação")));\n',
+      backends=_U8, expect="4")
+
+# The byte-oriented natives, pinned as they ARE rather than as D1 wants
+# them, so that ISSUES/30 changing them is a visible decision and not a
+# silent one.
+# node is EXCLUDED here and that IS the finding, not an exemption: len() on
+# a string counts CHARACTERS on node (11) and BYTES on the other four (14).
+# Both are asserted, so ISSUES/30 cannot be settled by changing one of them
+# without this failing.
+agree("len() counts BYTES on pyro and go — ISSUES/30",
+      u'print(len("Ação Ônibus"));\n',
+      backends=('pyro', 'go'), expect="14")
+
+# NOT agree(): it needs two backends to compare and SILENTLY SKIPS with
+# fewer, so this read as a passing assertion about node while running
+# nothing at all. One backend means asserting its output directly.
+_n30 = tempfile.mkdtemp(prefix='cryo_par_')
+_n30_out = run_backend(_n30, u'print(len("Ação Ônibus"));\n', 'node')
+if _n30_out is None:
+    print("  skip len() on node (node not available)")
+else:
+    check("…and CHARACTERS on node, which is the divergence",
+          _n30_out == "11", repr(_n30_out))
+
+# The classifiers stay byte-wise, and that is safe: every byte of a
+# multi-byte character is >= 0x80, so it can never match an ASCII set and
+# there are no false positives.
+agree("is_alpha is ASCII-defined, and says so consistently",
+      u'print(is_alpha("ação")); print(is_alpha("acao"));\n',
+      backends=_U8, expect="false\ntrue")
+
+# cpp gets reverse_str and common_prefix, which are pure character walks,
+# but NOT capitalize: upper() is ASCII-only on c and cpp, so "ótimo" comes
+# back unchanged there (ISSUES/31). Asserting the casing here would be
+# asserting a bug away; asserting the character walk is the real question,
+# since that is what the split fix changed.
+agree("the character walks reach cpp too",
+      u'print(reverse_str("Ação"));\nprint("[" + common_prefix("ação", "açúcar") + "]");\n',
+      backends=('pyro', 'cpp'), expect=u"oãçA\n[aç]")
+# ── D1 (part): counting and slicing by character ─────────────
+#
+# len() counts BYTES and that is ISSUES/30, asserted as it is just above.
+# These are the additive half: split(s, "") is already character-aware, so
+# char_len/char_at/char_slice are desugarings over it.
+#
+# The ERP case this exists for: NF-e field limits are stated in characters,
+# so len() rejects a legitimate accented product name early and substr()
+# can cut a character in half.
+print("\n── D1: char_len / char_at / char_slice ──")
+
+agree("char_len counts characters where len counts bytes",
+      u'print(char_len("Ação Ônibus")); print(len("Ação Ônibus"));\nprint(char_len("")); print(char_len("abc"));\n',
+      backends=('pyro', 'go'), expect="11\n14\n0\n3")
+
+agree("char_len agrees everywhere, whatever len() does",
+      u'print(char_len("Ação Ônibus")); print(char_len("")); print(char_len("abc"));\n',
+      backends=_U8, expect="11\n0\n3")
+
+agree("char_at reaches a multi-byte character",
+      u'print(char_at("Ação", 0)); print(char_at("Ação", 2));\n',
+      backends=_U8, expect=u"A\nã")
+
+agree("char_slice does not cut a character in half",
+      u'print("[" + char_slice("Ação Ônibus", 0, 4) + "]");\nprint("[" + char_slice("Ação", 1, 2) + "]");\n',
+      backends=_U8, expect=u"[Ação]\n[çã]")
+
+# Clamping, like substr: past the end, before the start, negative length.
+agree("char_slice clamps in every direction",
+      u'print("[" + char_slice("Ação", 2, 99) + "]");\nprint("[" + char_slice("Ação", 99, 2) + "]");\nprint("[" + char_slice("Ação", -3, 2) + "]");\nprint("[" + char_slice("Ação", 1, -5) + "]");\n',
+      backends=_U8, expect=u"[ão]\n[]\n[Aç]\n[]")
+
+# char_at ABORTS out of range, as s[i] does. Returning "" would be the
+# fail-open answer to a read past the end.
+aborts_with("char_at past the end aborts, it does not return empty",
+            u'print(char_at("Ação", 9));\n',
+            '[Cryo Security] IndexError',
+            backends=_U8)
+
+agree("the character helpers reach cpp too",
+      u'print(char_len("Ação")); print(char_at("Ação", 2));\nprint("[" + char_slice("Ação", 1, 2) + "]");\n',
+      backends=('pyro', 'cpp'), expect=u"4\nã\n[çã]")
 
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))

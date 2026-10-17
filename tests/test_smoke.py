@@ -1531,6 +1531,117 @@ _p26.parse()
 check("26: a name declared with two types is treated as unknown",
       'xs' in _p26._ambiguous_decls)
 
+# ── C4: parse_int / parse_number are desugarings like the rest ──
+# test_parity covers the answers across backends; these cover the mechanism
+# and the one property that matters most — that the validator is a SUBSET of
+# the native's accept set, so the to_int it guards can never be reached with
+# input that would abort.
+print("[C4] parse_int / parse_number")
+check("parse_int is lowered, not left unknown",
+      '__cryo_parse_int' in gen_node('print(parse_int("1") ?? 0);' + chr(10)))
+check("parse_number is lowered too",
+      '__cryo_parse_number' in gen_node('print(parse_number("1") ?? 0.0);' + chr(10)))
+check("a user function of the same name still wins",
+      'return 7' in gen_node(
+          'fn parse_int(string s) -> int ={ return 7; }' + chr(10)
+          + 'print(parse_int("1"));' + chr(10)))
+check("the helper is emitted once however many calls",
+      gen_node('print(parse_int("1") ?? 0); print(parse_int("2") ?? 0);' + chr(10))
+      .count('function __cryo_parse_int') == 1)
+# The guarded native must be reached only after the validator has approved
+# the string, which is what keeps an abort out of reach. Both helpers end in
+# a single call to their native, and every rejection returns before it.
+_pi_src = Parser._STR_HELPERS['parse_int'][2]
+check("parse_int calls to_int exactly once, at the end",
+      _pi_src.count('to_int(') == 1
+      and _pi_src.rstrip().rstrip('}').rstrip().endswith('return to_int(t);'))
+_pn_src = Parser._STR_HELPERS['parse_number'][2]
+check("parse_number calls to_number exactly once, at the end",
+      _pn_src.count('to_number(') == 1
+      and _pn_src.rstrip().rstrip('}').rstrip().endswith('return to_number(t);'))
+check("parse_int checks the int64 limit, not just the characters",
+      '9223372036854775807' in _pi_src and '9223372036854775808' in _pi_src)
+
+# ── C1: checked_add / checked_sub / checked_mul ──
+# test_parity runs the boundaries across backends; these are the mechanism,
+# plus the one property that makes the helpers correct at all.
+print("[C1] checked arithmetic")
+check("checked_add is lowered",
+      '__cryo_checked_add' in gen_node('print(checked_add(1, 2) ?? 0);' + chr(10)))
+check("checked_mul is lowered",
+      '__cryo_checked_mul' in gen_node('print(checked_mul(1, 2) ?? 0);' + chr(10)))
+check("a user function of the same name still wins",
+      'return 7' in gen_node(
+          'fn checked_add(int a, int b) -> int ={ return 7; }' + chr(10)
+          + 'print(checked_add(1, 2));' + chr(10)))
+_ck_arity = ''
+try:
+    gen_node('print(checked_add(1) ?? 0);' + chr(10))
+except Exception as _e:
+    _ck_arity = str(_e)
+check("they take two arguments, and say so", 'takes 2 arguments' in _ck_arity)
+# NO GUARD MAY ITSELF OVERFLOW. A bound spelled `a + b > MAX` has already
+# done the thing it exists to prevent, so the helpers contain no bare
+# addition or multiplication outside the single guarded operation they end
+# with. Asserting it structurally, because reading the arithmetic back is
+# exactly the review that misses this.
+for _nm, _op in (('checked_add', '+'), ('checked_sub', '-'), ('checked_mul', '*')):
+    _src = Parser._STR_HELPERS[_nm][2]
+    _body = [l.strip() for l in _src.splitlines() if l.strip().startswith('if (')]
+    check(f"C1: no guard in {_nm} uses the operation it guards",
+          all((' %s ' % _op) not in l for l in _body))
+# MIN cannot be written as a literal: -9223372036854775808 is unary minus
+# applied to a value that does not fit. The helpers derive it instead.
+for _nm in ('checked_add', 'checked_sub', 'checked_mul'):
+    check(f"C1: {_nm} derives MIN rather than writing it out",
+          '-9223372036854775807 - 1' in Parser._STR_HELPERS[_nm][2]
+          and '-9223372036854775808' not in Parser._STR_HELPERS[_nm][2])
+
+# ── the text helpers walk characters, not bytes ──
+# reverse_str, capitalize, title_case and common_prefix indexed with s[i],
+# which is a byte, and produced INVALID UTF-8 on anything outside ASCII.
+# test_parity runs them; this pins the mechanism, so a later "simplify" that
+# goes back to s[i] fails here even if nobody writes an accented test case.
+print("[utf8] the text helpers rest on split(), not on byte indexing")
+import re as _re8
+for _nm, _params in (('reverse_str', 's'), ('capitalize', 's'),
+                     ('title_case', 's'), ('common_prefix', 'ab')):
+    _s = Parser._STR_HELPERS[_nm][2]
+    # A WORD BOUNDARY matters here: the fixed helpers index the character
+    # ARRAY as cs[i] / ca[i], and a plain `'s[i]' in src` test matches that
+    # substring and fails a correct helper. Found by this check failing
+    # three helpers that had just been verified by hand on 'Ação'.
+    _byte_ix = any(_re8.search(r'(?<![A-Za-z0-9_])%s\[' % _p, _s)
+                   for _p in _params)
+    check(f"utf8: {_nm} walks split(), not the string by byte",
+          'split(' in _s and not _byte_ix)
+# chars() is the one that was always right, and is now what the others rest
+# on, so its definition matters more than it did.
+check("utf8: chars() is split(s, \"\")",
+      'split(s, "")' in Parser._STR_HELPERS['chars'][2])
+
+# ── D1: the character helpers rest on split(), like the rest ──
+print("[D1] char_len / char_at / char_slice")
+for _nm in ('char_len', 'char_at', 'char_slice'):
+    check(f"D1: {_nm} is lowered",
+          '__cryo_' + _nm in gen_node(
+              {'char_len': 'print(char_len("a"));',
+               'char_at': 'print(char_at("a", 0));',
+               'char_slice': 'print(char_slice("a", 0, 1));'}[_nm] + chr(10)))
+    check(f"D1: {_nm} counts with split(), not len()",
+          'split(' in Parser._STR_HELPERS[_nm][2])
+# char_slice must not be able to overflow its own bound when handed a huge
+# length — `a + n` is guarded by `n < ln - a`, the same discipline as
+# checked_add.
+_cs = Parser._STR_HELPERS['char_slice'][2]
+check("D1: char_slice guards a + n before computing it",
+      'n < ln - a' in _cs and 'a + n' in _cs
+      and _cs.index('n < ln - a') < _cs.index('a + n'))
+
+
+
+
+
 
 
 
@@ -1875,6 +1986,30 @@ print(ops[0](5));
 check("go: array of function values compiles", "[]func(int64) int64" in gen_go(_fn_arr_src))
 check("node: array of function values compiles", "cryoIndex(ops" in gen_node(_fn_arr_src))
 check("pyro: array of function values compiles", isinstance(gen_pyro(_fn_arr_src), (bytes, bytearray)))
+
+# ── EMP L-01: a function-typed local read only as a callee ──
+print("[L-01] the optimizer keeps a fn-typed local used only as a callee")
+from optimize import optimize as _opt_ast
+from ast_nodes import VarDecl as _VD, FunctionDecl as _FD2
+_l01 = ('struct M { string nome; fn(string)->string h; }\n'
+        'fn f(string p) -> string ={ return "f:" + p; }\n'
+        'fn chamar(M m, string p) -> string ={ fn(string)->string h = m.h; '
+        'return h(p); }\n'
+        'print(chamar(M { nome: "x", h: f }, "a"));\n')
+_ch = next(s for s in _opt_ast(parse_ast(_l01)).statements
+           if isinstance(s, _FD2) and s.name == 'chamar')
+check("optimizer: a local read only as a callee is not pruned",
+      any(isinstance(s, _VD) and s.name == 'h' for s in _ch.body))
+check("node: the optimised program still declares it",
+      "let h" in CodeGenNode().generate(_opt_ast(parse_ast(_l01))))
+_sh = ('fn dbl(int n) -> int ={ return n * 2; }\n'
+       'fn tri(int n) -> int ={ return n * 3; }\n'
+       'fn usa(int x) -> int ={ fn(int)->int dbl = tri; return dbl(x); }\n'
+       'print(usa(5));\n')
+_us = next(s for s in _opt_ast(parse_ast(_sh)).statements
+           if isinstance(s, _FD2) and s.name == 'usa')
+check("optimizer: a local fn value is not replaced by an inlined global",
+      "n * 2" not in repr(_us.body) and "dbl" in repr(_us.body))
 
 # ── 11.38: a user function named `main` ──────────────────
 # The synthetic top level is ALSO called 'main', and it used to be registered
