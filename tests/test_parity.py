@@ -1605,6 +1605,70 @@ if len(_m1_seen) >= 2:
 else:
     print("  skip M1 (fewer than two backends available)")
 
+# ── url_decode / url_encode beyond pyro ──
+# Natives 65/66 existed only on the VMs. go failed to COMPILE any program
+# that used them ("undefined: url_decode") and node threw a ReferenceError
+# only when the call ran — the EMP's form and contract parsers hit both.
+# Both VMs work on UTF-8 BYTES, '+' is a space, and a malformed escape
+# passes through; node's decodeURIComponent would throw on that one.
+print("\n── url_decode / url_encode on go and node ──")
+agree("url_decode: '+', %20 and a multi-byte character",
+      'print(url_decode("a+b%20c"));\nprint(url_decode("Jo%C3%A3o"));\n'
+      'print(url_decode("%41%42"));\n',
+      expect=u"a b c\nJoão\nAB")
+agree("url_decode: a malformed or truncated escape passes through",
+      'print(url_decode("100%zz%"));\nprint(url_decode("%4"));\n'
+      'print(url_decode("x%g1y"));\n',
+      expect="100%zz%\n%4\nx%g1y")
+agree("url_encode: the unreserved set, upper-case hex, UTF-8 bytes",
+      u'print(url_encode("a b&c=d/ã~_.-"));\n',
+      expect="a%20b%26c%3Dd%2F%C3%A3~_.-")
+agree("url_encode then url_decode is the identity",
+      u'string s = "ação + 50% off?";\nprint(url_decode(url_encode(s)) == s);\n'
+      u'print(url_decode(url_encode(s)));\n',
+      expect=u"true\nação + 50% off?")
+
+# ── round() breaks ties AWAY FROM ZERO, on every backend ────
+#
+# node mapped round() straight to JavaScript's Math.round, which breaks ties
+# toward +Infinity: Math.round(-0.5) is -0, Math.round(-1.5) is -1 and
+# Math.round(-2.5) is -2. The VM (Go's math.Round), go, c and cpp all round
+# half away from zero, so node gave a different answer for EVERY negative
+# half — and for an ERP that is a monetary divergence, since credits,
+# returns and discounts are the negative numbers in the system.
+#
+# The positive halves agreed all along, which is why this survived: the
+# obvious cases to try are 0.5, 1.5, 2.5.
+print("\n── round(): ties away from zero ──")
+
+_RND = ('pyro', 'node', 'go')
+
+agree("positive halves round up",
+      'print(round(0.5)); print(round(1.5)); print(round(2.5));\n',
+      backends=_RND, expect="1\n2\n3")
+
+agree("NEGATIVE halves round away from zero, not toward +Inf",
+      'print(round(-0.5)); print(round(-1.5)); print(round(-2.5));\n',
+      backends=_RND, expect="-1\n-2\n-3")
+
+agree("a value that is not a tie is unaffected",
+      'print(round(2.675)); print(round(3.0)); print(round(-3.2));\n',
+      backends=_RND, expect="3\n3\n-3")
+
+agree("floor and ceil were never in question, and still are not",
+      'print(floor(-2.5)); print(ceil(-2.5)); print(floor(2.5)); print(ceil(2.5));\n',
+      backends=_RND, expect="-3\n-2\n2\n3")
+
+agree("round reaches c and cpp with the same rule",
+      'print(round(2.5)); print(round(-2.5)); print(round(-0.5));\n',
+      backends=('pyro', 'c', 'cpp'), expect="3\n-3\n-1")
+
+# round(-0.0) is DELIBERATELY ABSENT. It disagrees four ways across the
+# backends for a reason that has nothing to do with rounding — node prints
+# -0 as 0 while pyro/go/c print -0, and pyro folds `0.0 - 0.0` to -0 —
+# and asserting any of them here would be asserting one of those four as
+# correct before anyone has decided which. ISSUES/33.
+
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))
 sys.exit(1 if _failed else 0)
