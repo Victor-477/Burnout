@@ -251,7 +251,8 @@ class TypeEnv:
                        'agent_call': 'string[]',  # 11.20
                        'tools_json': 'string', 'tool_get': 'Tool',
                        'agent': 'string', 'index_of': 'int', 'count': 'int',
-                       'pad_start': 'string', 'pad_end': 'string'}.get(node.callee)
+                       'pad_start': 'string', 'pad_end': 'string',
+                       'url_decode': 'string', 'url_encode': 'string'}.get(node.callee)
             # these preserve the type of their first argument
             #
             # 13.1 — `abs` belonged here and was in the table above as
@@ -771,6 +772,45 @@ class CodeGenGo:
                   "\tvar n int64",
                   "\tfor _, v := range a { if v == x { n++ } }",
                   "\treturn n", "}", ""]
+        if 'urlcodec' in self._helpers:
+            # url_decode/url_encode, byte for byte as the VMs' natives 65/66
+            # do them: '+' is a space, a malformed escape passes through, and
+            # only A-Z a-z 0-9 - _ . ~ are left unencoded.
+            H += ["func cryoUnhex(c byte) (byte, bool) {",
+                  "\tswitch {",
+                  "\tcase c >= '0' && c <= '9': return c - '0', true",
+                  "\tcase c >= 'a' && c <= 'f': return c - 'a' + 10, true",
+                  "\tcase c >= 'A' && c <= 'F': return c - 'A' + 10, true",
+                  "\t}",
+                  "\treturn 0, false", "}", "",
+                  "func cryoUrlDecode(in string) string {",
+                  "\tb := make([]byte, 0, len(in))",
+                  "\tfor i := 0; i < len(in); i++ {",
+                  "\t\tswitch {",
+                  "\t\tcase in[i] == '+':",
+                  "\t\t\tb = append(b, ' ')",
+                  "\t\tcase in[i] == '%' && i+2 < len(in):",
+                  "\t\t\thi, ok1 := cryoUnhex(in[i+1])",
+                  "\t\t\tlo, ok2 := cryoUnhex(in[i+2])",
+                  "\t\t\tif ok1 && ok2 { b = append(b, hi<<4|lo); i += 2 } else { b = append(b, in[i]) }",
+                  "\t\tdefault:",
+                  "\t\t\tb = append(b, in[i])",
+                  "\t\t}",
+                  "\t}",
+                  "\treturn string(b)", "}", "",
+                  "func cryoUrlEncode(in string) string {",
+                  '\tconst hexd = "0123456789ABCDEF"',
+                  "\tb := make([]byte, 0, len(in)*3)",
+                  "\tfor i := 0; i < len(in); i++ {",
+                  "\t\tch := in[i]",
+                  "\t\tif (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||",
+                  "\t\t\tch == '-' || ch == '_' || ch == '.' || ch == '~' {",
+                  "\t\t\tb = append(b, ch)",
+                  "\t\t} else {",
+                  "\t\t\tb = append(b, '%', hexd[ch>>4], hexd[ch&0x0F])",
+                  "\t\t}",
+                  "\t}",
+                  "\treturn string(b)", "}", ""]
         if 'sum' in self._helpers:
             H += ["func cryoSum[T int64 | float64](a []T) T {",
                   "\tvar s T",
@@ -2673,6 +2713,10 @@ class CodeGenGo:
             return f"int64(slices.Index({self._expr(a[0])}, {self._expr(a[1])}))"
         if c == 'concat' and len(a) == 2:
             return self._concat(node, None)
+        if c in ('url_decode', 'url_encode') and len(a) == 1:
+            self._helpers.add('urlcodec')
+            fn = 'cryoUrlDecode' if c == 'url_decode' else 'cryoUrlEncode'
+            return f"{fn}({self._expr(a[0])})"
         if c == 'count' and len(a) == 2:
             self._helpers.add('count')
             return f"cryoCount({self._expr(a[0])}, {self._expr(a[1])})"
