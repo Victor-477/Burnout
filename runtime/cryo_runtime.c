@@ -703,24 +703,99 @@ double cryo_input_num(const char* prompt) {
 #if defined(_WIN32)
 #include <direct.h>
 #include <windows.h>
+#include <wchar.h>
 #else
 #include <unistd.h>
 #include <dirent.h>
 #endif
 
+/* ── M1: a Cryo path is UTF-8; a Windows path is UTF-16 ──────
+ *
+ * fopen, stat, remove and _mkdir take a path in the process ANSI codepage,
+ * so the UTF-8 bytes of an accented path reached the filesystem as their
+ * cp1252 reading: write_file("build/Produção.txt", …) created
+ * "ProduÃ§Ã£o.txt" on disk.
+ *
+ * IT DID NOT FAIL, which is what makes it worth a wrapper rather than a
+ * note. file_exists, read_file and file_size all agreed afterwards, because
+ * they mangled the name the same way — so the program saw a clean round
+ * trip while the file was unreachable under the name it believed it had
+ * from Explorer, from another tool, or from a Go-built binary beside it.
+ * The go and node backends and the Go VM get this right for free, because
+ * their standard libraries convert to UTF-16 on Windows; the C ones do not.
+ *
+ * Every wrapper leaves the POSIX build untouched: there a path is bytes and
+ * fopen already takes UTF-8. */
+#if defined(_WIN32)
+static wchar_t* _cryo_wpath(const char* s) {
+    int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
+    if (n <= 0) return NULL;
+    wchar_t* w = (wchar_t*)malloc((size_t)n * sizeof(wchar_t));
+    if (!w) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, 0, s, -1, w, n) <= 0) { free(w); return NULL; }
+    return w;
+}
+static FILE* _cryo_fopen(const char* path, const char* mode) {
+    wchar_t* wp = _cryo_wpath(path);
+    if (!wp) return NULL;
+    wchar_t wm[8];
+    size_t i = 0;
+    for (; mode[i] && i < 7; i++) wm[i] = (wchar_t)(unsigned char)mode[i];
+    wm[i] = L'\0';
+    FILE* f = _wfopen(wp, wm);
+    free(wp);
+    return f;
+}
+/* Win32 rather than a CRT stat: MinGW.org's headers do not expose
+ * `struct _stat64`, and the three things the callers want — does it exist,
+ * is it a directory, how big is it — are all in one attribute query. */
+static int _cryo_attrs(const char* path, WIN32_FILE_ATTRIBUTE_DATA* out) {
+    wchar_t* wp = _cryo_wpath(path);
+    if (!wp) return -1;
+    BOOL ok = GetFileAttributesExW(wp, GetFileExInfoStandard, out);
+    free(wp);
+    return ok ? 0 : -1;
+}
+static int _cryo_remove(const char* path) {
+    wchar_t* wp = _cryo_wpath(path);
+    if (!wp) return -1;
+    int r = _wremove(wp);
+    free(wp);
+    return r;
+}
+static int _cryo_mkdir(const char* path) {
+    wchar_t* wp = _cryo_wpath(path);
+    if (!wp) return -1;
+    int r = _wmkdir(wp);
+    free(wp);
+    return r;
+}
+#else
+#define _cryo_fopen  fopen
+#define _cryo_remove remove
+#define _cryo_mkdir(p) mkdir((p), 0755)
+#endif
+
 bool cryo_file_exists(const char* path) {
     if (!path) return false;
+#if defined(_WIN32)
+    WIN32_FILE_ATTRIBUTE_DATA d;
+    return _cryo_attrs(path, &d) == 0;
+#else
     struct stat st;
     return stat(path, &st) == 0;
+#endif
 }
 
 bool cryo_is_dir(const char* path) {
     if (!path) return false;
+#if defined(_WIN32)
+    WIN32_FILE_ATTRIBUTE_DATA d;
+    if (_cryo_attrs(path, &d) != 0) return false;
+    return (d.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+#else
     struct stat st;
     if (stat(path, &st) != 0) return false;
-#if defined(_WIN32)
-    return (st.st_mode & _S_IFDIR) != 0;
-#else
     return S_ISDIR(st.st_mode);
 #endif
 }
@@ -784,29 +859,31 @@ CryoArray* cryo_list_dir(const char* path) {
 
 bool cryo_make_dir(const char* path) {
     if (!path) return false;
-#if defined(_WIN32)
-    return _mkdir(path) == 0 || cryo_is_dir(path);
-#else
-    return mkdir(path, 0755) == 0 || cryo_is_dir(path);
-#endif
+    return _cryo_mkdir(path) == 0 || cryo_is_dir(path);
 }
 
 bool cryo_delete_file(const char* path) {
     if (!path || cryo_is_dir(path)) return false;
-    return remove(path) == 0;
+    return _cryo_remove(path) == 0;
 }
 
 int64_t cryo_file_size(const char* path) {
     if (!path) return -1;
+#if defined(_WIN32)
+    WIN32_FILE_ATTRIBUTE_DATA d;
+    if (_cryo_attrs(path, &d) != 0) return -1;
+    return ((int64_t)d.nFileSizeHigh << 32) | (int64_t)d.nFileSizeLow;
+#else
     struct stat st;
     if (stat(path, &st) != 0) return -1;
     return (int64_t)st.st_size;
+#endif
 }
 
 bool cryo_write_file(const char* path, const char* content) {
     if (!path) return false;
     if (!content) content = "";
-    FILE* fp = fopen(path, "wb");
+    FILE* fp = _cryo_fopen(path, "wb");
     if (!fp) return false;
     size_t len = strlen(content);
     size_t wrote = fwrite(content, 1, len, fp);
@@ -816,7 +893,7 @@ bool cryo_write_file(const char* path, const char* content) {
 
 char* cryo_read_file(const char* path) {
     if (!path) return cryo_strdup("");
-    FILE* fp = fopen(path, "rb");
+    FILE* fp = _cryo_fopen(path, "rb");
     if (!fp) return cryo_strdup("");
     fseek(fp, 0, SEEK_END);
     long n = ftell(fp);

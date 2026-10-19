@@ -1620,6 +1620,26 @@ for _nm, _params in (('reverse_str', 's'), ('capitalize', 's'),
 check("utf8: chars() is split(s, \"\")",
       'split(s, "")' in Parser._STR_HELPERS['chars'][2])
 
+# ── round() ties away from zero on node ──
+# test_parity runs the values; this pins the mechanism, because the whole
+# bug was that `round` went straight to Math.round and looked fine.
+print("[round] node breaks ties away from zero, like the VM")
+_rnd_js = gen_node('print(round(-2.5));' + chr(10))
+check("node: round does NOT use Math.round directly",
+      'cryoRound(' in _rnd_js)
+check("node: and the helper is emitted",
+      'function cryoRound' in _rnd_js)
+check("node: the helper mirrors the magnitude",
+      '-Math.round(-x)' in _rnd_js)
+# floor/ceil/abs/sqrt still go straight through — only round was wrong.
+_oth_js = gen_node('print(floor(-2.5)); print(ceil(-2.5)); print(abs(-2));' + chr(10))
+check("node: floor/ceil/abs still map straight to Math",
+      'Math.floor(' in _oth_js and 'Math.ceil(' in _oth_js
+      and 'Math.abs(' in _oth_js)
+check("node: and they did not pick up the round helper",
+      'cryoRound(' not in _oth_js)
+
+
 # ── D1: the character helpers rest on split(), like the rest ──
 print("[D1] char_len / char_at / char_slice")
 for _nm in ('char_len', 'char_at', 'char_slice'):

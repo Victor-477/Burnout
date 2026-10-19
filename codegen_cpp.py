@@ -1434,5 +1434,30 @@ class CodeGenCpp:
             self._err(f"'{c}()' is not yet available in the C++ backend; "
                       f"use --backend go or pyro.")
 
+        # A NAME THAT FALLS THROUGH HERE IS A USER FUNCTION. If it is a
+        # BUILTIN instead, this backend has no implementation for it, and
+        # emitting the call anyway produces C++ that does not compile:
+        #
+        #   build\m1.cpp:8:88: error: 'write_file' was not declared in
+        #                      this scope
+        #
+        # which hands the user a g++ diagnostic about Cryo code they wrote.
+        # 11.33 is the standing lesson that "it generated plausible code" is
+        # not the same as "it compiles"; this is the same mistake with the
+        # compiler's own output as the evidence.
+        #
+        # Refusing by CLASS rather than by name: the two lists above were
+        # written one gap at a time, so every builtin added later arrives
+        # here and leaks again. The filesystem set — write_file, read_file,
+        # file_exists, file_size, delete_file, make_dir, list_dir — is what
+        # found this, and there is no reason to fix only those three.
+        # `fn_ret` is 'unknown' for a name the program did not declare, and
+        # every FunctionDecl is registered before bodies are generated, so
+        # this distinguishes a user function from a builtin reliably.
+        if self.te.fn_ret(c) == 'unknown':
+            from semantic import BUILTINS as _CRYO_BUILTINS
+            if c in _CRYO_BUILTINS:
+                self._err(f"'{c}()' is not yet available in the C++ backend; "
+                          f"use --backend go or pyro.")
         args = ', '.join(self._expr(x) for x in a)
         return f"{cppid(c)}({args})"

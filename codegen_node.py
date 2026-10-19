@@ -121,6 +121,7 @@ class _Types:
                  'starts_with': 'bool', 'ends_with': 'bool', 'repeat': 'string',
                  'index_of': 'int', 'count': 'int', 'sum': 'number',
                  'pad_start': 'string', 'pad_end': 'string',
+                 'url_decode': 'string', 'url_encode': 'string',
                  'keys': 'string[]'}.get(node.callee)
             return b or self.fns.get(node.callee, 'unknown')
         if isinstance(node, StructInit):
@@ -350,6 +351,22 @@ class CodeGenNode:
             H += ["function cryoDiv(a, b) {",
                   "  return a / b;   // float division: +Inf, as the VM does",
                   "}", ""]
+        if 'round' in self._helpers:
+            # HALF AWAY FROM ZERO, which is what the VM does (Go's
+            # math.Round) and therefore what go, c and cpp do too.
+            # JavaScript's Math.round breaks ties toward +Infinity, so
+            # Math.round(-0.5) is -0, Math.round(-1.5) is -1 and
+            # Math.round(-2.5) is -2 — a different answer from every
+            # other engine for every negative half. For an ERP that is a
+            # monetary divergence: a credit or a discount of -0.5 rounds
+            # one way here and the other way everywhere else.
+            #
+            # Mirroring the magnitude keeps -0, NaN and -Infinity alone:
+            # -0 < 0 is false, NaN < 0 is false, and -Math.round(Infinity)
+            # is -Infinity.
+            H += ["function cryoRound(x) {",
+                  "  return x < 0 ? -Math.round(-x) : Math.round(x);",
+                  "}", ""]
         if 'idiv' in self._helpers:
             H += ["function cryoIDiv(a, b) {",
                   "  if (b === 0) throw new Error("
@@ -393,6 +410,39 @@ class CodeGenNode:
                   "  let end = i + n;",
                   "  if (n < 0 || end > s.length) end = s.length;",
                   "  return s.slice(i, end);",
+                  "}", ""]
+        if 'urlcodec' in self._helpers:
+            # url_decode/url_encode work on UTF-8 BYTES on the VMs (natives
+            # 65/66), and a JS string is UTF-16, so both go through a Buffer.
+            # decodeURIComponent is not a substitute: it throws on a
+            # malformed escape, which the VMs pass through untouched.
+            H += ["function cryoUnhex(c) {",
+                  "  if (c >= 48 && c <= 57) return c - 48;",
+                  "  if (c >= 97 && c <= 102) return c - 87;",
+                  "  if (c >= 65 && c <= 70) return c - 55;",
+                  "  return -1;",
+                  "}",
+                  "function cryoUrlDecode(s) {",
+                  "  const b = Buffer.from(String(s), 'utf8'), out = [];",
+                  "  for (let i = 0; i < b.length; i++) {",
+                  "    if (b[i] === 43) { out.push(32); continue; }",
+                  "    if (b[i] === 37 && i + 2 < b.length) {",
+                  "      const hi = cryoUnhex(b[i + 1]), lo = cryoUnhex(b[i + 2]);",
+                  "      if (hi >= 0 && lo >= 0) { out.push(hi * 16 + lo); i += 2; continue; }",
+                  "    }",
+                  "    out.push(b[i]);",
+                  "  }",
+                  "  return Buffer.from(out).toString('utf8');",
+                  "}",
+                  "function cryoUrlEncode(s) {",
+                  "  const b = Buffer.from(String(s), 'utf8'), H = '0123456789ABCDEF';",
+                  "  let out = '';",
+                  "  for (const ch of b) {",
+                  "    if ((ch >= 97 && ch <= 122) || (ch >= 65 && ch <= 90) || (ch >= 48 && ch <= 57) ||",
+                  "        ch === 45 || ch === 95 || ch === 46 || ch === 126) out += String.fromCharCode(ch);",
+                  "    else out += '%' + H[ch >> 4] + H[ch & 15];",
+                  "  }",
+                  "  return out;",
                   "}", ""]
         if 'replace' in self._helpers:
             H += ["function cryoReplace(s, old, rep) {",
@@ -849,10 +899,12 @@ class CodeGenNode:
             return f"Math.trunc(Number({A(0)}))"
         if c == 'to_number':
             return f"Number({A(0)})"
-        if c in ('sqrt', 'pow', 'abs', 'min', 'max', 'floor', 'ceil', 'round'):
+        if c == 'round':
+            self._helpers.add('round')     # not Math.round; see cryoRound
+            return f"cryoRound({args})"
+        if c in ('sqrt', 'pow', 'abs', 'min', 'max', 'floor', 'ceil'):
             jsname = {'sqrt': 'sqrt', 'pow': 'pow', 'abs': 'abs', 'min': 'min',
-                      'max': 'max', 'floor': 'floor', 'ceil': 'ceil',
-                      'round': 'round'}[c]
+                      'max': 'max', 'floor': 'floor', 'ceil': 'ceil'}[c]
             return f"Math.{jsname}({args})"
         if c == 'clamp':
             return f"Math.max({A(1)}, Math.min({A(0)}, {A(2)}))"
@@ -927,6 +979,10 @@ class CodeGenNode:
             return f"String({A(0)}).padEnd({A(1)}, {A(2)})"
         if c == 'concat':
             return f"[...{A(0)}, ...{A(1)}]"
+        if c in ('url_decode', 'url_encode') and len(a) == 1:
+            self._helpers.add('urlcodec')
+            fn = 'cryoUrlDecode' if c == 'url_decode' else 'cryoUrlEncode'
+            return f"{fn}({A(0)})"
         if c == 'count':
             return f"({A(0)}).filter(e=>e==={A(1)}).length"
         if c == 'sum':

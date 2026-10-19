@@ -161,6 +161,19 @@ def agree(label, src, backends=('pyro', 'node', 'go'), expect=None):
         return
     vals = set(got.values())
     detail = '; '.join(f"{b}={v!r}" for b, v in got.items())
+    # A TIMEOUT IS NOT A DISAGREEMENT, and it used to read as one:
+    # under memory pressure a `go run` hung for its full 900s and the
+    # failure printed as "a string index has its own wording" with
+    # go='<no message: <timeout>>' buried in the detail, so it looked
+    # like a wording defect. The case completed in 1.1s on its own.
+    # Still a failure — a hang is not a pass — but named.
+    _stalled = [b for b, v in got.items() if '<timeout>' in str(v)]
+    if _stalled:
+        _who = ', '.join(_stalled)
+        check(label + " — TIMED OUT on " + _who
+              + " (a stall, not a disagreement; re-run it alone)",
+              False, detail)
+        return
     check(label + f"  [{', '.join(got)}]", len(vals) == 1, detail)
     if expect is not None and vals:
         check(label + " — and the agreed output is right",
@@ -532,6 +545,16 @@ def aborts_with(label, src, needle, backends=('pyro', 'node', 'go')):
         print(f"  skip {label} (fewer than two backends available)")
         return
     detail = '; '.join(f"{b}={v!r}" for b, v in got.items())
+    # Same guard as agree(): a stall is not a message mismatch. This is the
+    # function the misleading failure came out of — "a string index has its
+    # own wording" with go='<no message: <timeout>>' reads as a wording
+    # defect when the program actually runs in 1.1s.
+    _stalled = [b for b, v in got.items() if '<timeout>' in str(v)]
+    if _stalled:
+        check(label + ' — TIMED OUT on ' + ', '.join(_stalled)
+              + ' (a stall, not a disagreement; re-run it alone)',
+              False, detail)
+        return
     check(label + f"  [{', '.join(got)}]", len(set(got.values())) == 1, detail)
     check(label + " — and it is the VM's wording",
           all(needle in v for v in got.values()), detail)
@@ -1492,6 +1515,159 @@ aborts_with("char_at past the end aborts, it does not return empty",
 agree("the character helpers reach cpp too",
       u'print(char_len("Ação")); print(char_at("Ação", 2));\nprint("[" + char_slice("Ação", 1, 2) + "]");\n',
       backends=('pyro', 'cpp'), expect=u"4\nã\n[çã]")
+
+# ── ISSUES/22: thrown null renders as "null" ──────────────────
+print("\n── ISSUES/22: thrown null renders as null ──")
+agree("thrown null renders as null (not empty map/struct)",
+      'try { throw(null); } catch (string e) { print("caught: " + e); }\n',
+      backends=('pyro', 'node', 'go'), expect="caught: null")
+
+# ── ISSUES/24: ? on optional ──────────────────────────────────
+print("\n── ISSUES/24: ? propagation over an optional ──")
+agree("? propagation over an optional agrees across backends",
+      'fn lk(int x) -> int? ={ if (x > 0) { return x; } return null; }\n'
+      'fn u(int x) -> int? ={ int v = lk(x)?; return v * 2; }\n'
+      'print(u(21) ?? 0);\n'
+      'print(u(-5) ?? 0);\n',
+      backends=('pyro', 'node', 'go', 'cpp'), expect="42\n0")
+
+# ── go: an untyped array literal takes its type from the slot ──
+# `xs = [];` and `concat(xs, ["a"])` on a `string[]` came out as `[]any{…}`
+# on go, which Go will neither assign to a []string nor unify with one in the
+# generic cryoConcat. Found by the EMP's event queue (nucleo/eventos.cryo).
+print("\n── go: array literals typed by their context ──")
+agree("[] assigned to a typed array, and concat with a literal",
+      'string[] xs = [];\n'
+      'fn f() -> int ={ xs = concat(xs, ["a"]); int n = len(xs); xs = []; return n + len(xs); }\n'
+      'print(f());\n',
+      expect="1")
+agree("concat of two literals into a typed slot",
+      'string[] s = concat(["x"], ["y"]);\nprint(s);\n'
+      'int[] n = [];\nn = concat([1], n);\nprint(n);\n',
+      expect="[x, y]\n[1]")
+agree("an array literal as a typed call argument",
+      'fn total(int[] v) -> int ={ if (len(v) == 0) { return 0; } return v[0] + len(v); }\n'
+      'print(total([]));\nprint(total([2, 3]));\n',
+      expect="0\n4")
+
+# ── go: module vars initialised in source order ──
+# Go runs package-level initialisers before main(), so a module var declared
+# AFTER a top-level statement saw the state from before that statement ran.
+print("\n── go: module var initialisers run in source order ──")
+agree("a module var sees the statements above it",
+      'int[] a = [];\na.push(1);\nint[] b = a;\nprint(len(b));\n',
+      expect="1")
+agree("…including a call with side effects, and functions still see it",
+      'int n = 1;\nfn bump() -> int ={ n = n + 1; return n; }\n'
+      'print("start");\nint m = bump();\nfn get_m() -> int ={ return m; }\n'
+      'map<string,int> d = {"a": n};\nprint(get_m());\nprint(d["a"]);\n',
+      expect="start\n2\n2")
+
+# ── M1: an accented path, as the FILESYSTEM sees it ──────────
+#
+# This cannot be an agree() case, and that is the whole point. The C
+# runtimes passed a UTF-8 path to fopen/stat, which take the process ANSI
+# codepage on Windows, so write_file("Produção.txt", …) created
+# "ProduÃ§Ã£o.txt" on disk — and then file_exists, read_file and file_size
+# ALL AGREED, because they mangled the name the same way. Every assertion a
+# program can make about its own file passed, before the fix and after it.
+#
+# So the test has to look at the DIRECTORY, from outside the program. Each
+# backend writes into a directory of its own and the name on disk is
+# compared — to the other backends and to the literal the program used.
+print("\n── M1: accented paths reach the filesystem intact ──")
+
+_M1_NAME = u"Produ\u00e7\u00e3o.txt"
+_m1_seen = {}
+for _b in ('pyro', 'node', 'go', 'c'):
+    _d = tempfile.mkdtemp(prefix='cryo_m1_')
+    _p = (_d + '/' + _M1_NAME).replace('\\', '/')
+    _src = (u'string p = "%s";\n' % _p
+            + u'print(write_file(p, "conteudo"));\n'
+            + u'print(read_file(p));\n')
+    _o = run_backend(_d, _src, _b)
+    if _o is None:
+        _skipped += 1
+        continue
+    # The program's own view, which was never the problem.
+    check("M1/%s: the program's round trip works" % _b,
+          _o == "true\nconteudo", repr(_o))
+    # The filesystem's view, which was.
+    _names = [n for n in os.listdir(_d) if n.startswith('Produ')]
+    _m1_seen[_b] = _names[0] if len(_names) == 1 else repr(_names)
+
+if len(_m1_seen) >= 2:
+    _detail = '; '.join('%s=%r' % kv for kv in _m1_seen.items())
+    check("M1: every backend writes the SAME name on disk",
+          len(set(_m1_seen.values())) == 1, _detail)
+    check("M1: and it is the name the program asked for",
+          all(v == _M1_NAME for v in _m1_seen.values()), _detail)
+else:
+    print("  skip M1 (fewer than two backends available)")
+
+# ── url_decode / url_encode beyond pyro ──
+# Natives 65/66 existed only on the VMs. go failed to COMPILE any program
+# that used them ("undefined: url_decode") and node threw a ReferenceError
+# only when the call ran — the EMP's form and contract parsers hit both.
+# Both VMs work on UTF-8 BYTES, '+' is a space, and a malformed escape
+# passes through; node's decodeURIComponent would throw on that one.
+print("\n── url_decode / url_encode on go and node ──")
+agree("url_decode: '+', %20 and a multi-byte character",
+      'print(url_decode("a+b%20c"));\nprint(url_decode("Jo%C3%A3o"));\n'
+      'print(url_decode("%41%42"));\n',
+      expect=u"a b c\nJoão\nAB")
+agree("url_decode: a malformed or truncated escape passes through",
+      'print(url_decode("100%zz%"));\nprint(url_decode("%4"));\n'
+      'print(url_decode("x%g1y"));\n',
+      expect="100%zz%\n%4\nx%g1y")
+agree("url_encode: the unreserved set, upper-case hex, UTF-8 bytes",
+      u'print(url_encode("a b&c=d/ã~_.-"));\n',
+      expect="a%20b%26c%3Dd%2F%C3%A3~_.-")
+agree("url_encode then url_decode is the identity",
+      u'string s = "ação + 50% off?";\nprint(url_decode(url_encode(s)) == s);\n'
+      u'print(url_decode(url_encode(s)));\n',
+      expect=u"true\nação + 50% off?")
+
+# ── round() breaks ties AWAY FROM ZERO, on every backend ────
+#
+# node mapped round() straight to JavaScript's Math.round, which breaks ties
+# toward +Infinity: Math.round(-0.5) is -0, Math.round(-1.5) is -1 and
+# Math.round(-2.5) is -2. The VM (Go's math.Round), go, c and cpp all round
+# half away from zero, so node gave a different answer for EVERY negative
+# half — and for an ERP that is a monetary divergence, since credits,
+# returns and discounts are the negative numbers in the system.
+#
+# The positive halves agreed all along, which is why this survived: the
+# obvious cases to try are 0.5, 1.5, 2.5.
+print("\n── round(): ties away from zero ──")
+
+_RND = ('pyro', 'node', 'go')
+
+agree("positive halves round up",
+      'print(round(0.5)); print(round(1.5)); print(round(2.5));\n',
+      backends=_RND, expect="1\n2\n3")
+
+agree("NEGATIVE halves round away from zero, not toward +Inf",
+      'print(round(-0.5)); print(round(-1.5)); print(round(-2.5));\n',
+      backends=_RND, expect="-1\n-2\n-3")
+
+agree("a value that is not a tie is unaffected",
+      'print(round(2.675)); print(round(3.0)); print(round(-3.2));\n',
+      backends=_RND, expect="3\n3\n-3")
+
+agree("floor and ceil were never in question, and still are not",
+      'print(floor(-2.5)); print(ceil(-2.5)); print(floor(2.5)); print(ceil(2.5));\n',
+      backends=_RND, expect="-3\n-2\n2\n3")
+
+agree("round reaches c and cpp with the same rule",
+      'print(round(2.5)); print(round(-2.5)); print(round(-0.5));\n',
+      backends=('pyro', 'c', 'cpp'), expect="3\n-3\n-1")
+
+# round(-0.0) is DELIBERATELY ABSENT. It disagrees four ways across the
+# backends for a reason that has nothing to do with rounding — node prints
+# -0 as 0 while pyro/go/c print -0, and pyro folds `0.0 - 0.0` to -0 —
+# and asserting any of them here would be asserting one of those four as
+# correct before anyone has decided which. ISSUES/33.
 
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))
