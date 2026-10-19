@@ -51,7 +51,9 @@
 | 📄 [`lsp.py`](lsp.py) | **Language Server:** Provides JSON-RPC Language Server Protocol (LSP) diagnostics, hover, and definitions. |
 | 📄 [`disasm_pyro.py`](disasm_pyro.py) | **Disassembler:** Decodes `.pyro` binary files into human-readable assembly listings. |
 | 📁 [`runtime/`](runtime/) | **C Runtime:** Native runtime headers (`cryo_runtime.h`) and implementation (`cryo_runtime.c`). |
+| 📄 [`testrunner.py`](testrunner.py) | **`cryoc test`:** Runs the `test fn` declarations of a file or directory on any backend; resolves imports like a normal compile and builds the Pyro VM on first use. |
 | 📁 [`tests/`](tests/) | **Test Suites:** Integration, parity, bootstrap, AOT, WASM and full-stack test scripts. |
+| 📁 [`docs/`](docs/) | **Design notes:** [`BIBLIOTECAS.md`](docs/BIBLIOTECAS.md), how libraries can be added to Cryo (modules, packages, lowerings, natives, foreign blocks), what each costs, and a proposal for an `@std` standard library. |
 
 ---
 
@@ -132,6 +134,10 @@ print(disassembly_listing)
 Run the test suite from the repository root:
 
 ```bash
+# Everything, once, with a per-suite summary (pass --require NAME to make a
+# suite's skip count as a failure, e.g. --require test_c_vm)
+python Burnout/tests/run_all.py
+
 # Run 530+ frontend, backend, and security assertions
 python Burnout/tests/test_smoke.py
 
@@ -156,6 +162,10 @@ python Burnout/tests/test_frontend.py
 
 # Build a Cryo REST API into an executable, run it, and call every endpoint
 python Burnout/tests/test_api.py
+
+# What a pure-Cryo library tripped over: ns::name in every statement kind,
+# typed literals on go, exponent literals, int overflow parity across engines
+python Burnout/tests/test_library_blockers.py
 ```
 
 Suites skip any leg whose toolchain is missing (C compiler, Node, Go) instead of
