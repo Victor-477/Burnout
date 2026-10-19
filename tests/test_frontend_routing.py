@@ -88,8 +88,11 @@ def test_auto(work):
     print("\n── --backend auto routes a page to the front-end backend ──")
     rc, log, out = compile_it(PAGE, work, '--backend', 'auto')
     check("a page program compiles", rc == 0, log[-300:])
-    # Matched without the accent in "automático": the selection line is
-    # localised and round-trips differently depending on the console codec.
+    # Matched on the backend name alone, not on the sentence around it. That
+    # began as a workaround for "backend automático" — a localised line whose
+    # accent round-tripped differently per console codec — and the line is
+    # plain English now, but keying on `: frontend` is still the right test:
+    # it is the decision being asserted, not the prose reporting it.
     check("auto chooses 'frontend', not go",
           ': frontend' in log and ': go' not in log, log[-300:])
     check("the reason says why the others were rejected",

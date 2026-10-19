@@ -54,7 +54,7 @@ def _compile(work, src, backend, out):
         f.write(src)
     r = subprocess.run([sys.executable, CRYOC, p, '--backend', backend,
                         '-o', out, '--no-banner', '--no-cache'],
-                       capture_output=True, text=True, timeout=900)
+                       capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=900)
     return r
 
 
@@ -73,14 +73,14 @@ def run_backend(work, src, backend, expect_fail=False):
             out = os.path.join(work, 'p.pyro')
             if _compile(work, src, 'pyro', out).returncode != 0:
                 return '<compile failed>'
-            r = subprocess.run([VM, out], capture_output=True, text=True, timeout=300)
+            r = subprocess.run([VM, out], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=300)
         elif backend == 'node':
             if not shutil.which('node'):
                 return None
             out = os.path.join(work, 'p.js')
             if _compile(work, src, 'node', out).returncode != 0:
                 return '<compile failed>'
-            r = subprocess.run(['node', out], capture_output=True, text=True, timeout=300)
+            r = subprocess.run(['node', out], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=300)
         elif backend == 'go':
             if not shutil.which('go'):
                 return None
@@ -89,7 +89,7 @@ def run_backend(work, src, backend, expect_fail=False):
                 return '<compile failed>'
             # `go run`, not just codegen: 11.33 produced perfectly plausible Go
             # that the Go compiler then rejected.
-            r = subprocess.run(['go', 'run', out], capture_output=True, text=True,
+            r = subprocess.run(['go', 'run', out], capture_output=True, text=True, encoding='utf-8', errors='replace',
                                timeout=900, cwd=work)
             if r.returncode != 0 and not expect_fail:
                 return '<go build failed> ' + r.stderr.strip()[:160]
@@ -110,7 +110,7 @@ def run_backend(work, src, backend, expect_fail=False):
                 return None
             r = subprocess.run(['dotnet', 'run', '--project', proj,
                                 '-v', 'quiet', '--nologo'],
-                               capture_output=True, text=True, timeout=600)
+                               capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=600)
         elif backend == 'cpp':
             # find_cxx, not shutil.which: a MinGW that is installed but not on
             # PATH is the normal state of a Windows box, and the compiler
@@ -127,7 +127,7 @@ def run_backend(work, src, backend, expect_fail=False):
             exe = os.path.splitext(out)[0] + EXE
             if not os.path.isfile(exe):
                 return '<compile failed>'
-            r = subprocess.run([exe], capture_output=True, text=True, timeout=300)
+            r = subprocess.run([exe], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=300)
         elif backend == 'c':
             if not shutil.which('gcc'):
                 return None
@@ -136,7 +136,7 @@ def run_backend(work, src, backend, expect_fail=False):
             exe = os.path.splitext(out)[0] + EXE
             if cr.returncode != 0 or not os.path.isfile(exe):
                 return '<compile failed>'
-            r = subprocess.run([exe], capture_output=True, text=True, timeout=300)
+            r = subprocess.run([exe], capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=300)
         else:
             return None
     except subprocess.TimeoutExpired:
@@ -161,6 +161,19 @@ def agree(label, src, backends=('pyro', 'node', 'go'), expect=None):
         return
     vals = set(got.values())
     detail = '; '.join(f"{b}={v!r}" for b, v in got.items())
+    # A TIMEOUT IS NOT A DISAGREEMENT, and it used to read as one:
+    # under memory pressure a `go run` hung for its full 900s and the
+    # failure printed as "a string index has its own wording" with
+    # go='<no message: <timeout>>' buried in the detail, so it looked
+    # like a wording defect. The case completed in 1.1s on its own.
+    # Still a failure — a hang is not a pass — but named.
+    _stalled = [b for b, v in got.items() if '<timeout>' in str(v)]
+    if _stalled:
+        _who = ', '.join(_stalled)
+        check(label + " — TIMED OUT on " + _who
+              + " (a stall, not a disagreement; re-run it alone)",
+              False, detail)
+        return
     check(label + f"  [{', '.join(got)}]", len(vals) == 1, detail)
     if expect is not None and vals:
         check(label + " — and the agreed output is right",
@@ -240,15 +253,37 @@ agree("a typed for-in over an array",
 # matters is that it REFUSES clearly instead of emitting `any` into the output
 # for gcc to choke on — the compiler's job is to report its own errors.
 print("\n── 11.27: the C backend's `any` gap is refused, not leaked ──")
+# ISSUES/26 — this used to assert that a comprehension was REFUSED here.
+# It is not any more: `int[] d = [v * 2 for v in xs]` states its own result
+# type, so the lowering no longer invents `any` and the c backend compiles it
+# (see the comprehension section at the end of this file, which runs it).
+# Pinning the refusal would now be pinning the bug, the same way three smoke
+# assertions pinned the C deny-list in ab20b8b.
+#
+# The `any` GAP is still real and still has to fail closed, so the case moves
+# to a comprehension whose result type genuinely cannot be read: no
+# declaration to take it from, and an element expression that is not just the
+# loop variable.
 _work = tempfile.mkdtemp(prefix='cryo_par_')
-_r = _compile(_work, "int[] xs = [1, 2];\nint[] d = [v * 2 for v in xs];\nprint(d);\n",
+_r = _compile(_work, "int[] xs = [1, 2];\nany z = [v * 2 for v in xs];\nprint(z);\n",
               'c', os.path.join(_work, 'p.c'))
 _msg = (_r.stdout + _r.stderr)
-check("a comprehension is refused by the compiler", _r.returncode != 0, _msg[:200])
+check("an unreadable comprehension type is still refused", _r.returncode != 0,
+      _msg[:200])
 check("with a Cryo diagnostic, not a gcc error",
       'CodeGen Error' in _msg and 'unknown type name' not in _msg, _msg[:300])
-check("and the message says where the `any` came from",
+check("and the message still says where the `any` came from",
       'comprehension' in _msg, _msg[:300])
+# The other surviving source of `any`: a loop variable the program did not
+# declare. cpp's wording names both, and it is the message that tells a user
+# what to do about it.
+_r2 = _compile(_work, 'for (x in ["a", "b"]) { print(x); }\n',
+               'c', os.path.join(_work, 'p2.c'))
+_msg2 = (_r2.stdout + _r2.stderr)
+check("an undeclared loop variable over a literal is refused too",
+      _r2.returncode != 0 and 'CodeGen Error' in _msg2, _msg2[:200])
+check("and that message says to give the variable a type",
+      'declared type' in _msg2 or 'explicit type' in _msg2, _msg2[:300])
 
 # ── 11.34: `??` on a data-carrying enum ────────────────────
 # `??` asks whether a value is null. An `Err("no")` is not null, so the
@@ -510,6 +545,16 @@ def aborts_with(label, src, needle, backends=('pyro', 'node', 'go')):
         print(f"  skip {label} (fewer than two backends available)")
         return
     detail = '; '.join(f"{b}={v!r}" for b, v in got.items())
+    # Same guard as agree(): a stall is not a message mismatch. This is the
+    # function the misleading failure came out of — "a string index has its
+    # own wording" with go='<no message: <timeout>>' reads as a wording
+    # defect when the program actually runs in 1.1s.
+    _stalled = [b for b, v in got.items() if '<timeout>' in str(v)]
+    if _stalled:
+        check(label + ' — TIMED OUT on ' + ', '.join(_stalled)
+              + ' (a stall, not a disagreement; re-run it alone)',
+              False, detail)
+        return
     check(label + f"  [{', '.join(got)}]", len(set(got.values())) == 1, detail)
     check(label + " — and it is the VM's wording",
           all(needle in v for v in got.values()), detail)
@@ -790,6 +835,839 @@ agree("try/catch binds the message string",
       'try { throw("boom"); } catch (string e) { print("caught: " + e); }\n',
       backends=_NEW, expect="caught: boom")
 
+
+# ── data-carrying enums on the C++ backend ───────────────────
+#
+# The cpp backend refused ADTs outright until now. It compiles them to a
+# small class hierarchy behind shared_ptr — C++14 has no std::variant — so
+# these RUN it against pyro rather than inspecting the emitted C++: the
+# point is that the ANSWER agrees, and "it generated plausible C++" is the
+# weaker claim 11.33 already showed can be false.
+#
+# cpp is named explicitly because the default set is pyro/node/go.
+print("\n── data enums on cpp ──")
+_CPPSET = ('pyro', 'cpp')
+
+agree("a variant carrying a payload renders like everywhere else",
+      'enum R { Ok(int), Err(string) }\nR r = Ok(5);\nprint(r);\n',
+      backends=_CPPSET, expect="{tag: Ok, val0: 5}")
+
+agree("a payload-less variant of a DATA enum is a value, not an int",
+      'enum R { Ok(int), None }\nR r = None;\nprint(r);\n',
+      backends=_CPPSET, expect="{tag: None}")
+
+agree("both constructor spellings build the same value",
+      'enum R { Ok(int), Err(string) }\nR a = Ok(7); R b = R_Ok(7);\nprint(a); print(b);\n',
+      backends=_CPPSET, expect="{tag: Ok, val0: 7}\n{tag: Ok, val0: 7}")
+
+agree("match binds the payload",
+      'enum R { Ok(int), Err(string) }\nR r = Err(\"bad\");\nmatch r { Ok(v) => { print(v); } Err(e) => { print(\"err:\" + e); } }\n',
+      backends=_CPPSET, expect="err:bad")
+
+agree("a wildcard arm catches the rest",
+      'enum R { Ok(int), Err(string) }\nR r = Err(\"x\");\nmatch r { Ok(v) => { print(\"ok\"); } _ => { print(\"other\"); } }\n',
+      backends=_CPPSET, expect="other")
+
+agree("several payloads bind in order",
+      'enum P { Pt(int,int), Z }\nP p = Pt(3,4);\nprint(p);\nmatch p { Pt(x,y) => { print(x + y); } Z => { print(0); } }\n',
+      backends=_CPPSET, expect="{tag: Pt, val0: 3, val1: 4}\n7")
+
+# The subject goes into a temporary and is evaluated ONCE. An if/else
+# chain over the raw expression would call mk() again per arm —
+# silently, and visible only when the subject has a side effect.
+agree("the match subject is evaluated once",
+      'enum R { Ok(int), Err(string) }\nfn mk() -> R ={ print(\"called\"); return Ok(1); }\nmatch mk() { Ok(v) => { print(v); } Err(e) => { print(e); } }\n',
+      backends=_CPPSET, expect="called\n1")
+
+agree("match nests without the temporaries colliding",
+      'enum R { Ok(int), Err(string) }\nR a = Ok(2);\nmatch a { Ok(v) => { match a { Ok(w) => { print(v + w); } _ => { print(0); } } } _ => { print(9); } }\n',
+      backends=_CPPSET, expect="4")
+
+agree("enums survive in an array",
+      'enum R { Ok(int), Err(string) }\nR[] rs = [Ok(1), Err(\"x\")];\nfor (R r in rs) { match r { Ok(v) => { print(v); } Err(e) => { print(e); } } }\n',
+      backends=_CPPSET, expect="1\nx")
+
+# ── first-class functions on the C++ backend ─────────────────
+#
+# `fn(T)->R` maps to std::function and a lambda literal to a C++ lambda
+# capturing BY VALUE. By value is not a style choice: a Cryo lambda can
+# outlive the scope that built it — stored in a std::function and returned
+# — and `[&]` would leave it holding references to dead locals. That fails
+# later and elsewhere, never at the capture, so "returned closure" below is
+# the case that actually tests it.
+print("\n── first-class functions on cpp ──")
+
+agree("a lambda literal runs",
+      'fn(int)->int f = (int v) => v + 1;\nprint(f(41));\n',
+      backends=_CPPSET, expect="42")
+
+agree("a named function is a value",
+      'fn dbl(int n) -> int ={ return n*2; }\nfn(int)->int f = dbl;\nprint(f(21));\n',
+      backends=_CPPSET, expect="42")
+
+agree("a lambda captures an enclosing local",
+      'int base = 10;\nfn(int)->int f = (int v) => v + base;\nprint(f(5));\n',
+      backends=_CPPSET, expect="15")
+
+agree("a returned closure outlives the frame that built it",
+      'fn mk(int b) -> fn(int)->int ={ return (int v) => v + b; }\nfn(int)->int g = mk(100);\nprint(g(5));\n',
+      backends=_CPPSET, expect="105")
+
+agree("a function is passed as a parameter",
+      'fn apply(fn(int)->int f, int x) -> int ={ return f(x); }\nprint(apply((int v) => v * 3, 7));\n',
+      backends=_CPPSET, expect="21")
+
+agree("functions live in an array",
+      '(fn(int)->int)[] ops = [(int v) => v + 1, (int v) => v * 2];\nprint(ops[0](10)); print(ops[1](10));\n',
+      backends=_CPPSET, expect="11\n20")
+
+agree("map / filter / reduce",
+      'int[] xs=[1,2,3,4];\nprint(map(xs, (int v) => v * 2));\nprint(filter(xs, (int v) => v % 2 == 0));\nprint(reduce(xs, (int a, int b) => a + b, 0));\n',
+      backends=_CPPSET, expect="[2, 4, 6, 8]\n[2, 4]\n10")
+
+# ── optionals and `?` propagation on the C++ backend ─────────
+#
+# Two defects sat on top of each other here. The cpp backend never wrapped
+# a bare value into an optional, so ANY function declared `-> T?` failed to
+# compile — `return x;` emitted an int64_t where a shared_ptr was wanted.
+# That made `?` over an optional untestable until it was fixed.
+#
+# `?` over a Result is compared against pyro; `?` over an OPTIONAL is
+# compared against go, because pyro gets it wrong — see ISSUES/24.
+print("\n── optionals and ? on cpp ──")
+_CPPGO = ('go', 'cpp')
+
+agree("a function may return a bare value as an optional",
+      'fn f(int x) -> int? ={ return x; }\nprint(f(7) ?? 0);\n',
+      backends=_CPPSET, expect="7")
+
+agree("and may return null",
+      'fn f(int x) -> int? ={ if (x > 0) { return x; } return null; }\nprint(f(7) ?? 0); print(f(-1) ?? 99);\n',
+      backends=_CPPSET, expect="7\n99")
+
+agree("`?` over a Result yields the payload",
+      'enum Res { Ok(int), Err(string) }\nfn p(int x) -> Res ={ if (x > 0) { return Ok(x); } return Err(\"neg\"); }\nfn u(int x) -> Res ={ int v = p(x)?; return Ok(v * 10); }\nmatch u(5) { Ok(v) => { print(v); } Err(e) => { print(\"E:\" + e); } }\n',
+      backends=_CPPSET, expect="50")
+
+agree("`?` over a Result returns the error early",
+      'enum Res { Ok(int), Err(string) }\nfn p(int x) -> Res ={ if (x > 0) { return Ok(x); } return Err(\"neg\"); }\nfn u(int x) -> Res ={ int v = p(x)?; return Ok(v * 10); }\nmatch u(-1) { Ok(v) => { print(v); } Err(e) => { print(\"E:\" + e); } }\n',
+      backends=_CPPSET, expect="E:neg")
+
+agree("`?` over an optional short-circuits on null",
+      'fn lk(int x) -> int? ={ if (x > 0) { return x; } return null; }\nfn u(int x) -> int? ={ int v = lk(x)?; return v * 2; }\nprint(u(21) ?? 0); print(u(-1) ?? 0);\n',
+      backends=_CPPGO, expect="42\n0")
+
+# ── text helpers added to the language core ──────────────────
+#
+# These are DESUGARINGS in Cryo/parser.py, not natives: one Cryo
+# implementation is injected as a synthetic function and every backend
+# compiles it (golden rule 2). So the interesting property is not that any
+# one backend is right — it is that a single source produced the same
+# answer through six independent code generators.
+#
+# Each case pins a decision that could defensibly have gone the other way,
+# because those are what a later "cleanup" would quietly change.
+print("\n── text helpers (front-end desugarings) ──")
+
+# The three fast backends for the per-helper cases, and ONE composite case on
+# cpp below. Every helper is built from the same constructs — while, string
+# indexing, len/substr/contains/find — so a construct cpp lacked would fail all
+# of them alike; running ten g++ builds to learn that once is a poor trade in a
+# suite people have to be willing to run.
+_ALLTEXT = ('pyro', 'node', 'go')
+
+agree("is_digit is whole-string, and empty is false",
+      'print(is_digit("123")); print(is_digit("12a")); print(is_digit(""));\n',
+      backends=_ALLTEXT, expect="true\nfalse\nfalse")
+
+agree("is_alpha rejects a digit",
+      'print(is_alpha("abc")); print(is_alpha("ab1"));\n',
+      backends=_ALLTEXT, expect="true\nfalse")
+
+agree("is_alnum accepts both, rejects punctuation",
+      'print(is_alnum("a1")); print(is_alnum("a-1"));\n',
+      backends=_ALLTEXT, expect="true\nfalse")
+
+agree("is_space agrees with trim about whitespace",
+      'print(is_space("  ")); print(is_space(" x"));\n',
+      backends=_ALLTEXT, expect="true\nfalse")
+
+agree("reverse_str",
+      'print(reverse_str("cryo"));\n',
+      backends=_ALLTEXT, expect="oyrc")
+
+agree("replace_first replaces only the first",
+      'print(replace_first("a-b-c", "-", "+"));\n',
+      backends=_ALLTEXT, expect="a+b-c")
+
+agree("replace_first with an empty needle returns the string unchanged",
+      'print(replace_first("abc", "", "+"));\n',
+      backends=_ALLTEXT, expect="abc")
+
+agree("count_of does not count overlaps",
+      'print(count_of("aaaa", "aa")); print(count_of("abc", "z"));\n',
+      backends=_ALLTEXT, expect="2\n0")
+
+agree("last_index_of finds the LAST, and -1 when absent",
+      'print(last_index_of("a/b/c", "/")); print(last_index_of("abc", "z"));\n',
+      backends=_ALLTEXT, expect="3\n-1")
+
+agree("the helpers compose",
+      'print(reverse_str(replace_first("ab-cd", "-", "+")));\n',
+      backends=_ALLTEXT, expect="dc+ba")
+
+# One composite case DOES go through cpp: it calls every helper, so the
+# synthetic functions all get compiled by a real C++ compiler and their
+# answers compared, at the cost of a single build.
+agree("every text helper compiles and agrees on cpp too",
+      'print(is_digit("12")); print(is_alpha("ab")); print(is_alnum("a1"));\nprint(is_space(" ")); print(reverse_str("ab"));\nprint(replace_first("a-b-c", "-", "+"));\nprint(count_of("aaaa", "aa")); print(last_index_of("a/b", "/"));\n',
+      backends=('pyro', 'cpp'),
+      expect="true\ntrue\ntrue\ntrue\nba\na+b-c\n2\n1")
+
+# ── text helpers, second set: affixes, case, words ───────────
+#
+# Same mechanism as above, so the same trade: the per-helper cases run on the
+# three fast backends and one composite case goes through cpp.
+#
+# Every case here pins a DECISION rather than an implementation. The ones most
+# worth having in writing:
+#   - is_blank("") is true while is_digit("") is false. Different questions:
+#     "does every character qualify" is vacuous on "", "is there nothing of
+#     substance here" is emphatically yes.
+#   - capitalize lowercases the tail, so "mcDONALD" becomes "Mcdonald".
+#   - strip_prefix returns the string unchanged on a miss and on an empty
+#     affix, matching replace_first's empty-needle rule.
+#   - word_count counts RUNS of non-whitespace, so repeated separators do not
+#     invent empty words the way len(split(s, " ")) would.
+print("\n── text helpers: affixes, case, words ──")
+
+agree("is_blank is true for empty and for whitespace, false otherwise",
+      'print(is_blank("")); print(is_blank("  \\t ")); print(is_blank(" x "));\n',
+      backends=_ALLTEXT, expect="true\ntrue\nfalse")
+
+agree("strip_prefix strips, and leaves a miss or an empty affix alone",
+      'print(strip_prefix("foobar", "foo")); print(strip_prefix("foobar", "baz"));\nprint(strip_prefix("foobar", ""));\n',
+      backends=_ALLTEXT, expect="bar\nfoobar\nfoobar")
+
+agree("strip_suffix strips from the end only",
+      'print(strip_suffix("foobar", "bar")); print(strip_suffix("foobar", "foo"));\n',
+      backends=_ALLTEXT, expect="foo\nfoobar")
+
+agree("capitalize lowercases the tail, and leaves empty empty",
+      'print(capitalize("mcDONALD")); print(capitalize("x")); print("[" + capitalize("") + "]");\n',
+      backends=_ALLTEXT, expect="Mcdonald\nX\n[]")
+
+agree("equals_ignore_case",
+      'print(equals_ignore_case("HeLLo", "hello")); print(equals_ignore_case("a", "b"));\n',
+      backends=_ALLTEXT, expect="true\nfalse")
+
+agree("replace_last replaces only the last",
+      'print(replace_last("a-b-c", "-", "+"));\n',
+      backends=_ALLTEXT, expect="a-b+c")
+
+agree("replace_last leaves an empty needle and a miss alone",
+      'print(replace_last("a-b-c", "", "+")); print(replace_last("abc", "-", "+"));\n',
+      backends=_ALLTEXT, expect="a-b-c\nabc")
+
+agree("word_count counts runs, not separators",
+      'print(word_count("  one   two  three ")); print(word_count("solo")); print(word_count(""));\n',
+      backends=_ALLTEXT, expect="3\n1\n0")
+
+agree("common_prefix is character-wise, and empty when there is none",
+      'print(common_prefix("prefix_a", "prefix_b")); print(common_prefix("abc", "abcdef"));\nprint("[" + common_prefix("abc", "xyz") + "]");\n',
+      backends=_ALLTEXT, expect="prefix_\nabc\n[]")
+
+agree("the second set composes with the first",
+      'print(reverse_str(capitalize(strip_suffix("hello!", "!"))));\n',
+      backends=_ALLTEXT, expect="olleH")
+
+agree("every helper in the second set compiles and agrees on cpp too",
+      'print(is_blank(" ")); print(strip_prefix("foobar", "foo"));\nprint(strip_suffix("foobar", "bar")); print(capitalize("mcDONALD"));\nprint(equals_ignore_case("A", "a")); print(replace_last("a-b-c", "-", "+"));\nprint(word_count("  one   two ")); print(common_prefix("abc", "abd"));\n',
+      backends=('pyro', 'cpp'),
+      expect="true\nbar\nfoo\nMcdonald\ntrue\na-b+c\n2\nab")
+
+# ── a string index on the C backend ──────────────────────────
+#
+# The helpers above walk a string with `s[i]`, and the C backend compiled that
+# to cryo_array_get() — the ARRAY accessor — which read an array header off a
+# char pointer and SEGFAULTED (0xC0000005). It stayed invisible because no
+# local gcc worked, so every `c` row in this suite was skipped; fixing the
+# toolchain is what surfaced seven failures here at once.
+#
+# The second case is the one that matters most. The obvious repair is
+# cryo_str_slice(s, i, i+1), and slice CLAMPS — so `"abc"[9]` would have been
+# "" on c while every other engine aborts. An out-of-range read is the one
+# direction a bounds check must not fail, so this pins the abort and not just
+# the happy path.
+print("\n── string indexing, and the C backend's array accessor ──")
+
+agree("s[i] is a one-character string, on c as everywhere else",
+      'string s = "abc"; print(s[0]); print(s[1]); print(s[2]);\n',
+      backends=('pyro', 'node', 'go', 'c'), expect="a\nb\nc")
+
+aborts_with("an out-of-range string index aborts rather than returning empty",
+            'string s = "abc"; print(s[9]);\n',
+            '[Cryo Security] IndexError: string index out of bounds',
+            backends=('pyro', 'node', 'go', 'c'))
+
+agree("the second set of helpers agrees on c too",
+      'print(is_blank("  ")); print(capitalize("mcDONALD"));\nprint(strip_prefix("foobar", "foo")); print(replace_last("a-b-c", "-", "+"));\nprint(word_count("  one   two ")); print(common_prefix("abc", "abd"));\n',
+      backends=('pyro', 'node', 'go', 'c'),
+      expect="true\nMcdonald\nbar\na-b+c\n2\nab")
+
+# ── nine builtins the C backend refused but could already compile ──
+#
+# clamp, sign, gcd, hypot, starts_with, ends_with, repeat, pad_start and
+# pad_end were implemented by ISSUES/09 — runtime helpers, codegen dispatch
+# and type inference, all present — and left on `_call`'s deny-list, which
+# runs first. So the C backend refused nine builtins it could compile, and
+# the code that compiles them was unreachable for the whole of Phase 10.4.
+#
+# Found because strip_prefix/strip_suffix lower to starts_with/ends_with: a
+# front-end desugaring inherited a refusal that had no reason left.
+#
+# Two cases rather than nine, to keep this to two gcc builds: the nine share
+# nothing but the deny-list, so a name still on it fails its group outright.
+print("\n── builtins the C backend refused but had implemented ──")
+
+agree("starts_with / ends_with / repeat / pad_start / pad_end on c",
+      'print(starts_with("foobar", "foo")); print(ends_with("foobar", "bar"));\nprint(repeat("ab", 3)); print(pad_start("7", 3, "0")); print(pad_end("7", 3, "0"));\n',
+      backends=('pyro', 'node', 'go', 'c'),
+      expect="true\ntrue\nababab\n007\n700")
+
+agree("clamp / sign / gcd / hypot on c",
+      'print(clamp(5, 1, 3)); print(clamp(0, 1, 3)); print(sign(-7)); print(sign(0));\nprint(gcd(12, 18)); print(hypot(3.0, 4.0));\n',
+      backends=('pyro', 'node', 'go', 'c'),
+      expect="3\n1\n-1\n0\n6\n5")
+
+# ── a comprehension containing a unary operator ──────────────
+#
+# `_extract_identifiers` (Cryo/parser.py), the walker that finds what a
+# comprehension CAPTURES, read `node.expr` on a UnaryExpr whose field is
+# `operand`. So `[-x for x in xs]` and `[x for x in xs if !flag]` aborted the
+# compiler with "[Internal Error] 'UnaryExpr' object has no attribute 'expr'"
+# — on input the analyser accepts. The neighbouring Spawn/Await/Unwrap/Try
+# branch genuinely does use `expr`, which is how the wrong name looked right.
+#
+# These ran on pyro and node only until ISSUES/26 landed, because the go
+# backend did not compile ANY list comprehension over an array — the
+# synthetic function came out typed `any`/`[]any`. go is in the list now;
+# changing the tuple was the only edit the note had promised.
+#
+# No parity case ran a comprehension on go before, which is why both bugs
+# survived: test_smoke calls the generators directly, so "it generated
+# plausible Go" is all it could check, and 11.33 is the standing proof that
+# the claim can be false.
+print("\n── comprehensions with unary operators ──")
+
+agree("a comprehension negating its element",
+      'int[] xs = [1, 2, 3]; int[] ys = [-x for x in xs]; print(ys);\n',
+      backends=('pyro', 'node', 'go'), expect="[-1, -2, -3]")
+
+agree("a comprehension whose guard is a negation",
+      'int[] xs = [1, 2, 3]; bool f = false; int[] ys = [x for x in xs if !f];\nprint(ys);\n',
+      backends=('pyro', 'node', 'go'), expect="[1, 2, 3]")
+
+agree("and the guard really does filter",
+      'int[] xs = [1, 2, 3]; bool f = true; int[] ys = [x for x in xs if !f];\nprint(ys);\n',
+      backends=('pyro', 'node', 'go'), expect="[]")
+
+# ── ISSUES/26: comprehensions, on every backend that has types ──────
+#
+# A comprehension lowers to a synthetic function, and every part of it used
+# to be typed `any`:
+#
+#   fn __list_comp_1(any xs) -> any[] { any[] __res = []; … }
+#
+# pyro and node are dynamically typed, so `any` cost them nothing and the
+# feature looked finished. go is not, and emitted Go the Go compiler
+# rejected — "cannot use __list_comp_1(xs) (value of type []any) as []int64
+# value" — while c and cpp refused the construct outright, having no `any` at
+# all. A headline 10.3 feature worked on two backends out of six.
+#
+# The fix stopped the lowering saying `any` where the PROGRAM had already
+# said something better: the declaration being initialised states the result
+# type, a range is always int, and an array's element type types the loop
+# variable. Nothing is inferred — where the knowledge runs out the lowering
+# is unchanged, which is why nothing that worked before could start failing.
+#
+# These run on pyro/node/go per case, with ONE composite case through c and
+# cpp: the constructs are shared, so a backend missing one fails all of them
+# alike, and two more native builds per case is a poor trade in a suite
+# people have to be willing to run.
+print("\n── ISSUES/26: comprehensions across the typed backends ──")
+
+_COMP = ('pyro', 'node', 'go')
+
+agree("a comprehension over a named array",
+      'int[] xs = [1, 2, 3]; int[] ys = [x for x in xs]; print(ys);\n',
+      backends=_COMP, expect="[1, 2, 3]")
+
+agree("…with an expression per element",
+      'int[] xs = [1, 2, 3]; int[] ys = [x * 2 for x in xs]; print(ys);\n',
+      backends=_COMP, expect="[2, 4, 6]")
+
+agree("…over an array LITERAL, which is bound to a typed local first",
+      'int[] ys = [x * 2 for x in [1, 2, 3, 4] if x % 2 == 0]; print(ys);\n',
+      backends=_COMP, expect="[4, 8]")
+
+agree("…over a range, whose loop variable no longer has to be written out",
+      'int[] ys = [x * 2 for x in 1..=3]; print(ys);\n',
+      backends=_COMP, expect="[2, 4, 6]")
+
+agree("…with the loop variable declared, as before",
+      'int[] ys = [x * x for int x in 1..=5 if x % 2 == 0]; print(ys);\n',
+      backends=_COMP, expect="[4, 16]")
+
+agree("…over strings, through a call",
+      'string[] ss = ["a", "b"]; string[] up = [upper(s) for s in ss]; print(up);\n',
+      backends=_COMP, expect="[A, B]")
+
+# The literal's own contents may name things that DO have to be captured, so
+# the capture scan reads the original expression and not the temp it is bound
+# to. Getting this wrong passed `__it_1` in as a parameter.
+agree("…over a literal built from captured names",
+      'int a = 7; int b = 9; int[] ys = [v + 1 for v in [a, b]]; print(ys);\n',
+      backends=_COMP, expect="[8, 10]")
+
+agree("a map comprehension",
+      'int[] xs = [1, 2, 3]; map<int,int> m = {x: x * 2 for x in xs}; print(m);\n',
+      backends=_COMP, expect="{1: 2, 2: 4, 3: 6}")
+
+agree("comprehensions compile and agree on c and cpp too",
+      'int[] xs = [1, 2, 3];\nint[] a = [x for x in xs];\nint[] b = [x * 2 for x in [1, 2, 3, 4] if x % 2 == 0];\nint[] c = [x * 2 for x in 1..=3];\nmap<int,int> m = {x: x * 2 for x in xs};\nprint(a); print(b); print(c); print(m);\n',
+      backends=('pyro', 'c', 'cpp'),
+      expect="[1, 2, 3]\n[4, 8]\n[2, 4, 6]\n{1: 2, 2: 4, 3: 6}")
+
+# ── the two defects the literal-binding fix also closed ─────
+#
+# `for (int x in [1, 2, 3])` is not a comprehension, and it was broken in the
+# same place for the same reason: the c backend has no inline array literal
+# as an expression ("expected expression before ')'"), and cpp emitted
+# `for (… : *(cryo::arr<…>(…)))`, dereferencing a temporary shared_ptr whose
+# vector was already freed — so it printed GARBAGE rather than failing to
+# build. pyro, node and go were fine, so the two engines that disagreed were
+# the two nobody could test without a C compiler.
+agree("a plain for-each over an array literal",
+      'for (int x in [1, 2, 3]) { print(x); }\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp'), expect="1\n2\n3")
+
+# A module-level map initialised from anything that is not a literal lost its
+# initialiser on the c backend: `cryo_map_new()` was emitted and the
+# expression discarded, so this printed `{}` there and the right thing
+# everywhere else. `_var` had the guard for locals; `_module_var` did not.
+# Not a build failure and not a refusal — a wrong answer.
+agree("a module-level map copied from another map",
+      'map<int,int> a = {1: 2, 3: 4}; map<int,int> b = a; print(b);\n',
+      backends=('pyro', 'node', 'go', 'c'), expect="{1: 2, 3: 4}")
+
+agree("a module-level map from a function's return",
+      'fn mk() -> map<int,int> ={ map<int,int> r = {}; r[5] = 6; return r; }\nmap<int,int> c = mk(); print(c);\n',
+      backends=('pyro', 'node', 'go', 'c'), expect="{5: 6}")
+
+# ── C4: parsing that returns instead of killing the process ──
+#
+# to_int("abc") and to_number("abc") ABORT, and the abort is not catchable:
+# `try { to_int(s) } catch (string e)` does not run, the process ends. For a
+# server parsing user input that is a denial of service — one bad form field
+# ends the request loop for every tenant.
+#
+# parse_int/parse_number are front-end desugarings returning an optional, so
+# `parse_int(s) ?? 0` is the whole idiom. The validator is deliberately a
+# SUBSET of the native's accept set: more permissive and the call it guards
+# would abort, which is the thing being fixed.
+#
+# NOT on the c backend, and that is a real gap rather than an omission: the
+# C backend refuses to_int()/to_number() on a string outright, because its
+# runtime has no parse helper, so the desugaring has nothing to lower onto
+# there. Recorded as ISSUES/27.
+print("\n── C4: parse_int / parse_number ──")
+
+_PARSE = ('pyro', 'node', 'go')
+
+agree("parse_int takes what to_int takes",
+      'print(parse_int("42") ?? -1); print(parse_int("-42") ?? -1);\nprint(parse_int("+42") ?? -1); print(parse_int(" 7 ") ?? -1);\nprint(parse_int("007") ?? -1); print(parse_int("0") ?? -1);\n',
+      backends=_PARSE, expect="42\n-42\n42\n7\n7\n0")
+
+agree("…and returns null for what it does not, instead of aborting",
+      'print(parse_int("") ?? -1); print(parse_int("abc") ?? -1);\nprint(parse_int("4.2") ?? -1); print(parse_int("0x10") ?? -1);\nprint(parse_int("-") ?? -1);\n',
+      backends=_PARSE, expect="-1\n-1\n-1\n-1\n-1")
+
+# The overflow half, which is the part a character-only validator would miss:
+# to_int aborts on 99999999999999999999 exactly as it does on "abc".
+#
+# pyro and go ONLY. Not a parse_int defect — the node backend cannot
+# represent int64 at all, because a Cryo `int` is a JavaScript number there:
+# `int a = 9223372036854775807; print(a)` already prints
+# 9223372036854775000 with no conversion involved. Recorded as ISSUES/28.
+agree("the exact int64 limits parse, and one past them does not",
+      'print(parse_int("9223372036854775807") ?? -1);\nprint(parse_int("9223372036854775808") ?? -1);\nprint(parse_int("-9223372036854775808") ?? -1);\nprint(parse_int("-9223372036854775809") ?? -1);\nprint(parse_int("99999999999999999999") ?? -1);\n',
+      backends=('pyro', 'go'),
+      expect="9223372036854775807\n-1\n-9223372036854775808\n-1\n-1")
+
+# Leading zeros are stripped BEFORE the length test, or a padded field would
+# read as an overflow purely for being long.
+agree("a zero-padded number is its value, not an overflow",
+      'print(parse_int("00000000000000000000042") ?? -1);\n',
+      backends=_PARSE, expect="42")
+
+agree("parse_number takes plain decimals",
+      'print(parse_number("4.2") ?? -1.0); print(parse_number("-3.5") ?? -1.0);\nprint(parse_number(".5") ?? -1.0); print(parse_number("5.") ?? -1.0);\n',
+      backends=_PARSE, expect="4.2\n-3.5\n0.5\n5")
+
+# Narrower than to_number ON PURPOSE: no exponent, no NaN/Inf. to_number
+# rejects "1e999" for being out of range, and reproducing that here would
+# mean encoding the double range in the validator.
+agree("…and refuses everything else, exponents included",
+      'print(parse_number("abc") ?? -1.0); print(parse_number("1e3") ?? -1.0);\nprint(parse_number("1.2.3") ?? -1.0); print(parse_number(".") ?? -1.0);\nprint(parse_number("") ?? -1.0);\n',
+      backends=_PARSE, expect="-1\n-1\n-1\n-1\n-1")
+
+agree("parse_int and parse_number reach cpp too",
+      'print(parse_int("42") ?? -1); print(parse_int("abc") ?? -1);\nprint(parse_number("4.2") ?? -1.0); print(parse_number("x") ?? -1.0);\n',
+      backends=('pyro', 'cpp'), expect="42\n-1\n4.2\n-1")
+
+# The whole point: the program keeps running. An abort would end it before
+# the second line, so the second line IS the assertion.
+agree("a rejected parse does not end the program",
+      'int v = parse_int("nao-e-int") ?? 0;\nprint(v); print("ainda vivo");\n',
+      backends=_PARSE, expect="0\nainda vivo")
+
+# ── C1: checked_add / checked_sub / checked_mul ──────────────
+#
+# `a + b` itself still means two things — the compiled backends abort and
+# both VMs wrap silently — and that is ISSUES/29, which needs a safe-mode
+# bit the .pyro format does not have. These are requirement C1's other
+# accepted answer, and they agree everywhere today.
+#
+# The cases are BOUNDARIES, not samples. A guard that is one off at the
+# limit is indistinguishable from a correct one on ordinary input, and
+# ordinary input is all anybody tries.
+print("\n── C1: checked arithmetic ──")
+
+_CK = ('pyro', 'node', 'go')
+_MXMN = 'int MX = 9223372036854775807;\nint MN = -9223372036854775807 - 1;\n'
+
+agree("checked_add at and past the top",
+      _MXMN + 'print(checked_add(2, 3) ?? -999); print(checked_add(MX, 0) ?? -999);\nprint(checked_add(MX, 1) ?? -999);\n',
+      backends=('pyro', 'go'), expect="5\n9223372036854775807\n-999")
+
+agree("checked_add at and past the bottom",
+      _MXMN + 'print(checked_add(MN, 1) ?? -999); print(checked_add(MN, -1) ?? -999);\n',
+      backends=('pyro', 'go'), expect="-9223372036854775807\n-999")
+
+agree("checked_sub at both ends",
+      _MXMN + 'print(checked_sub(10, 3) ?? -999); print(checked_sub(MN, 1) ?? -999);\nprint(checked_sub(MX, -1) ?? -999); print(checked_sub(0, MN) ?? -999);\n',
+      backends=('pyro', 'go'), expect="7\n-999\n-999\n-999")
+
+# MIN * -1 is the case a guard written over absolute values gets wrong,
+# because abs(MIN) is itself the overflow. MIN * 1 is NOT an overflow and
+# must come back.
+agree("checked_mul and the MIN * -1 asymmetry",
+      _MXMN + 'print(checked_mul(6, 7) ?? -999); print(checked_mul(MX, 2) ?? -999);\nprint(checked_mul(MN, -1) ?? -999); print(checked_mul(-1, MN) ?? -999);\nprint(checked_mul(MN, 1) ?? -999);\n',
+      backends=('pyro', 'go'),
+      expect="42\n-999\n-999\n-999\n-9223372036854775808")
+
+# The sharpest pair in the whole set: -2^62 * 2 is EXACTLY MIN and must be
+# allowed, one step further must not. A conservative guard passes every
+# other case here and fails this one.
+agree("the guard is exact at MIN, not merely conservative",
+      'print(checked_mul(-4611686018427387904, 2) ?? -999);\nprint(checked_mul(-4611686018427387905, 2) ?? -999);\nprint(checked_mul(4611686018427387903, 2) ?? -999);\nprint(checked_mul(4611686018427387904, 2) ?? -999);\n',
+      backends=('pyro', 'go'),
+      expect="-9223372036854775808\n-999\n9223372036854775806\n-999")
+
+agree("zero short-circuits before any sign analysis",
+      _MXMN + 'print(checked_mul(0, MN) ?? -999); print(checked_mul(MN, 0) ?? -999);\n',
+      backends=('pyro', 'go'), expect="0\n0")
+
+agree("the sign combinations",
+      'print(checked_mul(-3, -4) ?? -999); print(checked_mul(3, -4) ?? -999);\nprint(checked_mul(-3, 4) ?? -999); print(checked_add(-5, -7) ?? -999);\n',
+      backends=_CK, expect="12\n-12\n-12\n-12")
+
+agree("checked arithmetic reaches cpp too",
+      'print(checked_add(2, 3) ?? -999); print(checked_mul(6, 7) ?? -999);\nprint(checked_mul(4611686018427387904, 2) ?? -999);\n',
+      backends=('pyro', 'cpp'), expect="5\n42\n-999")
+
+# ── the text helpers on text that is not ASCII ───────────────
+#
+# Every text case above is ASCII, which is exactly how four of these
+# helpers shipped corrupting UTF-8. They indexed with s[i] — a BYTE — so
+# reverse_str("Ação") came back as "o\xc2\xa3\xc3\x83A" and
+# common_prefix("ação", "açúcar") as the bytes 61 C3 A7 C3: a dangling lead
+# byte, because ã and ú SHARE one and the loop stopped between the halves of
+# a character. Fixed by walking split(s, ""), which is character-aware.
+#
+# These cases are the ones that were missing. The output is compared across
+# backends as usual, so a backend whose split() is byte-oriented fails here
+# rather than silently producing different mojibake.
+print("\n── text helpers on non-ASCII input ──")
+
+_U8 = ('pyro', 'node', 'go')
+
+agree("reverse_str reverses characters, not bytes",
+      u'print(reverse_str("Ação"));\n',
+      backends=_U8, expect=u"oãçA")
+
+agree("capitalize upper-cases a multi-byte first character",
+      u'print(capitalize("ótimo"));\n',
+      backends=_U8, expect=u"Ótimo")
+
+agree("title_case too",
+      u'print(title_case("ação ótima"));\n',
+      backends=_U8, expect=u"Ação Ótima")
+
+# The case that would not have been predicted by reading the loop: a shared
+# LEAD byte. ã is C3 A3 and ú is C3 BA, so a byte-wise comparison matches
+# the C3 and then stops, returning half a character.
+agree("common_prefix stops at a character, not inside one",
+      u'print("[" + common_prefix("ação", "açúcar") + "]");\n',
+      backends=_U8, expect=u"[aç]")
+
+agree("…and the result is a whole number of characters",
+      u'print(char_len(common_prefix("ação", "açúcar")));\n',
+      backends=_U8, expect="2")
+
+# split("", ...) is the primitive all four now rest on, so pin that it is
+# character-aware rather than trusting it.
+agree("split with an empty separator yields characters",
+      u'string[] cs = split("Ação", ""); print(len(cs)); print(cs);\n',
+      backends=_U8, expect=u"4\n[A, ç, ã, o]")
+
+agree("chars() agrees with it",
+      u'print(len(chars("Ação")));\n',
+      backends=_U8, expect="4")
+
+# The byte-oriented natives, pinned as they ARE rather than as D1 wants
+# them, so that ISSUES/30 changing them is a visible decision and not a
+# silent one.
+# node is EXCLUDED here and that IS the finding, not an exemption: len() on
+# a string counts CHARACTERS on node (11) and BYTES on the other four (14).
+# Both are asserted, so ISSUES/30 cannot be settled by changing one of them
+# without this failing.
+agree("len() counts BYTES on pyro and go — ISSUES/30",
+      u'print(len("Ação Ônibus"));\n',
+      backends=('pyro', 'go'), expect="14")
+
+# NOT agree(): it needs two backends to compare and SILENTLY SKIPS with
+# fewer, so this read as a passing assertion about node while running
+# nothing at all. One backend means asserting its output directly.
+_n30 = tempfile.mkdtemp(prefix='cryo_par_')
+_n30_out = run_backend(_n30, u'print(len("Ação Ônibus"));\n', 'node')
+if _n30_out is None:
+    print("  skip len() on node (node not available)")
+else:
+    check("…and CHARACTERS on node, which is the divergence",
+          _n30_out == "11", repr(_n30_out))
+
+# The classifiers stay byte-wise, and that is safe: every byte of a
+# multi-byte character is >= 0x80, so it can never match an ASCII set and
+# there are no false positives.
+agree("is_alpha is ASCII-defined, and says so consistently",
+      u'print(is_alpha("ação")); print(is_alpha("acao"));\n',
+      backends=_U8, expect="false\ntrue")
+
+# cpp gets reverse_str and common_prefix, which are pure character walks,
+# but NOT capitalize: upper() is ASCII-only on c and cpp, so "ótimo" comes
+# back unchanged there (ISSUES/31). Asserting the casing here would be
+# asserting a bug away; asserting the character walk is the real question,
+# since that is what the split fix changed.
+agree("the character walks reach cpp too",
+      u'print(reverse_str("Ação"));\nprint("[" + common_prefix("ação", "açúcar") + "]");\n',
+      backends=('pyro', 'cpp'), expect=u"oãçA\n[aç]")
+# ── D1 (part): counting and slicing by character ─────────────
+#
+# len() counts BYTES and that is ISSUES/30, asserted as it is just above.
+# These are the additive half: split(s, "") is already character-aware, so
+# char_len/char_at/char_slice are desugarings over it.
+#
+# The ERP case this exists for: NF-e field limits are stated in characters,
+# so len() rejects a legitimate accented product name early and substr()
+# can cut a character in half.
+print("\n── D1: char_len / char_at / char_slice ──")
+
+agree("char_len counts characters where len counts bytes",
+      u'print(char_len("Ação Ônibus")); print(len("Ação Ônibus"));\nprint(char_len("")); print(char_len("abc"));\n',
+      backends=('pyro', 'go'), expect="11\n14\n0\n3")
+
+agree("char_len agrees everywhere, whatever len() does",
+      u'print(char_len("Ação Ônibus")); print(char_len("")); print(char_len("abc"));\n',
+      backends=_U8, expect="11\n0\n3")
+
+agree("char_at reaches a multi-byte character",
+      u'print(char_at("Ação", 0)); print(char_at("Ação", 2));\n',
+      backends=_U8, expect=u"A\nã")
+
+agree("char_slice does not cut a character in half",
+      u'print("[" + char_slice("Ação Ônibus", 0, 4) + "]");\nprint("[" + char_slice("Ação", 1, 2) + "]");\n',
+      backends=_U8, expect=u"[Ação]\n[çã]")
+
+# Clamping, like substr: past the end, before the start, negative length.
+agree("char_slice clamps in every direction",
+      u'print("[" + char_slice("Ação", 2, 99) + "]");\nprint("[" + char_slice("Ação", 99, 2) + "]");\nprint("[" + char_slice("Ação", -3, 2) + "]");\nprint("[" + char_slice("Ação", 1, -5) + "]");\n',
+      backends=_U8, expect=u"[ão]\n[]\n[Aç]\n[]")
+
+# char_at ABORTS out of range, as s[i] does. Returning "" would be the
+# fail-open answer to a read past the end.
+aborts_with("char_at past the end aborts, it does not return empty",
+            u'print(char_at("Ação", 9));\n',
+            '[Cryo Security] IndexError',
+            backends=_U8)
+
+agree("the character helpers reach cpp too",
+      u'print(char_len("Ação")); print(char_at("Ação", 2));\nprint("[" + char_slice("Ação", 1, 2) + "]");\n',
+      backends=('pyro', 'cpp'), expect=u"4\nã\n[çã]")
+
+# ── ISSUES/22: thrown null renders as "null" ──────────────────
+print("\n── ISSUES/22: thrown null renders as null ──")
+agree("thrown null renders as null (not empty map/struct)",
+      'try { throw(null); } catch (string e) { print("caught: " + e); }\n',
+      backends=('pyro', 'node', 'go'), expect="caught: null")
+
+# ── ISSUES/24: ? on optional ──────────────────────────────────
+print("\n── ISSUES/24: ? propagation over an optional ──")
+agree("? propagation over an optional agrees across backends",
+      'fn lk(int x) -> int? ={ if (x > 0) { return x; } return null; }\n'
+      'fn u(int x) -> int? ={ int v = lk(x)?; return v * 2; }\n'
+      'print(u(21) ?? 0);\n'
+      'print(u(-5) ?? 0);\n',
+      backends=('pyro', 'node', 'go', 'cpp'), expect="42\n0")
+
+# ── go: an untyped array literal takes its type from the slot ──
+# `xs = [];` and `concat(xs, ["a"])` on a `string[]` came out as `[]any{…}`
+# on go, which Go will neither assign to a []string nor unify with one in the
+# generic cryoConcat. Found by the EMP's event queue (nucleo/eventos.cryo).
+print("\n── go: array literals typed by their context ──")
+agree("[] assigned to a typed array, and concat with a literal",
+      'string[] xs = [];\n'
+      'fn f() -> int ={ xs = concat(xs, ["a"]); int n = len(xs); xs = []; return n + len(xs); }\n'
+      'print(f());\n',
+      expect="1")
+agree("concat of two literals into a typed slot",
+      'string[] s = concat(["x"], ["y"]);\nprint(s);\n'
+      'int[] n = [];\nn = concat([1], n);\nprint(n);\n',
+      expect="[x, y]\n[1]")
+agree("an array literal as a typed call argument",
+      'fn total(int[] v) -> int ={ if (len(v) == 0) { return 0; } return v[0] + len(v); }\n'
+      'print(total([]));\nprint(total([2, 3]));\n',
+      expect="0\n4")
+
+# ── go: module vars initialised in source order ──
+# Go runs package-level initialisers before main(), so a module var declared
+# AFTER a top-level statement saw the state from before that statement ran.
+print("\n── go: module var initialisers run in source order ──")
+agree("a module var sees the statements above it",
+      'int[] a = [];\na.push(1);\nint[] b = a;\nprint(len(b));\n',
+      expect="1")
+agree("…including a call with side effects, and functions still see it",
+      'int n = 1;\nfn bump() -> int ={ n = n + 1; return n; }\n'
+      'print("start");\nint m = bump();\nfn get_m() -> int ={ return m; }\n'
+      'map<string,int> d = {"a": n};\nprint(get_m());\nprint(d["a"]);\n',
+      expect="start\n2\n2")
+
+# ── M1: an accented path, as the FILESYSTEM sees it ──────────
+#
+# This cannot be an agree() case, and that is the whole point. The C
+# runtimes passed a UTF-8 path to fopen/stat, which take the process ANSI
+# codepage on Windows, so write_file("Produção.txt", …) created
+# "ProduÃ§Ã£o.txt" on disk — and then file_exists, read_file and file_size
+# ALL AGREED, because they mangled the name the same way. Every assertion a
+# program can make about its own file passed, before the fix and after it.
+#
+# So the test has to look at the DIRECTORY, from outside the program. Each
+# backend writes into a directory of its own and the name on disk is
+# compared — to the other backends and to the literal the program used.
+print("\n── M1: accented paths reach the filesystem intact ──")
+
+_M1_NAME = u"Produ\u00e7\u00e3o.txt"
+_m1_seen = {}
+for _b in ('pyro', 'node', 'go', 'c'):
+    _d = tempfile.mkdtemp(prefix='cryo_m1_')
+    _p = (_d + '/' + _M1_NAME).replace('\\', '/')
+    _src = (u'string p = "%s";\n' % _p
+            + u'print(write_file(p, "conteudo"));\n'
+            + u'print(read_file(p));\n')
+    _o = run_backend(_d, _src, _b)
+    if _o is None:
+        _skipped += 1
+        continue
+    # The program's own view, which was never the problem.
+    check("M1/%s: the program's round trip works" % _b,
+          _o == "true\nconteudo", repr(_o))
+    # The filesystem's view, which was.
+    _names = [n for n in os.listdir(_d) if n.startswith('Produ')]
+    _m1_seen[_b] = _names[0] if len(_names) == 1 else repr(_names)
+
+if len(_m1_seen) >= 2:
+    _detail = '; '.join('%s=%r' % kv for kv in _m1_seen.items())
+    check("M1: every backend writes the SAME name on disk",
+          len(set(_m1_seen.values())) == 1, _detail)
+    check("M1: and it is the name the program asked for",
+          all(v == _M1_NAME for v in _m1_seen.values()), _detail)
+else:
+    print("  skip M1 (fewer than two backends available)")
+
+# ── url_decode / url_encode beyond pyro ──
+# Natives 65/66 existed only on the VMs. go failed to COMPILE any program
+# that used them ("undefined: url_decode") and node threw a ReferenceError
+# only when the call ran — the EMP's form and contract parsers hit both.
+# Both VMs work on UTF-8 BYTES, '+' is a space, and a malformed escape
+# passes through; node's decodeURIComponent would throw on that one.
+print("\n── url_decode / url_encode on go and node ──")
+agree("url_decode: '+', %20 and a multi-byte character",
+      'print(url_decode("a+b%20c"));\nprint(url_decode("Jo%C3%A3o"));\n'
+      'print(url_decode("%41%42"));\n',
+      expect=u"a b c\nJoão\nAB")
+agree("url_decode: a malformed or truncated escape passes through",
+      'print(url_decode("100%zz%"));\nprint(url_decode("%4"));\n'
+      'print(url_decode("x%g1y"));\n',
+      expect="100%zz%\n%4\nx%g1y")
+agree("url_encode: the unreserved set, upper-case hex, UTF-8 bytes",
+      u'print(url_encode("a b&c=d/ã~_.-"));\n',
+      expect="a%20b%26c%3Dd%2F%C3%A3~_.-")
+agree("url_encode then url_decode is the identity",
+      u'string s = "ação + 50% off?";\nprint(url_decode(url_encode(s)) == s);\n'
+      u'print(url_decode(url_encode(s)));\n',
+      expect=u"true\nação + 50% off?")
+
+# ── round() breaks ties AWAY FROM ZERO, on every backend ────
+#
+# node mapped round() straight to JavaScript's Math.round, which breaks ties
+# toward +Infinity: Math.round(-0.5) is -0, Math.round(-1.5) is -1 and
+# Math.round(-2.5) is -2. The VM (Go's math.Round), go, c and cpp all round
+# half away from zero, so node gave a different answer for EVERY negative
+# half — and for an ERP that is a monetary divergence, since credits,
+# returns and discounts are the negative numbers in the system.
+#
+# The positive halves agreed all along, which is why this survived: the
+# obvious cases to try are 0.5, 1.5, 2.5.
+print("\n── round(): ties away from zero ──")
+
+_RND = ('pyro', 'node', 'go')
+
+agree("positive halves round up",
+      'print(round(0.5)); print(round(1.5)); print(round(2.5));\n',
+      backends=_RND, expect="1\n2\n3")
+
+agree("NEGATIVE halves round away from zero, not toward +Inf",
+      'print(round(-0.5)); print(round(-1.5)); print(round(-2.5));\n',
+      backends=_RND, expect="-1\n-2\n-3")
+
+agree("a value that is not a tie is unaffected",
+      'print(round(2.675)); print(round(3.0)); print(round(-3.2));\n',
+      backends=_RND, expect="3\n3\n-3")
+
+agree("floor and ceil were never in question, and still are not",
+      'print(floor(-2.5)); print(ceil(-2.5)); print(floor(2.5)); print(ceil(2.5));\n',
+      backends=_RND, expect="-3\n-2\n2\n3")
+
+agree("round reaches c and cpp with the same rule",
+      'print(round(2.5)); print(round(-2.5)); print(round(-0.5));\n',
+      backends=('pyro', 'c', 'cpp'), expect="3\n-3\n-1")
+
+# round(-0.0) is DELIBERATELY ABSENT. It disagrees four ways across the
+# backends for a reason that has nothing to do with rounding — node prints
+# -0 as 0 while pyro/go/c print -0, and pyro folds `0.0 - 0.0` to -0 —
+# and asserting any of them here would be asserting one of those four as
+# correct before anyone has decided which. ISSUES/33.
 
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))

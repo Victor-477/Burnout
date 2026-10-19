@@ -51,7 +51,7 @@ def _split_type_pair(s: str):
             depth -= 1
         elif c == ',' and depth == 0:
             return s[:i].strip(), s[i + 1:].strip()
-    raise CodeGenGoError(f"tipo map malformado: '{s}'")
+    raise CodeGenGoError(f"malformed map type: '{s}'")
 
 
 def _split_top_commas(s: str):
@@ -251,7 +251,8 @@ class TypeEnv:
                        'agent_call': 'string[]',  # 11.20
                        'tools_json': 'string', 'tool_get': 'Tool',
                        'agent': 'string', 'index_of': 'int', 'count': 'int',
-                       'pad_start': 'string', 'pad_end': 'string'}.get(node.callee)
+                       'pad_start': 'string', 'pad_end': 'string',
+                       'url_decode': 'string', 'url_encode': 'string'}.get(node.callee)
             # these preserve the type of their first argument
             #
             # 13.1 — `abs` belonged here and was in the table above as
@@ -263,8 +264,14 @@ class TypeEnv:
             # failed. Found by the differential generator on its first real
             # run, and it had gone unnoticed because a compile-only check never
             # runs the Go compiler over the result.
+            # concat: either operand may be the literal, so take the one
+            # whose type is actually known.
+            if (node.callee == 'concat' and node.args
+                    and 'concat' not in self._fns):
+                ts = [self.infer(x) for x in node.args]
+                return next((t for t in ts if t.endswith('[]')), ts[0])
             if node.callee in ('abs', 'clamp', 'min', 'max', 'sort', 'reverse',
-                               'slice', 'concat') and node.args:
+                               'slice') and node.args:
                 return self.infer(node.args[0])
             return builtin or self.fn_ret(node.callee)
         if isinstance(node, StructInit):
@@ -305,6 +312,7 @@ class CodeGenGo:
         self._global_defs: List[str] = []
         self._fn_defs:     List[str] = []
         self._main:        List[str] = []
+        self._main_started = False   # a top-level statement is already in main
         self._cur:  List[str] = self._main
         self._indent = 1
         self._safe_stack: List[bool] = []
@@ -364,7 +372,10 @@ class CodeGenGo:
                 self._cur, self._indent = self._global_defs, 0
                 self._const(node)
             elif isinstance(node, VarDecl):
-                self._cur, self._indent = self._global_defs, 0
+                if self._main_started and node.value is not None:
+                    self._cur, self._indent = self._main, 1
+                else:
+                    self._cur, self._indent = self._global_defs, 0
                 self._var(node, module=True)
             elif isinstance(node, SkillDecl):
                 self._skills.append(node)   # registered; emitted in _assemble
@@ -377,6 +388,7 @@ class CodeGenGo:
             else:
                 self._cur, self._indent = self._main, 1
                 self._gen(node)
+                self._main_started = True
         return self._assemble()
 
     def _pre_scan(self, stmts):
@@ -487,6 +499,7 @@ class CodeGenGo:
                   '\treturn "{" + strings.Join(parts, ", ") + "}"', "}", "",
                   "func cryoStr(v any) string {",
                   '\tif v == nil { return "null" }',
+                  '\tif reflect.TypeOf(v).String() == "*runtime.PanicNilError" { return "null" }',
                   "\tswitch x := v.(type) {",
                   "\tcase string:",
                   "\t\treturn x",
@@ -619,6 +632,7 @@ class CodeGenGo:
                   "\treturn fu.v",
                   "}", ""]
         if 'anycast' in self._helpers:
+            self._imports.add('fmt')
             # 11.31 — an `any` reaching a typed slot. go is the only backend
             # where the interface is explicit, so this supplies what pyro and
             # node do implicitly.
@@ -758,6 +772,45 @@ class CodeGenGo:
                   "\tvar n int64",
                   "\tfor _, v := range a { if v == x { n++ } }",
                   "\treturn n", "}", ""]
+        if 'urlcodec' in self._helpers:
+            # url_decode/url_encode, byte for byte as the VMs' natives 65/66
+            # do them: '+' is a space, a malformed escape passes through, and
+            # only A-Z a-z 0-9 - _ . ~ are left unencoded.
+            H += ["func cryoUnhex(c byte) (byte, bool) {",
+                  "\tswitch {",
+                  "\tcase c >= '0' && c <= '9': return c - '0', true",
+                  "\tcase c >= 'a' && c <= 'f': return c - 'a' + 10, true",
+                  "\tcase c >= 'A' && c <= 'F': return c - 'A' + 10, true",
+                  "\t}",
+                  "\treturn 0, false", "}", "",
+                  "func cryoUrlDecode(in string) string {",
+                  "\tb := make([]byte, 0, len(in))",
+                  "\tfor i := 0; i < len(in); i++ {",
+                  "\t\tswitch {",
+                  "\t\tcase in[i] == '+':",
+                  "\t\t\tb = append(b, ' ')",
+                  "\t\tcase in[i] == '%' && i+2 < len(in):",
+                  "\t\t\thi, ok1 := cryoUnhex(in[i+1])",
+                  "\t\t\tlo, ok2 := cryoUnhex(in[i+2])",
+                  "\t\t\tif ok1 && ok2 { b = append(b, hi<<4|lo); i += 2 } else { b = append(b, in[i]) }",
+                  "\t\tdefault:",
+                  "\t\t\tb = append(b, in[i])",
+                  "\t\t}",
+                  "\t}",
+                  "\treturn string(b)", "}", "",
+                  "func cryoUrlEncode(in string) string {",
+                  '\tconst hexd = "0123456789ABCDEF"',
+                  "\tb := make([]byte, 0, len(in)*3)",
+                  "\tfor i := 0; i < len(in); i++ {",
+                  "\t\tch := in[i]",
+                  "\t\tif (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z') || (ch >= '0' && ch <= '9') ||",
+                  "\t\t\tch == '-' || ch == '_' || ch == '.' || ch == '~' {",
+                  "\t\t\tb = append(b, ch)",
+                  "\t\t} else {",
+                  "\t\t\tb = append(b, '%', hexd[ch>>4], hexd[ch&0x0F])",
+                  "\t\t}",
+                  "\t}",
+                  "\treturn string(b)", "}", ""]
         if 'sum' in self._helpers:
             H += ["func cryoSum[T int64 | float64](a []T) T {",
                   "\tvar s T",
@@ -900,7 +953,7 @@ class CodeGenGo:
         if 'httpget' in self._helpers:
             self._imports.update(('net/http', 'io'))
             H += ["func cryoHTTPGet(url string) string {",
-                  '\tcryoSandboxGuard("http_get")',
+                  '\tcryoSandboxGuard("http_get()")',
                   "\tresp, err := http.Get(url)",
                   '\tif err != nil { return "" }',
                   "\tdefer resp.Body.Close()",
@@ -909,7 +962,7 @@ class CodeGenGo:
         if 'httppost' in self._helpers:
             self._imports.update(('net/http', 'io', 'strings'))
             H += ["func cryoHTTPPost(url, body string) string {",
-                  '\tcryoSandboxGuard("http_post")',
+                  '\tcryoSandboxGuard("http_post()")',
                   '\tresp, err := http.Post(url, "application/json", strings.NewReader(body))',
                   '\tif err != nil { return "" }',
                   "\tdefer resp.Body.Close()",
@@ -919,7 +972,7 @@ class CodeGenGo:
             self._imports.add('os')
             H += ["// cryoWriteBytes: writes an int[] as bytes to a file.",
                   "func cryoWriteBytes(path string, data []int64) bool {",
-                  '\tcryoSandboxGuard("write_bytes")',
+                  '\tcryoSandboxGuard("write_bytes()")',
                   "\tbuf := make([]byte, len(data))",
                   "\tfor i, v := range data { buf[i] = byte(v & 0xFF) }",
                   "\treturn os.WriteFile(path, buf, 0644) == nil", "}", ""]
@@ -1400,7 +1453,7 @@ class CodeGenGo:
             self._imports.update(('os/exec', 'runtime'))
             H += ["// cryoOpen: opens a file/URL in the OS default app (browser).",
                   "func cryoOpen(target string) bool {",
-                  '\tcryoSandboxGuard("pyro_open")',
+                  '\tcryoSandboxGuard("pyro_open()")',
                   "\tvar c *exec.Cmd",
                   "\tswitch runtime.GOOS {",
                   '\tcase "windows":',
@@ -1413,8 +1466,8 @@ class CodeGenGo:
                   "\treturn c.Start() == nil", "}", ""]
         if 'exec' in self._helpers:
             self._imports.update(('os/exec', 'runtime'))
-            H += ["func cryoExec(command string) string {",
-                  '\tcryoSandboxGuard("pyro_exec")',
+            H += ["func cryoExec(op string, command string) string {",
+                  "\tcryoSandboxGuard(op)",
                   "\tvar c *exec.Cmd",
                   '\tif runtime.GOOS == "windows" {',
                   '\t\tc = exec.Command("cmd", "/c", command)',
@@ -1680,6 +1733,8 @@ class CodeGenGo:
         self._indent += 1
         for s in n.body:
             self._gen(s)
+        if ret and (not n.body or not isinstance(n.body[-1], Return)):
+            self._emit('panic("unreachable")')
         self._indent -= 1
         self.te.pop()
         self._emit("}")
@@ -1756,29 +1811,46 @@ class CodeGenGo:
         vt = n.var_type
         name = gid(n.name)
 
+        # Go runs package-level initialisers at package init, BEFORE main().
+        # Once a top-level statement has been emitted into main, a later
+        # module var initialised at package scope would see the state from
+        # before that statement ran: `int[] a = []; a.push(1); int[] b = a;`
+        # left b empty on go and not on pyro/node. From that point on the
+        # var is declared at package scope and assigned in main, in source
+        # order.
+        in_main = module and self._main_started and n.value is not None
+        if in_main:
+            self._global_defs.append(f"var {name} {gt}")
+
+        def bind(val, short=False):
+            if in_main:
+                self._emit(f"{name} = {val}")
+            elif short and not module:
+                self._emit(f"{name} := {val}")
+            else:
+                self._emit(f"var {name} {gt} = {val}")
+
         if isinstance(n.value, TryExpr):
             okv = self._go_try(n.value.operand)
-            self._emit(f"var {name} {gt} = {okv}")
+            bind(okv)
             if not module:
                 self._emit(f"_ = {name}")
             return
 
         if isinstance(n.value, ArrayLiteral):
-            lit = self._array_literal(n.value, vt)
-            self._emit(f"var {name} {gt} = {lit}" if module else f"{name} := {lit}")
+            bind(self._array_literal(n.value, vt), short=True)
         elif isinstance(n.value, MapLiteral):
-            self._emit(f"var {name} {gt} = {self._map_literal(n.value, vt)}")
+            bind(self._map_literal(n.value, vt))
         elif is_map(vt) and n.value is None:
             # map without value: initializes empty and writable
-            self._emit(f"var {name} {gt} = {gt}{{}}" if module else f"{name} := {gt}{{}}")
+            bind(f"{gt}{{}}", short=True)
         elif is_optional(vt) and n.value is not None:
-            self._emit(f"var {name} {gt} = {self._to_optional(n.value, vt)}")
+            bind(self._to_optional(n.value, vt))
         elif is_future(vt) and isinstance(n.value, SpawnExpr):
             # uses the declared element type (avoids 'chan any' by failed inference)
-            self._emit(f"var {name} {gt} = {self._spawn(n.value, future_elem(vt))}")
+            bind(self._spawn(n.value, future_elem(vt)))
         elif n.value is not None:
-            val = self._expr_typed(n.value, vt)
-            self._emit(f"var {name} {gt} = {val}")
+            bind(self._expr_typed(n.value, vt))
         else:
             self._emit(f"var {name} {gt}")
         if not module:
@@ -2083,6 +2155,7 @@ class CodeGenGo:
                 self._helpers.add('str')
                 self._emit("if r := recover(); r != nil {")
                 self._indent += 1
+                self._emit('if reflect.TypeOf(r).String() == "*runtime.PanicNilError" { r = nil }')
                 var = n.catch_name or "_cryo_err"
                 self._emit(f"{gid(var)} := cryoStr(r)")
                 self._emit(f"_ = {gid(var)}")
@@ -2134,6 +2207,16 @@ class CodeGenGo:
         """Expression with knowledge of the target type (handles null)."""
         if isinstance(node, Literal) and node.kind == 'null':
             return zero_value(target)
+        # A literal takes its type from the slot it lands in. Through plain
+        # _expr, `xs = [];` on a `string[]` came out as `xs = []any{}` and Go
+        # refused the assignment; the same held for a literal argument.
+        if isinstance(node, ArrayLiteral):
+            return self._array_literal(node, target)
+        if isinstance(node, MapLiteral):
+            return self._map_literal(node, target)
+        if (isinstance(node, CallExpr) and node.callee == 'concat'
+                and len(node.args) == 2 and 'concat' not in self.te._fns):
+            return self._concat(node, target)
         return self._assert_any(self._expr(node), self.te.infer(node), target)
 
     # 11.31 — an `any` value reaching a typed slot.
@@ -2316,6 +2399,21 @@ class CodeGenGo:
         inner = self._expr(node.expr)
         self._helpers.add('future')
         return f"cryoSpawn(func() {gt} {{ return {inner} }})"
+
+    def _concat(self, node: CallExpr, target: Optional[str]) -> str:
+        """cryoConcat is generic over []T, so a literal operand has to be
+        spelled with the OTHER operand's type: `concat(xs, ["a"])` with
+        `[]any{"a"}` does not unify with a []string. When both operands are
+        literals, the slot the result goes into decides."""
+        self._helpers.add('concat')
+        a = node.args
+        t = self.te.infer(node)
+        if not t.endswith('[]'):
+            t = target if target and target.endswith('[]') else None
+        if not t:
+            return f"cryoConcat({self._expr(a[0])}, {self._expr(a[1])})"
+        return (f"cryoConcat({self._expr_typed(a[0], t)}, "
+                f"{self._expr_typed(a[1], t)})")
 
     def _map_literal(self, node: MapLiteral, map_type: Optional[str]) -> str:
         if map_type and is_map(map_type):
@@ -2614,8 +2712,11 @@ class CodeGenGo:
             self._imports.add('slices')
             return f"int64(slices.Index({self._expr(a[0])}, {self._expr(a[1])}))"
         if c == 'concat' and len(a) == 2:
-            self._helpers.add('concat')
-            return f"cryoConcat({self._expr(a[0])}, {self._expr(a[1])})"
+            return self._concat(node, None)
+        if c in ('url_decode', 'url_encode') and len(a) == 1:
+            self._helpers.add('urlcodec')
+            fn = 'cryoUrlDecode' if c == 'url_decode' else 'cryoUrlEncode'
+            return f"{fn}({self._expr(a[0])})"
         if c == 'count' and len(a) == 2:
             self._helpers.add('count')
             return f"cryoCount({self._expr(a[0])}, {self._expr(a[1])})"
@@ -2694,7 +2795,7 @@ class CodeGenGo:
         # ── Pyro: direct machine access ──
         if c == 'pyro_exec' and len(a) == 1:
             self._helpers.update(('exec', 'sandbox'))
-            return f"cryoExec({self._expr(a[0])})"
+            return f'cryoExec("pyro_exec()", {self._expr(a[0])})'
         if c == 'pyro_env' and len(a) == 1:
             self._imports.add('os')
             return f"os.Getenv({self._expr(a[0])})"
@@ -2716,7 +2817,7 @@ class CodeGenGo:
         if c == 'pyro_write_file' and len(a) == 2:
             self._imports.add('os')
             self._helpers.add('sandbox')
-            return (f'func() bool {{ cryoSandboxGuard("pyro_write_file"); '
+            return (f'func() bool {{ cryoSandboxGuard("pyro_write_file()"); '
                     f"return os.WriteFile({self._expr(a[0])}, "
                     f"[]byte({self._expr(a[1])}), 0644) == nil }}()")
         if c == 'pyro_open' and len(a) == 1:
@@ -2735,11 +2836,11 @@ class CodeGenGo:
         if c == 'make_dir' and len(a) == 1:
             self._imports.add('os')
             self._helpers.add('sandbox')
-            return f"func() bool {{ cryoSandboxGuard(\"make_dir\"); return os.MkdirAll({self._expr(a[0])}, 0755) == nil }}()"
+            return f"func() bool {{ cryoSandboxGuard(\"make_dir()\"); return os.MkdirAll({self._expr(a[0])}, 0755) == nil }}()"
         if c == 'delete_file' and len(a) == 1:
             self._imports.add('os')
             self._helpers.add('sandbox')
-            return (f"func() bool {{ cryoSandboxGuard(\"delete_file\"); "
+            return (f"func() bool {{ cryoSandboxGuard(\"delete_file()\"); "
                     f"st, err := os.Stat({self._expr(a[0])}); "
                     f"if err == nil && st.IsDir() {{ return false }}; "
                     f"return os.Remove({self._expr(a[0])}) == nil }}()")
@@ -2749,18 +2850,23 @@ class CodeGenGo:
         if c == 'write_file' and len(a) == 2:
             self._imports.add('os')
             self._helpers.add('sandbox')
-            return (f"func() bool {{ cryoSandboxGuard(\"write_file\"); "
+            return (f"func() bool {{ cryoSandboxGuard(\"write_file()\"); "
                     f"return os.WriteFile({self._expr(a[0])}, []byte({self._expr(a[1])}), 0644) == nil }}()")
         if c == 'read_file' and len(a) == 1:
             self._imports.add('os')
-            return f"func() string {{ b, err := os.ReadFile({self._expr(a[0])}); if err != nil {{ return \"\" }}; return string(b) }}()"
+            # Phase 7 — this was UNGATED. Under --sandbox the VM and node
+            # refused while go read the file and returned its contents, so the
+            # same program disclosed data on one backend and not the others.
+            # The VM gates it with capFS(read=True); this matches.
+            self._helpers.add('sandbox')
+            return f"func() string {{ cryoSandboxGuard(\"read_file()\"); b, err := os.ReadFile({self._expr(a[0])}); if err != nil {{ return \"\" }}; return string(b) }}()"
         if c == 'env' and len(a) == 1:
             self._imports.add('os')
             self._helpers.add('sandbox')
-            return f"func() string {{ cryoSandboxGuard(\"env\"); return os.Getenv({self._expr(a[0])}) }}()"
+            return f"func() string {{ cryoSandboxGuard(\"env()\"); return os.Getenv({self._expr(a[0])}) }}()"
         if c == 'exec' and len(a) == 1:
             self._helpers.update(('exec', 'sandbox'))
-            return f"cryoExec({self._expr(a[0])})"
+            return f'cryoExec("exec()", {self._expr(a[0])})'
         if c == 'args' and len(a) == 0:
             self._imports.add('os')
             return "os.Args[1:]"

@@ -1,11 +1,11 @@
 # ============================================================
 #  Burnout — Pyro bytecode disassembler (.pyro -> text)
 #
-#  Reads a .pyro file (the proper target language) and prints a
-#  listing legível: cabeçalho, pool de constants, tabela de
-#  functions and disassembled code (with jump targets and names of
-#  function resolved). Useful for inspection and as a textual form
-#  readable by AI than what the machine executes.
+#  Reads a .pyro file (the target language proper) and prints a
+#  readable listing: header, constant pool, function table and the
+#  disassembled code, with jump targets and function names resolved.
+#  Useful for inspection, and as a textual form of exactly what the
+#  machine executes.
 #
 #  Usage:  python burnout/disasm_pyro.py program.pyro
 # ============================================================

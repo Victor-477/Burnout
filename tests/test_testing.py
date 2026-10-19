@@ -167,6 +167,62 @@ def main():
                      'test fn t() ={ assert(passed == 99, "untouched"); }\n')
         check("a program may declare `passed` and `failed`", r.returncode == 0,
               (r.stdout + r.stderr)[-300:])
+
+        # ── test fn parameter rejection ────────────────────
+        print("\n── test fn cannot declare parameters ──")
+        r = run_test(work, 'test fn with_param(int x) ={ assert(x == 1, "bad"); }\n')
+        check("test fn with parameters is rejected", r.returncode != 0)
+        check("and explains that test functions must not declare parameters",
+              "must not declare parameters" in (r.stderr + r.stdout),
+              (r.stderr + r.stdout)[:200])
+
+        # ── a suite can import what it tests ───────────────
+        # `cryoc test` compiled the parsed file without module resolution, so
+        # any `import` in a test file failed with "unknown function". Testing
+        # a library is the main reason to have a runner at all.
+        print("\n── a test file imports the code under test ──")
+        with open(os.path.join(work, 'mathlib.cryo'), 'w', encoding='utf-8') as f:
+            f.write('pub fn sq(int x) -> int ={ return x * x; }\n'
+                    'fn helper() -> int ={ return 1; }\n'
+                    'test fn lib_own_test() ={ assert(false, "a module\'s test must not run here"); }\n')
+        r = run_test(work, 'import "mathlib.cryo" as m;\n'
+                           'test fn squares() ={ assert(m::sq(7) == 49, "7*7"); }\n'
+                           'test fn in_try() ={ int v = 0; try { v = m::sq(3); } catch (string e) { } '
+                           'assert(v == 9, "3*3"); }\n')
+        check("a namespaced import resolves inside a test",
+              r.returncode == 0 and '2 passed, 0 failed' in r.stdout,
+              (r.stdout + r.stderr)[-300:])
+        check("an imported module's own `test fn` is not run by the importer",
+              'lib_own_test' not in r.stdout, r.stdout[-300:])
+        r = run_test(work, 'import "mathlib.cryo";\n'
+                           'test fn flat() ={ assert(sq(4) == 16, "4*4"); }\n')
+        check("a flat import resolves too",
+              r.returncode == 0 and '1 passed, 0 failed' in r.stdout,
+              (r.stdout + r.stderr)[-300:])
+        r = run_test(work, 'import "mathlib.cryo" as m;\n'
+                           'test fn priv() ={ assert(m::helper() == 1, "x"); }\n')
+        check("a private member is still refused",
+              r.returncode != 0 and 'not pub' in (r.stdout + r.stderr),
+              (r.stdout + r.stderr)[-300:])
+        r = run_test(work, 'import "missing.cryo" as m;\ntest fn t() ={ }\n')
+        check("a missing module is reported, not a traceback",
+              r.returncode != 0 and 'module not found' in r.stderr
+              and 'Traceback' not in r.stderr, r.stderr[-300:])
+
+        # ── multi-file and directory discovery ─────────────
+        print("\n── directory test discovery ──")
+        test_dir = os.path.join(work, 'pkg_tests')
+        os.makedirs(test_dir, exist_ok=True)
+        with open(os.path.join(test_dir, 't1.cryo'), 'w', encoding='utf-8') as f:
+            f.write('test fn t1() ={ assert(1 == 1, "t1"); }\n')
+        with open(os.path.join(test_dir, 't2.cryo'), 'w', encoding='utf-8') as f:
+            f.write('test fn t2() ={ assert(2 == 2, "t2"); }\n')
+        r_dir = subprocess.run([sys.executable, CRYOC, 'test', test_dir, '--backend', 'pyro'],
+                               capture_output=True, text=True, encoding='utf-8', errors='replace', timeout=900)
+        check("directory test run succeeds", r_dir.returncode == 0, r_dir.stdout[-300:])
+        check("both test files are executed",
+              'ok   t1' in r_dir.stdout and 'ok   t2' in r_dir.stdout,
+              r_dir.stdout[-300:])
     finally:
         shutil.rmtree(work, ignore_errors=True)
 

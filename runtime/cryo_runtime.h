@@ -137,6 +137,9 @@ static inline bool     cryo_of_u64_b(uint64_t u) { return u != 0; }
 int64_t cryo_str_len(const char* s);
 bool    cryo_str_eq(const char* a, const char* b);
 char*   cryo_str_slice(const char* s, int64_t start, int64_t end);
+/* `s[i]`: a one-character string. Aborts out of range — slice clamps, which
+   is right for slice() and fail-open for an index. */
+char*   cryo_str_index(const char* s, int64_t i);
 char*   cryo_str_upper(const char* s);
 /* Phase 10.4 strings (ISSUES/09). Every char* returned is malloc'd and NOT
    freed by the generated code — see the ownership note in cryo_runtime.c. */

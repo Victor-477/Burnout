@@ -327,7 +327,7 @@ def _compile_resolved(ast, backend: str, safe: bool, abi: str,
     if backend == 'go':
         return CodeGenGo(safe=safe, sandbox=sandbox).generate(ast)
     if backend == 'node':
-        return CodeGenNode(safe=safe).generate(ast)
+        return CodeGenNode(safe=safe, sandbox=sandbox).generate(ast)
     if backend == 'csharp':
         return CodeGenCSharp(safe=safe).generate(ast)
     if backend == 'cpp':
@@ -398,6 +398,9 @@ def _run_pyro(pyro_path: str, compiler_dir: str, run: bool, verbose: bool):
             print(f"✓ Pyro VM: {pyrovm}")
         if run:
             print(f"\n── Running (Pyro VM): {pyro_path} ───────────────────")
+            # The child writes to the same stdout but not through this
+            # buffer: unflushed, a piped header lands AFTER the program output.
+            sys.stdout.flush()
             subprocess.run([pyrovm, pyro_path])
     except FileNotFoundError:
         if verbose:
@@ -497,13 +500,15 @@ def compile_file(input_path: str,
     # ── automatic backend selection ──
     auto = (backend == 'auto')
     if auto:
-        backend, motivo = select_backend(load_ast(source, base_dir))
-        print(f"→ backend automático: {backend}  ({motivo})")
+        backend, reason = select_backend(load_ast(source, base_dir))
+        print(f"→ automatic backend: {backend}  ({reason})")
 
-    # sandbox is applicable to both pyro (VM) and go (generated code) targets.
-    if sandbox and backend not in ('pyro', 'go'):
-        print(f"⚠ --sandbox only applies to pyro and go backends; ignored"
-              f"para '{backend}'.", file=sys.stderr)
+    # The sandbox now covers every PRIMARY executable backend — pyro (VM flag),
+    # go and node (guards in the generated code). It stays inapplicable to c,
+    # asm, wasm and frontend, which is why the warning survives.
+    if sandbox and backend not in ('pyro', 'go', 'node'):
+        print(f"⚠ --sandbox applies to the pyro, go and node backends; "
+              f"ignored for '{backend}'.", file=sys.stderr)
 
     # ── code generation ──
     try:
@@ -512,7 +517,10 @@ def compile_file(input_path: str,
                               assets=assets, use_cache=use_cache,
                               path=input_path, sign_key=sign_key)
     except (CodeGenError, CodeGenGoError, CodeGenAsmError,
-            CodeGenPyroError, CodeGenNodeError) as e:
+            CodeGenPyroError, CodeGenNodeError,
+            # cpp and csharp were missing here, so a backend that REFUSED a
+            # construct escaped the safety net instead of falling back to go.
+            CodeGenCppError, CodeGenCSharpError) as e:
         # safety net: if auto chose a backend that failed,
         # recompiles in go (superset) instead of aborting.
         if auto and backend != 'go':
@@ -602,6 +610,7 @@ def compile_file(input_path: str,
         if run:
             try:
                 print(f"\n── Running (Node): {output_path} ───────────────────")
+                sys.stdout.flush()
                 subprocess.run(['node', output_path])
             except FileNotFoundError:
                 print("⚠ node not found — .js generated but not executed",
@@ -623,6 +632,7 @@ def compile_file(input_path: str,
                       file=sys.stderr)
                 return output_path
             print(f"\n── Running (dotnet): {output_path} ───────────────────")
+            sys.stdout.flush()
             subprocess.run(['dotnet', 'run', '--project', proj,
                             '-v', 'quiet', '--nologo'])
         return output_path
@@ -674,6 +684,7 @@ def compile_file(input_path: str,
                     print(f"[{tool} warnings]\n{result.stderr}", file=sys.stderr)
             if run:
                 print(f"\n── Running: {bin_path} ───────────────────")
+                sys.stdout.flush()
                 subprocess.run([bin_path])
         else:
             print(f"[{tool}] Error:\n{result.stderr}", file=sys.stderr)
@@ -857,6 +868,15 @@ def main() -> None:
         print(f"\n[CodeGen Node Error] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenWasmError as e:
         print(f"\n[CodeGen Wasm Error] {e}", file=sys.stderr); sys.exit(1)
+    # Without these two a DELIBERATE refusal from the cpp or csharp backend
+    # fell through to `except Exception` below, which prints "[Internal
+    # Error]" and re-raises — so a carefully worded "not supported yet, use
+    # --backend go" arrived as a compiler crash with a Python traceback.
+    # The message was right; the frame around it blamed the wrong party.
+    except CodeGenCppError as e:
+        print(f"\n[CodeGen C++ Error] {e}", file=sys.stderr); sys.exit(1)
+    except CodeGenCSharpError as e:
+        print(f"\n[CodeGen C# Error] {e}", file=sys.stderr); sys.exit(1)
     except CodeGenError   as e:
         print(f"\n[CodeGen Error]   {e}", file=sys.stderr); sys.exit(1)
     except Exception      as e:

@@ -100,7 +100,19 @@ def test_parity():
         c_code, c_out, c_err = run_command(comp_args)
         
         if c_code != 0:
-            # if it does not compile with the pyro backend, we just skip it (e.g. asm, node, etc.)
+            # An example the pyro backend does not accept cannot be compared
+            # between the two VMs, so it is skipped — but it SAYS SO, with the
+            # reason. This branch used to be silent, and 17 of this suite's 19
+            # skips came through it: a compile regression in any of those
+            # examples would have looked exactly like a green run.
+            #
+            # That is the same failure mode that hid a segfault in the C
+            # backend's string index for an entire phase — test_parity skipped
+            # the `c` backend because no local gcc worked, and reported it as a
+            # count. A skip nobody can read is indistinguishable from a pass.
+            _why = (c_err or c_out or '').strip().splitlines()
+            _why = next((l.strip() for l in _why if l.strip()), '(no message)')
+            print(f"Skipping {filename} (pyro backend refused: {_why[:120]})")
             skipped += 1
             os.remove(tmp_pyro)
             continue
@@ -542,6 +554,71 @@ def test_parity():
     for p in (srv_cryo, srv_pyro):
         try: os.remove(p)
         except OSError: pass
+
+
+    # ── conversions that are OUT OF RANGE ────────────────────
+    #
+    # This loop above compares the two VMs over the EXAMPLES, and no example
+    # converts an out-of-range string — which is why strtoll/strtod
+    # saturating here went unnoticed. to_int("99999999999999999999")
+    # returned 9223372036854775807 on the C VM and aborted on the Go VM: not
+    # a crash and not a refusal, a twenty-digit typo coming back as the
+    # largest representable quantity.
+    #
+    # Written as explicit programs rather than a new example, because what
+    # has to be pinned is the DISAGREEMENT, and an example would also have to
+    # be something worth shipping as documentation.
+    #
+    # The underflow and "Inf" cases are here to keep the fix honest in the
+    # other direction: strtod sets ERANGE for underflow too, and refusing
+    # that would break an agreement the two VMs already had.
+    print("\nTesting out-of-range conversions (Go VM vs C VM)...")
+    _conv_cases = [
+        ('to_int("99999999999999999999")',  "overflow aborts"),
+        ('to_int("-99999999999999999999")', "negative overflow aborts"),
+        ('to_number("1e999")',              "float overflow aborts"),
+        ('to_number("1e-999")',             "underflow is 0, not an error"),
+        ('to_number("Inf")',                'literal "Inf" still parses'),
+        ('to_int("9223372036854775807")',   "the exact int64 limit parses"),
+        ('to_int("42")',                    "an ordinary integer parses"),
+    ]
+    for _expr, _label in _conv_cases:
+        _p = os.path.join(CRYO_EXAMPLES, "_conv_tmp.cryo")
+        _out = os.path.join(_root, "build", "_conv_tmp.pyro")
+        with open(_p, "w", encoding="utf-8") as _f:
+            _f.write("print(%s);\n" % _expr)
+        _cc, _co, _ce = run_command([sys.executable, CRYOC, _p, "--backend",
+                                     "pyro", "-o", _out, "--no-banner"])
+        try:
+            os.remove(_p)
+        except OSError:
+            pass
+        if _cc != 0:
+            print(f"[FAIL] {_label}: did not compile")
+            failed += 1
+            continue
+        _gc, _go, _ge = run_command([GO_VM, _out])
+        _cvc, _cvo, _cve = run_command([C_VM_BIN, _out])
+        try:
+            os.remove(_out)
+        except OSError:
+            pass
+        _gn = (_go + _ge).replace("\r\n", "\n").strip()
+        _cn = (_cvo + _cve).replace("\r\n", "\n").strip()
+        # The Go VM prefixes its abort with "[Pyro VM] " and the C VM does
+        # not, so compare the Cryo message from the marker onwards — the
+        # envelope is each engine's own, the message is the contract (12.13).
+        if "[Cryo Security]" in _gn and "[Cryo Security]" in _cn:
+            _gn = _gn[_gn.index("[Cryo Security]"):].splitlines()[0]
+            _cn = _cn[_cn.index("[Cryo Security]"):].splitlines()[0]
+        if _gc == _cvc and _gn == _cn:
+            print(f"[OK] {_label}: Go == C (exit={_gc})")
+            passed += 1
+        else:
+            print(f"[FAIL] {_label}: diverged")
+            print(f"  Go exit={_gc} {_gn[:90]!r}")
+            print(f"  C  exit={_cvc} {_cn[:90]!r}")
+            failed += 1
 
     print(f"\nSummary: {passed} passed, {failed} failed, {skipped} skipped.")
     if failed > 0:
