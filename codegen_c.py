@@ -491,12 +491,15 @@ class CodeGenC:
         ) or 'void'
         self._emit(f"{ret} {n.name}({params}) {{")
         self._indent = 1
+        prev_ret = getattr(self, '_cur_ret', None)
+        self._cur_ret = n.return_type
         self.te.push()
         for pt, pn in n.params:
             self.te.set(pn, pt)
         for s in n.body:
             self._gen(s)
         self.te.pop()
+        self._cur_ret = prev_ret
         self._indent = 0
         self._emit("}")
         self._emit()
@@ -622,6 +625,8 @@ class CodeGenC:
     def _return(self, n: Return):
         if n.value is None:
             self._emit("return;")
+        elif getattr(self, '_cur_ret', None) and is_optional(self._cur_ret):
+            self._emit(f"return {self._opt_value(n.value, self._cur_ret)};")
         else:
             self._emit(f"return {self._expr(n.value)};")
 
@@ -1232,9 +1237,9 @@ class CodeGenC:
             at = self.te.infer(args[0])
             inner = self._expr(args[0])
             if at == 'string':
-                raise CodeGenError(
-                    f"'{callee}()' on a string is not supported in the C "
-                    f"backend; use --backend go, node or pyro.")
+                if callee == 'to_int':
+                    return f"cryo_str_to_int({inner})"
+                return f"cryo_str_to_num({inner})"
             if callee == 'to_int':
                 return inner if at == 'int' else f"cryo_to_int({inner})"
             return f"((double)({inner}))" if at == 'number' else f"cryo_to_num({inner})"

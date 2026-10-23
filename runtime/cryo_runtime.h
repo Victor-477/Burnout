@@ -181,6 +181,8 @@ char*      cryo_env(const char* name);
 char*      cryo_exec(const char* cmd);
 
 /* ---------- Conversoes ---------- */
+int64_t cryo_str_to_int(const char* s);
+double  cryo_str_to_num(const char* s);
 static inline int64_t cryo_to_int(double v)  { return (int64_t)v; }
 static inline double  cryo_to_num(int64_t v) { return (double)v; }
 static inline char*   cryo_to_str_i(int64_t v) { return cryo_i64_to_str(v); }

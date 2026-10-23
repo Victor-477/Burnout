@@ -78,7 +78,7 @@ except Exception:                             # pragma: no cover
 __version__ = "1.1.0"
 
 BACKENDS = ("go", "pyro", "c", "asm", "node", "wasm", "frontend", "html",
-            "csharp", "cpp")
+            "csharp", "cpp", "llm", "prompt")
 
 
 def tokenize(source):
@@ -125,5 +125,5 @@ __all__ = [
     "Lexer", "Parser",
     "LexerError", "ParseError", "ForeignError",
     "CodeGenError", "CodeGenGoError", "CodeGenAsmError", "CodeGenPyroError",
-    "CodeGenNodeError", "CodeGenWasmError",
+    "CodeGenNodeError", "CodeGenWasmError", "CodeGenLLM", "CodeGenLLMError",
 ]

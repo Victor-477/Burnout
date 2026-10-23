@@ -252,7 +252,10 @@ class CodeGenPyro:
     # ── constants ──────────────────────────────────────────
 
     def _const(self, tag: int, value) -> int:
-        key = (tag, value)
+        if tag == TAG_FLT:
+            key = (tag, struct.pack('>d', float(value)))
+        else:
+            key = (tag, value)
         if key in self._const_idx:
             return self._const_idx[key]
         idx = len(self._consts)

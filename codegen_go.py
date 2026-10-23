@@ -475,7 +475,7 @@ class CodeGenGo:
                   ' " blocked by sandbox policy")',
                   "\t\tos.Exit(1)", "\t}", "}", ""]
         if 'str' in self._helpers:
-            self._imports.update(('fmt', 'reflect', 'sort', 'strconv', 'strings'))
+            self._imports.update(('fmt', 'reflect', 'sort', 'strconv', 'strings', 'math'))
             # value_to_string (PYRO_RUNTIME.md §3.1). This used to be
             # `fmt.Sprint(v)`, which renders a slice in Go's OWN notation —
             # "[0 1 2]", space-separated — so `print(a)` and `to_string(a)` read
@@ -509,6 +509,7 @@ class CodeGenGo:
                   "\tcase int64:",
                   "\t\treturn strconv.FormatInt(x, 10)",
                   "\tcase float64:",
+                  "\t\tif x == 0 && math.Signbit(x) { return \"-0\" }",
                   "\t\treturn strconv.FormatFloat(x, 'g', -1, 64)",
                   "\t}",
                   "\trv := reflect.ValueOf(v)",
@@ -1544,7 +1545,12 @@ class CodeGenGo:
         if isinstance(node, Literal):
             if node.kind == 'bool':   return 'true' if node.value else 'false'
             if node.kind == 'string': return str(node.value)
-            if node.kind == 'float':  return repr(float(node.value))
+            if node.kind == 'float':
+                val = float(node.value)
+                if val == 0.0 and math.copysign(1.0, val) < 0:
+                    self._imports.add('math')
+                    return "math.Copysign(0.0, -1.0)"
+                return repr(val)
             return str(node.value)
         if isinstance(node, UnaryExpr) and node.op == '-' \
                 and isinstance(node.operand, Literal):
@@ -2184,6 +2190,10 @@ class CodeGenGo:
             for line in n.code.strip().split('\n'):
                 self._emit(line.strip())
             self._emit("// -- [/bloco Go] --")
+        elif lang in ('llm', 'prompt', 'ai'):
+            escaped = n.code.strip().replace('`', '` + "`" + `')
+            self._emit(f"// Prompt / LLM foreign block: {n.lang}")
+            self._emit(f"return `{escaped}`")
         elif lang in ('html', 'css'):
             # These used to become a lone comment, so a function whose entire
             # body was a page fragment compiled to an empty function and the

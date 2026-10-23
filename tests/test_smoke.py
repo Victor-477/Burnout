@@ -2053,6 +2053,25 @@ check("pyro: the synthetic entry has its own, unspellable key",
       _g._fnindex.get('<entry>') == 1)
 check("node: the same program still compiles", "7" in gen_node(_main_src))
 
+# ── Issue 23: `={...}` assignment without space ───────────
+print("[issue23] body assign no longer steals map literal")
+_m23 = 'map<string,int> m={"a": 1}; print(m["a"]);'
+check("go: map literal without space compiles", 'map[string]int64{"a": 1}' in gen_go(_m23))
+check("node: map literal without space compiles", '["a"]: 1' in gen_node(_m23))
+check("pyro: map literal without space compiles", isinstance(gen_pyro(_m23), (bytes, bytearray)))
+_fn23 = 'fn f() -> int = { return 1; }\nfn g() -> int ={ return 2; }\nprint(f() + g());\n'
+check("go: functions with '= {' and '={' both compile", "func f()" in gen_go(_fn23) and "func g()" in gen_go(_fn23))
+
+# ── Issue 25: string index assignment refused at semantic level ─
+print("[issue25] string index assignment rejected at semantic level")
+_s25 = 'string s = "abc"; s[1] = "z";'
+try:
+    _sem_check(parse_ast(_s25))
+    _err25 = ""
+except _SemErr as e:
+    _err25 = str(e)
+check("semantics: s[i] = v rejected with immutable message", "strings are immutable" in _err25)
+
 # ── result ───────────────────────────────────────────────
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

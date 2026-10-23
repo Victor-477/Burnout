@@ -285,6 +285,7 @@ class CodeGenNode:
                   '    if (v === Infinity) return "+Inf";',
                   '    if (v === -Infinity) return "-Inf";',
                   '    if (Number.isNaN(v)) return "NaN";',
+                  '    if (Object.is(v, -0)) return "-0";',
                   "    return String(v);",
                   "  }",
                   '  if (Array.isArray(v)) return "[" + v.map(cryoStr).join(", ") + "]";',
@@ -708,7 +709,7 @@ class CodeGenNode:
             for line in n.code.strip().split('\n'):
                 self._emit(line.strip())
             self._emit(f"// -- [/bloco {n.lang}] --")
-        elif lang in ('html', 'css'):
+        elif lang in ('html', 'css', 'llm', 'prompt', 'ai'):
             clean_code = n.code.strip().replace('`', '\\`').replace('${', '\\${')
             self._emit(f"return `{clean_code}`;")
         else:

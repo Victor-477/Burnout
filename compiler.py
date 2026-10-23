@@ -52,6 +52,7 @@ from codegen_node import CodeGenNode, CodeGenNodeError   # Node.js/JS backend
 from codegen_csharp import CodeGenCSharp, CodeGenCSharpError  # C# backend
 from codegen_cpp    import CodeGenCpp,    CodeGenCppError      # C++ backend
 from codegen_wasm import CodeGenWasm, CodeGenWasmError   # WebAssembly backend
+from codegen_llm import CodeGenLLM, CodeGenLLMError     # LLM / AI target backend
 import frontend                                          # front-end pages (10.11/10.13)
 
 
@@ -322,6 +323,9 @@ def _compile_resolved(ast, backend: str, safe: bool, abi: str,
         # 10.11/10.13 — assembles html/javascript/CSS blocks into a page.
         # Not a code generator: it emits a document, not a program.
         return frontend.render(ast, emit)
+    if backend in ('llm', 'prompt'):
+        # Generates AI-optimized execution command manifest (.llm)
+        return CodeGenLLM(emit_format='json' if emit == 'json' else 'markdown').generate(ast)
     if backend == 'asm':
         return CodeGenAsm(safe=safe, abi=abi).generate(ast)
     if backend == 'go':
@@ -537,7 +541,8 @@ def compile_file(input_path: str,
     ext = {'asm': '.s', 'go': '.go', 'pyro': '.pyro',
            'node': '.js', 'c': '.c', 'wasm': '.wasm', 'csharp': '.cs',
            'cpp': '.cpp',
-           'frontend': '.html'}.get(backend, '.c')
+           'frontend': '.html',
+           'llm': '.llm', 'prompt': '.llm'}.get(backend, '.c')
     if output_path is None:
         # separates sources (.cryo) from generated artifacts: output goes to build/
         os.makedirs('build', exist_ok=True)
@@ -560,7 +565,9 @@ def compile_file(input_path: str,
                 'pyro': 'Pyro bytecode', 'node': 'JavaScript (Node)',
                 'csharp': 'C# (.NET)', 'cpp': 'C++ (C++14)',
                 'wasm': 'WebAssembly', 'c': 'native C',
-                'frontend': f'front-end page ({emit})'}.get(backend, 'native C')
+                'frontend': f'front-end page ({emit})',
+                'llm': 'LLM Execution Command (.llm)',
+                'prompt': 'LLM Execution Command (.llm)'}.get(backend, 'native C')
         tam = f"  ({len(code)} bytes)" if isinstance(code, (bytes, bytearray)) else ""
         print(f"✓ [{alvo} / {modo}] generated: {input_path} → {output_path}{tam}")
 
@@ -590,7 +597,10 @@ def compile_file(input_path: str,
             print(f"✓ [browser binary] generated: {bin_path}  ({len(blob)} bytes)")
 
     # ── emit-only: generates source and stops (the build script takes care of the toolchain) ──
-    if emit_only or backend in ('wasm', 'frontend'):   # final artifacts (loaded by a host/browser)
+    if emit_only or backend in ('wasm', 'frontend', 'llm', 'prompt'):   # final artifacts
+        if run and backend in ('llm', 'prompt'):
+            print("\n── LLM Command & Execution Manifest (.llm) ───────────────────")
+            print(code)
         return output_path
 
     # ── pyro backend: disassembles and/or runs in the Pyro VM ──
@@ -737,7 +747,7 @@ def main() -> None:
     ap.add_argument('-o', '--output',  help='Output file (.go/.pyro/.s)')
     ap.add_argument('--backend',
                     choices=('auto', 'go', 'c', 'asm', 'pyro', 'node', 'wasm', 'csharp', 'cpp',
-                             'frontend'),
+                             'frontend', 'llm', 'prompt'),
                     default='go',
                     help='Backend: go (default), c, asm, pyro, node, wasm, '
                          'frontend (assemble html/javascript/CSS blocks into a '

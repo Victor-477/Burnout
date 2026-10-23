@@ -68,6 +68,7 @@ inline std::string str(double d) {
     // part as an integer, and test_parity asserts `print([1.5, 2.0])` as
     // "[1.5, 2]".
     if (d == std::floor(d) && std::fabs(d) < 1e15) {
+        if (d == 0.0 && std::signbit(d)) return "-0";
         std::ostringstream o;
         o << static_cast<int64_t>(d);
         return o.str();

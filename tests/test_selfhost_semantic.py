@@ -167,6 +167,7 @@ INVALID = [
     ("continue outside a loop", 'continue;', "outside loop"),
     ("a variable that has gone out of scope",
      'if (true) { int q = 1; } print(q);', "undeclared variable"),
+    ("string index assignment", 'string s = "abc"; s[1] = "z";', "strings are immutable"),
 ]
 
 

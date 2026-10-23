@@ -3,6 +3,7 @@
    ============================================================ */
 #include "cryo_runtime.h"
 #include <ctype.h>
+#include <errno.h>
 #include <inttypes.h>   /* PRId64: the portable int64_t format specifier */
 
 /* ---------- Portability: POSIX functions are NOT ISO C ----------
@@ -321,6 +322,40 @@ char* cryo_f64_to_str(double n) {
 char* cryo_bool_to_str(bool b) {
     /* Returns a static string — do not free */
     return b ? "true" : "false";
+}
+
+int64_t cryo_str_to_int(const char* s) {
+    if (!s) s = "";
+    const char* orig = s;
+    while (*s && isspace((unsigned char)*s)) s++;
+    char* end;
+    errno = 0;
+    long long val = strtoll(s, &end, 10);
+    int out_of_range = (errno == ERANGE);
+    while (*end && isspace((unsigned char)*end)) end++;
+    if (*end != '\0' || end == s || out_of_range) {
+        fflush(stdout);
+        fprintf(stderr, "[Cryo Security] to_int: '%s' is not a valid integer\n", orig);
+        exit(1);
+    }
+    return (int64_t)val;
+}
+
+double cryo_str_to_num(const char* s) {
+    if (!s) s = "";
+    const char* orig = s;
+    while (*s && isspace((unsigned char)*s)) s++;
+    char* end;
+    errno = 0;
+    double val = strtod(s, &end);
+    int out_of_range = (errno == ERANGE && isinf(val));
+    while (*end && isspace((unsigned char)*end)) end++;
+    if (*end != '\0' || end == s || out_of_range) {
+        fflush(stdout);
+        fprintf(stderr, "[Cryo Security] to_number: '%s' is not a valid number\n", orig);
+        exit(1);
+    }
+    return val;
 }
 
 /* ---------- 11.27: rendering an array ----------
