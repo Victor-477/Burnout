@@ -233,6 +233,10 @@ class CodeGenPyro:
         self._nlabels = 0
         self._loop_stack: List = []        # (break_label, continue_label)
         self._structs: Dict[str, List[str]] = {}
+        # Names of struct fields declared with a function type (`fn(T)->R h;`).
+        # `obj.h(x)` on one of these is a call of the stored function value,
+        # not a method (ESCOPO L-16 of the EMP project).
+        self._fn_fields: set = set()
         self._enum_consts: Dict[str, int] = {}   # 'Level_HIGH' -> 2
         self._enum_maps: Dict[str, str] = {}
         self._member_to_enum: Dict[str, str] = {}
@@ -314,6 +318,10 @@ class CodeGenPyro:
             elif isinstance(n, StructDecl):
                 # struct = map of string keys; we register the fields
                 self._structs[n.name] = [f.name for f in n.fields]
+                for f in n.fields:
+                    ft = (f.field_type or '').replace(' ', '')
+                    if ft.startswith('fn(') or ft.startswith('(fn('):
+                        self._fn_fields.add(f.name)
             elif isinstance(n, EnumDecl):
                 has_data = any(len(m.fields) > 0 for m in n.members)
                 if not has_data:
@@ -983,6 +991,17 @@ class CodeGenPyro:
             self._emit(OP_APPEND); return       # pushes new size
         if m in ('length', 'size'):
             self._expr(n.obj); self._emit(OP_LEN); return
+        if m in self._fn_fields:
+            # `obj.campo(args)` with a function-typed field: read the field
+            # (structs are maps), push the args, CALL_VALUE — the same
+            # sequence as calling any other function value.
+            self._expr(n.obj)
+            self._emit(OP_CONST, self._const(TAG_STR, m))
+            self._emit(OP_INDEX)
+            for a in n.args:
+                self._expr(a)
+            self._emit(OP_CALL_VALUE, len(n.args))
+            return
         raise CodeGenPyroError(
             f"method '.{m}()' not supported in pyro backend.")
 

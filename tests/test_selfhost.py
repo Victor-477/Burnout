@@ -731,6 +731,19 @@ check_selfhost('fn dbl(int x) -> int ={ return x * 2; } '
                'fn(int)->int c = pick(true); print(c(10));',         # 20
                "funcvalues", lines_fn=_out_lines)
 
+# a function-typed struct field called directly (EMP ESCOPO L-16): `m.f(21)`
+# must read the field and CALL_VALUE it. The self-host used to compile every
+# method other than push to OP_LEN, so this printed the map's size. The value
+# is built with a MAP literal: the self-host does not lower struct literals
+# (`M { ... }`) yet, and a struct is a map on the VM either way.
+check_selfhost('struct M { string nome; fn(int)->int f; } '
+               'fn dbl(int x) -> int ={ return x * 2; } '
+               'M m = {"nome": "m", "f": dbl}; '
+               'print(m.f(21)); '                                    # 42
+               'int[] xs = [1, 2]; xs.push(3); print(xs.length); '   # 3 (push/length untouched)
+               'print(xs.size());',                                  # 3
+               "fnfields", lines_fn=_out_lines)
+
 # exponent literals: both lexers must agree on where a number ends. `2e` is NOT
 # an exponent (no digit follows), so it stays INT_LIT 2 + IDENT e, and the `e`
 # in the token text is lower-cased so `2E-4` and `2e-4` lex to the same thing.

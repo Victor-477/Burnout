@@ -2997,8 +2997,20 @@ class CodeGenGo:
             return f"{obj}[{s}:{e}]"
         if m == 'pop_last':
             return f"{obj}[len({obj})-1]"
+        # A function-typed struct field called directly (`m.rotear(r)`): Go
+        # exports struct fields, so the field is `Rotear`, not `rotear`
+        # (ESCOPO L-16 of the EMP project).
+        if self._is_fn_field(m):
+            return f"{obj}.{go_field(m)}({', '.join(args)})"
         # fallback: unknown method
         return f"{obj}.{gid(m)}({', '.join(args)})"
+
+    def _is_fn_field(self, name: str) -> bool:
+        for fields in self.te._structs.values():
+            ft = (fields.get(name) or '').replace(' ', '')
+            if ft.startswith('fn(') or ft.startswith('(fn('):
+                return True
+        return False
 
     def _stmt_call(self, node) -> str:
         """Call in statement position (handles push -> append)."""

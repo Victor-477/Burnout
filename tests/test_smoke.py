@@ -2073,5 +2073,21 @@ except _SemErr as e:
 check("semantics: s[i] = v rejected with immutable message", "strings are immutable" in _err25)
 
 # ── result ───────────────────────────────────────────────
+# -- L-16 (EMP): a function-typed struct field called directly --
+# `m.f(21)` reads the field and calls the value. pyro refused it ("method not
+# supported"), go emitted `m.f` where the exported field is `F`, and the
+# self-host compiled it to OP_LEN (covered in test_selfhost [fnfields]).
+print("[L-16] calling a function-typed struct field")
+_f16 = ('struct M { string nome; fn(int)->int f; }\n'
+        'fn dbl(int x) -> int ={ return x * 2; }\n'
+        'M m = M { nome: "m", f: dbl };\nprint(m.f(21));\n')
+_ops16 = _pyro_code_ops(_f16)
+check("pyro: m.f(x) reads the field and CALL_VALUEs it",
+      "CALL_VALUE" in _ops16 and "INDEX" in _ops16)
+check("go: m.f(x) calls the exported field M.F", "m.F(" in gen_go(_f16))
+check("node: m.f(x) calls the field", "m.f(" in gen_node(_f16))
+expect_pyro_err('struct M { int n; }\nM m = M { n: 1 };\nprint(m.nada(1));\n',
+                "pyro: a method that is not a function-typed field is still refused")
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
