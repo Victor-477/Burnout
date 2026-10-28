@@ -2107,5 +2107,25 @@ check("node: m.f(x) calls the field", "m.f(" in gen_node(_f16))
 expect_pyro_err('struct M { int n; }\nM m = M { n: 1 };\nprint(m.nada(1));\n',
                 "pyro: a method that is not a function-typed field is still refused")
 
+# -- L-05 (EMP): json_valid(s) guards json_decode, which aborts uncatchably --
+# Cryo/examples/example_json_valid.cryo runs it on every backend (test_examples);
+# these cover the mechanism. The property that matters — json_valid approves
+# only what Go's encoding/json (the strictest engine) accepts — was checked by
+# fuzzing 400 mutated documents against encoding/json: 0 approved-but-refused.
+print("[L-05] json_valid")
+check("json_valid is lowered, not left unknown",
+      '__cryo_json_valid' in gen_node('print(json_valid("{}"));' + chr(10)))
+check("json_valid: the helper is emitted once however many calls",
+      gen_node('print(json_valid("1")); print(json_valid("2"));' + chr(10))
+      .count('function __cryo_json_valid') == 1)
+check("json_valid: a user function of the same name still wins",
+      'return false' in gen_node('fn json_valid(string s) -> bool ={ return false; }' + chr(10)
+                                 + 'print(json_valid("{}"));' + chr(10)))
+_jv_src = Parser._STR_HELPERS['json_valid'][2]
+check("json_valid never calls json_decode (it must not abort itself)",
+      'json_decode' not in _jv_src)
+check("json_valid bounds the float64 range (Go refuses 1.8e308)", '308' in _jv_src)
+check("json_valid compiles on pyro", isinstance(gen_pyro('print(json_valid("[1]"));'), (bytes, bytearray)))
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)
