@@ -843,6 +843,24 @@ check("resolve: cycle detectado", _mod_err('import "ciclo_a.cryo"'))
 check("resolve: colisao de name detectada",
       _mod_err('import "util.cryo" import "colide.cryo"'))
 check("resolve: module missing", _mod_err('import "nao_existe.cryo"'))
+
+# L-15 (EMP): a syntax error INSIDE an imported module carries the module's
+# path, so the CLI, `cryoc test` and the LSP point at the right file. It used
+# to be rendered against the importer (its name, its line, its caret).
+from parser import ParseError as _PE15
+_w("quebrado15.cryo", 'pub fn a() -> int ={\n    return 1 +;\n}\n')
+_w("meio15.cryo", 'import "quebrado15.cryo" as q;\npub fn b() -> int ={ return q::a(); }\n')
+def _parse_err_path(src):
+    try:
+        resolve_modules(ast_of(src), _tmp); return None
+    except _PE15 as e:
+        return getattr(e, 'path', None) or ''
+_p15 = _parse_err_path('import "quebrado15.cryo" as q;\nprint(q::a());')
+check("L-15: syntax error in an imported module names that module",
+      bool(_p15) and _p15.endswith('quebrado15.cryo'))
+_p15b = _parse_err_path('import "meio15.cryo" as m;\nprint(m::b());')
+check("L-15: nested import names the innermost module",
+      bool(_p15b) and _p15b.endswith('quebrado15.cryo'))
 check("resolve: colisao with o program principal",
       _mod_err('import "util.cryo" fn double(int x) -> int ={ return x; }'))
 # codegen ponta-a-ponta with module (via compile_source do compiler)
