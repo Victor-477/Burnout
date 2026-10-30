@@ -29,7 +29,7 @@ from ast_nodes import (
     BinaryExpr, UnaryExpr, TernaryExpr, CallExpr, Identifier, Literal,
     # 11.28 — the constructs the self-hosted parser gained
     For, ForEach, Break, Continue, CompoundAssignment, Increment,
-    ArrayLiteral, IndexAccess, IndexAssignment, FieldAccess,
+    ArrayLiteral, IndexAccess, IndexAssignment, FieldAccess, FieldAssignment,
     StructDecl, StructInit, EnumDecl, MatchStatement, Block,
     # 12.6 — the desugarings and remaining shapes
     TryCatch, Switch, SwitchCase, Lambda, MapLiteral, CastExpr,
@@ -135,6 +135,8 @@ def ser(n):
         return f"(incr {n.op} {n.name})"
     if isinstance(n, IndexAssignment):
         return f"(setidx {ser(n.obj)} {ser(n.index)} {ser(n.value)})"
+    if isinstance(n, FieldAssignment):
+        return f"(setfield {ser(n.obj)} {n.field} {ser(n.value)})"
     if isinstance(n, ArrayLiteral):
         return "(arr" + "".join(" " + ser(e) for e in n.elements) + ")"
     if isinstance(n, IndexAccess):
@@ -481,6 +483,8 @@ SAMPLES_133 = [
      'int a = 1; int b = 2; print(a < b);'),
     ("a non-generic declaration is unchanged",
      'fn f(int a) -> int ={ return a; }'),
+    ("struct field assignment (plain, compound, increment, chained, indexed)",
+     'struct P { int x; } P p = new P{x: 1}; p.x = 2; p.x += 3; p.x++; a.b.c = 4; xs[0].x = 5;'),
 ]
 
 for _label, _src in SAMPLES_1128 + SAMPLES_126 + SAMPLES_133:
@@ -619,12 +623,15 @@ check_selfhost('map<string,int> m = {"x": 1, "y": 2}; print(m["x"]); print(m["y"
                'print(len(m));',
                "maps", lines_fn=_out_lines)
 
-# structs: new S{...} -> map; field reads (Cryo has no field-assignment syntax)
+# structs: new S{...} -> map; field reads and field writes (L-07)
 check_selfhost('struct Point { int x; int y; } '
                'Point p = new Point{ x: 3, y: 4 }; print(p.x); print(p.y); '
+               'p.x = 10; p.y += 6; p.x++; print(p.x); print(p.y); '
                'print(p.x + p.y); '
                'struct Box { int w; int h; } fn area(Box b) -> int ={ return b.w * b.h; } '
-               'Box bx = new Box{ w: 5, h: 6 }; print(area(bx));',
+               'fn grow(Box b, int dw) -> void ={ b.w = b.w + dw; } '
+               'Box bx = new Box{ w: 5, h: 6 }; print(area(bx)); '
+               'grow(bx, 3); print(area(bx));',
                "structs", lines_fn=_out_lines)
 
 # for loops: C-style (init; cond; upd) and for-each (T x in coll)

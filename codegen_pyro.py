@@ -527,6 +527,7 @@ class CodeGenPyro:
         elif isinstance(n, VarDecl):            self._var(n)
         elif isinstance(n, Assignment):         self._assign(n)
         elif isinstance(n, IndexAssignment):    self._index_assign(n)
+        elif isinstance(n, FieldAssignment):    self._field_assign(n)
         elif isinstance(n, CompoundAssignment): self._compound(n)
         elif isinstance(n, Increment):          self._incr(n)
         elif isinstance(n, Return):             self._return(n)
@@ -624,6 +625,13 @@ class CodeGenPyro:
         # cont[key] = val
         self._expr(n.obj)
         self._expr(n.index)
+        self._expr(n.value)
+        self._emit(OP_SETIDX)
+
+    def _field_assign(self, n: FieldAssignment):
+        # obj.field = val (struct is a map at runtime)
+        self._expr(n.obj)
+        self._emit(OP_CONST, self._const(TAG_STR, n.field))
         self._expr(n.value)
         self._emit(OP_SETIDX)
 

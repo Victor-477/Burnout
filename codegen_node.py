@@ -543,6 +543,8 @@ class CodeGenNode:
                            f"{self._expr(n.value)});")
             else:
                 self._emit(f"{self._expr(n.obj)}[{self._expr(n.index)}] = {self._expr(n.value)};")
+        elif isinstance(n, FieldAssignment):
+            self._emit(f"{self._expr(n.obj)}.{n.field} = {self._expr(n.value)};")
         elif isinstance(n, CompoundAssignment):
             self._emit(f"{jsid(n.name)} {n.op} {self._expr(n.value)};")
         elif isinstance(n, Increment):
@@ -727,6 +729,8 @@ class CodeGenNode:
             return f"{jsid(n.name)} {n.op} {self._expr(n.value)}"
         if isinstance(n, Increment):
             return f"{jsid(n.name)}{n.op}"
+        if isinstance(n, FieldAssignment):
+            return f"{self._expr(n.obj)}.{n.field} = {self._expr(n.value)}"
         return self._expr(n)
 
     # ── expressions ──────────────────────────────────────────

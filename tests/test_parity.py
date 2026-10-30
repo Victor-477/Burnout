@@ -1663,6 +1663,162 @@ agree("round reaches c and cpp with the same rule",
       'print(round(2.5)); print(round(-2.5)); print(round(-0.5));\n',
       backends=('pyro', 'c', 'cpp'), expect="3\n-3\n-1")
 
+# ── L-07: struct field assignment across all backends & engines ──
+print("\n── L-07: struct field assignment (s.campo = expr) ──")
+
+_L07_SIMPLE = (
+    'struct Sensor { int id; number valor; }\n'
+    'Sensor s = Sensor { id: 1, valor: 36.6 };\n'
+    's.valor = 40.0;\n'
+    'print(s.valor);\n'
+)
+agree("L-07: simple struct field assignment (Sensor s; s.valor = 40.0)",
+      _L07_SIMPLE,
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="40")
+
+# Also verify C VM and AOT native on the canonical Sensor reproducer
+_C_VM = os.path.join(ROOT, 'build', 'pyrovm' + EXE)
+_PYRO_CLI = os.path.join(ROOT, 'Burnout', 'pyro.py')
+_l07_work = tempfile.mkdtemp(prefix='cryo_l07_')
+if os.path.isfile(_C_VM):
+    _p_out = os.path.join(_l07_work, 'sensor.pyro')
+    if _compile(_l07_work, _L07_SIMPLE, 'pyro', _p_out).returncode == 0:
+        _r_cvm = subprocess.run([_C_VM, _p_out], capture_output=True, text=True,
+                                encoding='utf-8', errors='replace', timeout=60)
+        check("L-07: C VM prints 40 on Sensor reproducer",
+              _r_cvm.returncode == 0 and _r_cvm.stdout.strip() == "40",
+              _r_cvm.stdout + _r_cvm.stderr)
+if shutil.which('gcc'):
+    _s_cryo = os.path.join(_l07_work, 'sensor.cryo')
+    with open(_s_cryo, 'w', encoding='utf-8') as _f:
+        _f.write(_L07_SIMPLE)
+    _aot_exe = os.path.join(_l07_work, 'sensor_aot' + EXE)
+    _b_aot = subprocess.run([sys.executable, _PYRO_CLI, 'build', _s_cryo, '-o', _aot_exe],
+                            capture_output=True, text=True, encoding='utf-8',
+                            errors='replace', timeout=300)
+    if _b_aot.returncode == 0 and os.path.isfile(_aot_exe):
+        _r_aot = subprocess.run([_aot_exe], capture_output=True, text=True,
+                                encoding='utf-8', errors='replace', timeout=60)
+        check("L-07: AOT native binary prints 40 on Sensor reproducer",
+              _r_aot.returncode == 0 and _r_aot.stdout.strip() == "40",
+              _r_aot.stdout + _r_aot.stderr)
+    else:
+        check("L-07: AOT native binary builds for Sensor reproducer", False,
+              (_b_aot.stdout + _b_aot.stderr)[-300:])
+
+agree("L-07: compound assignments (+=, -=, *=, /=, %=) and ++/-- on fields",
+      'struct Counter { int n; number v; }\n'
+      'Counter c = Counter { n: 10, v: 5.0 };\n'
+      'c.n += 5; print(c.n);\n'
+      'c.n -= 3; print(c.n);\n'
+      'c.n *= 2; print(c.n);\n'
+      'c.n /= 4; print(c.n);\n'
+      'c.n %= 4; print(c.n);\n'
+      'c.n++; c.n++; c.n--; print(c.n);\n'
+      'c.v += 2.5; c.v *= 2.0; print(c.v);\n'
+      'int sum = 0;\n'
+      'for (c.n = 0; c.n < 4; c.n++) { sum += c.n; }\n'
+      'print(sum);\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="15\n12\n24\n6\n2\n3\n15\n6")
+
+agree("L-07: struct passed as parameter mutates in-place (reference semantics)",
+      'struct Sensor { int id; number valor; }\n'
+      'fn recalibrate(Sensor x, number v) -> void ={\n'
+      '    x.valor = v;\n'
+      '    x.id += 10;\n'
+      '}\n'
+      'Sensor s = Sensor { id: 1, valor: 36.6 };\n'
+      'recalibrate(s, 42.5);\n'
+      'print(s.id);\n'
+      'print(s.valor);\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="11\n42.5")
+
+agree("L-07: this.campo = x inside impl methods",
+      'struct Account { string owner; int balance; }\n'
+      'impl Account {\n'
+      '    fn deposit(int amount) -> void ={\n'
+      '        this.balance += amount;\n'
+      '    }\n'
+      '    fn rename(string new_owner) -> void ={\n'
+      '        this.owner = new_owner;\n'
+      '    }\n'
+      '    fn info() -> string ={\n'
+      '        return this.owner + ":" + to_string(this.balance);\n'
+      '    }\n'
+      '}\n'
+      'Account acc = Account { owner: "Ana", balance: 100 };\n'
+      'acc.deposit(50);\n'
+      'acc.rename("Bia");\n'
+      'print(acc.info());\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="Bia:150")
+
+agree("L-07: nested structs (a.b.c = x) and struct arrays (arr[i].campo = x)",
+      'struct Inner { int x; }\n'
+      'struct Mid { Inner inner; }\n'
+      'struct Outer { Mid mid; }\n'
+      'Outer o = Outer { mid: Mid { inner: Inner { x: 1 } } };\n'
+      'o.mid.inner.x = 10;\n'
+      'o.mid.inner.x += 5;\n'
+      'o.mid.inner.x++;\n'
+      'print(o.mid.inner.x);\n'
+      'Inner[] arr = [Inner { x: 10 }, Inner { x: 20 }];\n'
+      'arr[0].x = 99;\n'
+      'arr[1].x += 5;\n'
+      'arr[1].x++;\n'
+      'print(arr[0].x);\n'
+      'print(arr[1].x);\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="16\n99\n26")
+
+# Semantic errors: non-existent field (with caret + did-you-mean) and non-struct target
+_bad_field = _compile(_l07_work,
+                      'struct Sensor { int id; number valor; }\n'
+                      'Sensor s = Sensor { id: 1, valor: 36.6 };\n'
+                      's.valr = 40.0;\n',
+                      'pyro', os.path.join(_l07_work, 'bad1.pyro'))
+_bad_field_out = (_bad_field.stdout or '') + (_bad_field.stderr or '')
+check("L-07: assigning to non-existent field is a semantic error with caret and hint",
+      _bad_field.returncode != 0
+      and "has no field 'valr'" in _bad_field_out
+      and "did you mean `valor`?" in _bad_field_out
+      and "^" in _bad_field_out,
+      _bad_field_out)
+
+_bad_nonstruct = _compile(_l07_work,
+                          'int x = 10;\nx.valor = 20;\n',
+                          'pyro', os.path.join(_l07_work, 'bad2.pyro'))
+_bad_nonstruct_out = (_bad_nonstruct.stdout or '') + (_bad_nonstruct.stderr or '')
+check("L-07: assigning to a field on a non-struct is a semantic error",
+      _bad_nonstruct.returncode != 0
+      and "cannot assign to field 'valor' on non-struct" in _bad_nonstruct_out,
+      _bad_nonstruct_out)
+
+# Backend refusal on asm and wasm
+for _unsup in ('asm', 'wasm'):
+    _res_u = _compile(_l07_work, 'struct S { int x; }\nS s = S { x: 1 };\ns.x = 2;\n', _unsup, os.path.join(_l07_work, 'u.' + _unsup))
+    _u_out = (_res_u.stdout or '') + (_res_u.stderr or '')
+    check(f"L-07: --backend {_unsup} refuses explicitly with 'use --backend'",
+          _res_u.returncode != 0 and "use --backend" in _u_out,
+          _u_out)
+# Verify C, C++, and AOT C codegen emit pointer/handle field assignments even if gcc/g++ is absent
+sys.path.insert(0, os.path.join(ROOT, 'Burnout'))
+sys.path.insert(0, os.path.join(ROOT, 'Cryo'))
+import compiler as _comp_l07, aot_pyro as _aot_l07
+_c_gen = _comp_l07.compile_source(_L07_SIMPLE, 'c', True, 'win64')
+_cpp_gen = _comp_l07.compile_source(_L07_SIMPLE, 'cpp', True, 'win64')
+_aot_gen = _aot_l07.compile_to_c(_comp_l07.compile_source(_L07_SIMPLE, 'pyro', True, 'win64'))
+check("L-07: C backend generates heap-pointer struct field assignment (s->valor = 40.0)",
+      "__cryo_new_Sensor" in _c_gen and "(s)->valor = 40.0;" in _c_gen, _c_gen)
+check("L-07: C++ backend generates shared_ptr struct field assignment (s->valor = 40.0)",
+      "std::make_shared<Sensor>" in _cpp_gen and "s->valor = 40.0;" in _cpp_gen, _cpp_gen)
+check("L-07: AOT native C translation emits index_set for struct field assignment",
+      "index_set(" in _aot_gen, _aot_gen[:300])
+shutil.rmtree(_l07_work, ignore_errors=True)
+
 # round(-0.0) is DELIBERATELY ABSENT. It disagrees four ways across the
 # backends for a reason that has nothing to do with rounding — node prints
 # -0 as 0 while pyro/go/c print -0, and pyro folds `0.0 - 0.0` to -0 —

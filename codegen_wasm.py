@@ -13,7 +13,7 @@
 #  with a clear message (future iterations add a linear-memory runtime + DOM).
 # ============================================================
 from ast_nodes import (
-    Program, FunctionDecl, VarDecl, Assignment, CompoundAssignment, Increment,
+    Program, FunctionDecl, VarDecl, Assignment, FieldAssignment, CompoundAssignment, Increment,
     Return, If, While, For, ForEach, Break, Continue, Block,
     BinaryExpr, UnaryExpr, CallExpr, Identifier, Literal,
 )
@@ -255,6 +255,10 @@ class CodeGenWasm:
             self._call(n)
             if n.callee != "print":
                 self.body += bytes([0x1A])                           # drop non-void result
+        elif isinstance(n, FieldAssignment):
+            raise CodeGenWasmError(
+                "struct field assignment is not supported by the wasm backend "
+                "(use --backend go, c, node or pyro)")
         else:
             raise CodeGenWasmError(f"'{type(n).__name__}' not supported by the wasm backend")
 

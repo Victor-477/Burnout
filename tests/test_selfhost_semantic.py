@@ -153,6 +153,8 @@ VALID = [
      'int a = 1; int b = 2; print(a > 0 ? b : 3);'),
     ("string interpolation", 'int n = 2; print("n=${n}");'),
     ("prefix ! and ~", 'bool b = false; print(!b); print(~0);'),
+    ("struct field assignment (L-07)",
+     'struct P { int x; } P p = new P { x: 1 }; p.x = 2; p.x += 3; p.x++; print(p.x);'),
 ]
 
 INVALID = [
@@ -168,6 +170,8 @@ INVALID = [
     ("a variable that has gone out of scope",
      'if (true) { int q = 1; } print(q);', "undeclared variable"),
     ("string index assignment", 'string s = "abc"; s[1] = "z";', "strings are immutable"),
+    ("assignment to non-existent struct field",
+     'struct P { int x; } P p = new P { x: 1 }; p.y = 2;', "has no field"),
 ]
 
 
