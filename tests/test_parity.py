@@ -1401,7 +1401,7 @@ agree("checked arithmetic reaches cpp too",
 # rather than silently producing different mojibake.
 print("\n── text helpers on non-ASCII input ──")
 
-_U8 = ('pyro', 'node', 'go')
+_U8 = ('pyro', 'node', 'go', 'c', 'cpp')
 
 agree("reverse_str reverses characters, not bytes",
       u'print(reverse_str("Ação"));\n',
@@ -1817,6 +1817,15 @@ check("L-07: C++ backend generates shared_ptr struct field assignment (s->valor 
       "std::make_shared<Sensor>" in _cpp_gen and "s->valor = 40.0;" in _cpp_gen, _cpp_gen)
 check("L-07: AOT native C translation emits index_set for struct field assignment",
       "index_set(" in _aot_gen, _aot_gen[:300])
+agree("upper and lower handle non-ASCII Latin text (ISSUES/31)",
+      u'print(upper("ação"));\nprint(lower("AÇÃO"));\n',
+      backends=_U8, expect=u"AÇÃO\nação")
+
+agree("negative zero (-0.0) and 0.0 - 0.0 agree across all backends (ISSUES/33)",
+      'number z = -1.0;\nnumber w = 0.0;\nprint(z * w);\nprint(0.0 - 0.0);\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="-0\n0")
+
 shutil.rmtree(_l07_work, ignore_errors=True)
 
 # round(-0.0) is DELIBERATELY ABSENT. It disagrees four ways across the

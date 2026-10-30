@@ -572,7 +572,7 @@ class CodeGenGo:
                   "\tcase reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:",
                   "\t\treturn strconv.FormatUint(rv.Uint(), 10)",
                   "\tcase reflect.Float32, reflect.Float64:",
-                  "\t\treturn strconv.FormatFloat(rv.Float(), 'g', -1, 64)",
+                  "\t\tif rv.Float() == 0 && math.Signbit(rv.Float()) { return \"-0\" }\n\t\treturn strconv.FormatFloat(rv.Float(), 'g', -1, 64)",
                   "\t}",
                   "\treturn fmt.Sprint(v)", "}", ""]
         if 'or' in self._helpers:
@@ -2292,7 +2292,12 @@ class CodeGenGo:
             if node.kind == 'bool':   return 'true' if node.value else 'false'
             if node.kind == 'string': return self._go_string(node.value)
             if node.kind == 'int':    return str(node.value)
-            if node.kind == 'float':  return repr(float(node.value))
+            if node.kind == 'float':
+                fv = float(node.value)
+                if fv == 0.0 and math.copysign(1.0, fv) < 0:
+                    self._imports.add('math')
+                    return 'math.Copysign(0, -1)'
+                return repr(fv)
             return str(node.value)
 
         if isinstance(node, Identifier):
@@ -2313,6 +2318,12 @@ class CodeGenGo:
             return self._ternary(node)
 
         if isinstance(node, UnaryExpr):
+            if (node.op == '-' and isinstance(node.operand, Literal)
+                    and node.operand.kind == 'float'
+                    and float(node.operand.value) == 0.0
+                    and math.copysign(1.0, float(node.operand.value)) > 0):
+                self._imports.add('math')
+                return 'math.Copysign(0, -1)'
             op = {'!': '!', '~': '^', '-': '-'}.get(node.op, node.op)
             return f"({op}{self._expr(node.operand)})"
 

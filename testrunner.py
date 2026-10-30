@@ -234,7 +234,7 @@ def _run(code, backend, work):
         import compiler
         cxx, cxx_dir = compiler.find_cxx()
         if cxx is None:
-            cxx, cxx_dir = 'g++', None
+            print("[cryoc test] no C++ toolchain found", file=sys.stderr); return 2
         exe = os.path.join(work, 'suite' + ('.exe' if sys.platform == 'win32' else ''))
         rt_dir = os.path.join(_here, 'runtime')
         cmd = [cxx, '-std=c++14', '-O2', '-I', rt_dir, out, '-o', exe]
