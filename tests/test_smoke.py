@@ -843,6 +843,24 @@ check("resolve: cycle detectado", _mod_err('import "ciclo_a.cryo"'))
 check("resolve: colisao de name detectada",
       _mod_err('import "util.cryo" import "colide.cryo"'))
 check("resolve: module missing", _mod_err('import "nao_existe.cryo"'))
+
+# L-15 (EMP): a syntax error INSIDE an imported module carries the module's
+# path, so the CLI, `cryoc test` and the LSP point at the right file. It used
+# to be rendered against the importer (its name, its line, its caret).
+from parser import ParseError as _PE15
+_w("quebrado15.cryo", 'pub fn a() -> int ={\n    return 1 +;\n}\n')
+_w("meio15.cryo", 'import "quebrado15.cryo" as q;\npub fn b() -> int ={ return q::a(); }\n')
+def _parse_err_path(src):
+    try:
+        resolve_modules(ast_of(src), _tmp); return None
+    except _PE15 as e:
+        return getattr(e, 'path', None) or ''
+_p15 = _parse_err_path('import "quebrado15.cryo" as q;\nprint(q::a());')
+check("L-15: syntax error in an imported module names that module",
+      bool(_p15) and _p15.endswith('quebrado15.cryo'))
+_p15b = _parse_err_path('import "meio15.cryo" as m;\nprint(m::b());')
+check("L-15: nested import names the innermost module",
+      bool(_p15b) and _p15b.endswith('quebrado15.cryo'))
 check("resolve: colisao with o program principal",
       _mod_err('import "util.cryo" fn double(int x) -> int ={ return x; }'))
 # codegen ponta-a-ponta with module (via compile_source do compiler)
@@ -2073,5 +2091,41 @@ except _SemErr as e:
 check("semantics: s[i] = v rejected with immutable message", "strings are immutable" in _err25)
 
 # ── result ───────────────────────────────────────────────
+# -- L-16 (EMP): a function-typed struct field called directly --
+# `m.f(21)` reads the field and calls the value. pyro refused it ("method not
+# supported"), go emitted `m.f` where the exported field is `F`, and the
+# self-host compiled it to OP_LEN (covered in test_selfhost [fnfields]).
+print("[L-16] calling a function-typed struct field")
+_f16 = ('struct M { string nome; fn(int)->int f; }\n'
+        'fn dbl(int x) -> int ={ return x * 2; }\n'
+        'M m = M { nome: "m", f: dbl };\nprint(m.f(21));\n')
+_ops16 = _pyro_code_ops(_f16)
+check("pyro: m.f(x) reads the field and CALL_VALUEs it",
+      "CALL_VALUE" in _ops16 and "INDEX" in _ops16)
+check("go: m.f(x) calls the exported field M.F", "m.F(" in gen_go(_f16))
+check("node: m.f(x) calls the field", "m.f(" in gen_node(_f16))
+expect_pyro_err('struct M { int n; }\nM m = M { n: 1 };\nprint(m.nada(1));\n',
+                "pyro: a method that is not a function-typed field is still refused")
+
+# -- L-05 (EMP): json_valid(s) guards json_decode, which aborts uncatchably --
+# Cryo/examples/example_json_valid.cryo runs it on every backend (test_examples);
+# these cover the mechanism. The property that matters — json_valid approves
+# only what Go's encoding/json (the strictest engine) accepts — was checked by
+# fuzzing 400 mutated documents against encoding/json: 0 approved-but-refused.
+print("[L-05] json_valid")
+check("json_valid is lowered, not left unknown",
+      '__cryo_json_valid' in gen_node('print(json_valid("{}"));' + chr(10)))
+check("json_valid: the helper is emitted once however many calls",
+      gen_node('print(json_valid("1")); print(json_valid("2"));' + chr(10))
+      .count('function __cryo_json_valid') == 1)
+check("json_valid: a user function of the same name still wins",
+      'return false' in gen_node('fn json_valid(string s) -> bool ={ return false; }' + chr(10)
+                                 + 'print(json_valid("{}"));' + chr(10)))
+_jv_src = Parser._STR_HELPERS['json_valid'][2]
+check("json_valid never calls json_decode (it must not abort itself)",
+      'json_decode' not in _jv_src)
+check("json_valid bounds the float64 range (Go refuses 1.8e308)", '308' in _jv_src)
+check("json_valid compiles on pyro", isinstance(gen_pyro('print(json_valid("[1]"));'), (bytes, bytearray)))
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

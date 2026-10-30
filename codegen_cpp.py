@@ -509,6 +509,7 @@ class CodeGenCpp:
         elif isinstance(node, Library):             self._library(node)
         elif isinstance(node, ForeignBlock):        self._foreign(node)
         elif isinstance(node, IndexAssignment):     self._index_assign(node)
+        elif isinstance(node, FieldAssignment):     self._field_assign(node)
         elif isinstance(node, SkillDecl):
             self._err("'skill' (the LLM layer) is not supported in the C++ "
                       "backend; use --backend go.")
@@ -907,6 +908,10 @@ class CodeGenCpp:
             return f"{cppid(node.name)} {node.op} {self._expr(node.value)}"
         if isinstance(node, Increment):
             return f"{cppid(node.name)}{node.op}"
+        if isinstance(node, FieldAssignment):
+            ot = self.te.infer(node.obj)
+            ft = self.te.struct_field(ot, node.field)
+            return f"{self._expr(node.obj)}->{cppid(node.field)} = {self._expr_typed(node.value, ft)}"
         return self._expr(node)
 
     def _foreach(self, n: ForEach):
@@ -1043,6 +1048,11 @@ class CodeGenCpp:
             self._emit(f"cryo::map_set({obj}, {idx}, {val});")
         else:
             self._emit(f"cryo::set_at({obj}, {idx}, {val});")
+
+    def _field_assign(self, n: FieldAssignment):
+        ot = self.te.infer(n.obj)
+        ft = self.te.struct_field(ot, n.field)
+        self._emit(f"{self._expr(n.obj)}->{cppid(n.field)} = {self._expr_typed(n.value, ft)};")
 
     def _import(self, n: Import):
         self._emit(f"// [Cryo] import >{n.lang}<")

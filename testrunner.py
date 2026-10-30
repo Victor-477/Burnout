@@ -147,6 +147,16 @@ def _run_single(path, args):
     except ModuleError as e:
         print(f"\n{e}", file=sys.stderr)
         return 1
+    except (LexerError, ParseError) as e:
+        # A syntax error in an IMPORTED module escaped as a Python traceback.
+        # Render it against the module it is in (`path`, set by modules.py).
+        import compiler
+        tag = '[Lexical Error]' if isinstance(e, LexerError) else '[Syntax Error]'
+        where = getattr(e, 'path', None) or path
+        msgs = getattr(e, 'errors', None) or [str(e)]
+        print("\n" + "\n\n".join(compiler._point_at(where, m, tag) for m in msgs),
+              file=sys.stderr)
+        return 1
 
     print(f"[cryoc test] {path} — {len(tests)} test(s) on --backend {args.backend}\n")
     # The suite writes to this terminal from a CHILD process, which does not

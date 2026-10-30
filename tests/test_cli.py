@@ -702,5 +702,89 @@ for path in _AUDITED_ATTRS:
         print(f"    {os.path.basename(path)}: {b}")
     check(f"{os.path.basename(path)}: every node.attr is a real field", not bad)
 
+
+
+# ── 4. a bundled executable needs no toolchain at all ───────
+#
+# The VM binary already depended on nothing but the operating system's own
+# libraries, but it had no way to CARRY its program: running anything meant
+# shipping the VM, a .pyro beside it, and in practice the Python CLI that
+# produced the .pyro. `cryoc bundle` appends the bytecode to a copy of the
+# VM, so the result is one executable.
+#
+# THE ASSERTION THAT MATTERS IS THE STRIPPED ENVIRONMENT. Running the bundle
+# with the ambient PATH would prove nothing — this machine has Go, Node and
+# Python on it. The child gets a PATH with only the system directories, so
+# "no toolchain required" is tested rather than asserted.
+print("\n-- bundled executable: no Go, no C, no Python --")
+
+_EXE = '.exe' if sys.platform == 'win32' else ''
+_vm_bin = os.path.join(_root, 'Pyro', 'vm', 'pyrovm_go' + _EXE)
+
+if not os.path.isfile(_vm_bin):
+    print(f"  skip bundle (no VM binary at {_vm_bin}; "
+          f"build it with: cd Pyro/vm && go build -o pyrovm_go{_EXE} .)")
+else:
+    _bdir = tempfile.mkdtemp(prefix='cryo_bundle_')
+    _src = os.path.join(_bdir, 'app.cryo')
+    with open(_src, 'w', encoding='utf-8') as _f:
+        _f.write('print("bundled app");\n'
+                 'string[] a = args();\n'
+                 'print(len(a));\n'
+                 'int i = 0;\n'
+                 'while (i < len(a)) { print(a[i]); i = i + 1; }\n')
+    _pyro = os.path.join(_bdir, 'app.pyro')
+    _r = cryoc([_src, '--backend', 'pyro', '-o', _pyro, '--no-banner'])
+    check("bundle: the .pyro compiles", _r.returncode == 0 and
+          os.path.isfile(_pyro))
+
+    _app = os.path.join(_bdir, 'app' + _EXE)
+    _r = cryoc(['bundle', _pyro, '-o', _app, '--vm', _vm_bin])
+    check("bundle: cryoc bundle produces an executable",
+          _r.returncode == 0 and os.path.isfile(_app))
+    if os.path.isfile(_app):
+        check("bundle: it is bigger than the bytecode it carries",
+              os.path.getsize(_app) > os.path.getsize(_pyro))
+
+        # A PATH with nothing but the system directories. Go, Node, a C
+        # compiler and python are all unreachable from here.
+        if sys.platform == 'win32':
+            _root_dir = os.environ.get('SystemRoot', r'C:\Windows')
+            _bare = {'PATH': os.path.join(_root_dir, 'system32') + os.pathsep
+                             + _root_dir,
+                     'SystemRoot': _root_dir}
+        else:
+            _bare = {'PATH': '/usr/bin:/bin'}
+
+        _p = subprocess.run([_app, '--porta', '8080', 'cliente-42'],
+                            capture_output=True, text=True, encoding='utf-8',
+                            errors='replace', env=_bare, timeout=120)
+        _out = _p.stdout.replace('\r\n', '\n').strip()
+        check("bundle: it runs with only the system directories on PATH",
+              _p.returncode == 0, )
+        check("bundle: and prints what the program prints",
+              _out.startswith('bundled app'))
+        # The flags belong to the PROGRAM. With the program inside the binary
+        # there is no file argument to separate the VM's options from its
+        # own, so a bundle must parse none — the first version of this
+        # rejected --porta as an unknown VM option.
+        check("bundle: the program's own --flags reach args() intact",
+              _out == 'bundled app\n3\n--porta\n8080\ncliente-42')
+
+        # Bundling a bundle would strand the first payload mid-file and leave
+        # the second readable, so it would appear to work while shipping the
+        # program twice.
+        _r = cryoc(['bundle', _pyro, '-o',
+                    os.path.join(_bdir, 'twice' + _EXE), '--vm', _app])
+        check("bundle: bundling an already-bundled binary is refused",
+              _r.returncode != 0
+              and 'already carries' in (_r.stdout + _r.stderr))
+
+    # The plain VM must be unchanged by all of this: still wants a file.
+    _p = subprocess.run([_vm_bin], capture_output=True, text=True,
+                        encoding='utf-8', errors='replace', timeout=120)
+    check("bundle: the plain VM still asks for a program argument",
+          _p.returncode != 0 and 'usage' in (_p.stdout + _p.stderr))
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

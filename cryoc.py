@@ -45,5 +45,12 @@ if __name__ == '__main__':
         # 12.3 — cryo.toml / cryo.lock. Not a compile at all, so a subcommand.
         import pkg as _pkg
         sys.exit(_pkg.main(sys.argv[2:]))
+    elif len(sys.argv) > 1 and sys.argv[1] == 'bundle':
+        # One executable that needs no toolchain: the VM binary with the
+        # bytecode appended. A subcommand rather than a flag because it
+        # consumes a .pyro and produces an .exe — it does not compile
+        # anything.
+        import bundle as _bundle
+        sys.exit(_bundle.main(sys.argv[2:]))
     else:
         main()

@@ -10,6 +10,7 @@
 from ast_nodes import *
 from foreign import collect_imports, resolve_library_lang
 import json
+import math
 from typing import List, Dict, Set, Optional
 
 
@@ -89,6 +90,9 @@ def _go_fn_type(t: str) -> str:
     return f"func({gp})" + (f" {gr}" if gr else "")
 
 
+_STRUCT_NAMES: Set[str] = set()
+
+
 def go_type(t: str) -> str:
     if not t:
         return ''
@@ -97,7 +101,10 @@ def go_type(t: str) -> str:
     if t.startswith('fn(') and '->' in t:     # function type -> func(...)...
         return _go_fn_type(t)
     if t.endswith('?'):                       # optional -> pointer
-        return '*' + go_type(t[:-1])
+        inner = t[:-1]
+        if inner in _STRUCT_NAMES:
+            return f"*{gid(inner)}"
+        return '*' + go_type(inner)
     if t.startswith('map<') and t.endswith('>'):
         k, v = _split_type_pair(t[4:-1])
         return f"map[{go_type(k)}]{go_type(v)}"
@@ -107,6 +114,8 @@ def go_type(t: str) -> str:
         return f"*cryoFuture[{go_type(t[7:-1])}]"
     if t.endswith('[]'):
         return '[]' + go_type(t[:-2])
+    if t in _STRUCT_NAMES:
+        return f"*{gid(t)}"
     return GO_TYPE.get(t, t)   # structs/enums pass straight through
 
 
@@ -348,6 +357,7 @@ class CodeGenGo:
     # ── main entry ───────────────────────────────────
 
     def generate(self, program: Program) -> str:
+        _STRUCT_NAMES.clear()
         self._pre_scan(program.statements)
         # Roadmap 11.1 — a top-level `var` is module state, not a local of
         # main. Types are registered before ANY body is generated, so a
@@ -400,6 +410,7 @@ class CodeGenGo:
         for n in stmts:
             if isinstance(n, StructDecl):
                 self.te.reg_struct(n.name, {f.name: f.field_type for f in n.fields})
+                _STRUCT_NAMES.add(n.name)
             elif isinstance(n, EnumDecl):
                 self.te.reg_enum(n.name)
                 # 12.9 — an enum with no data at all compiles to plain Go
@@ -824,7 +835,7 @@ class CodeGenGo:
             # rendered by the key's own text. Normalising structs to maps first
             # makes Marshal sort them too, so all three backends agree and the
             # rule is the one cryoStr already states: pairs ordered by key text.
-            self._imports.update(('reflect', 'strings', 'fmt'))
+            self._imports.update(('reflect', 'strings', 'fmt', 'encoding/json'))
             H += ["func cryoJSONNorm(v any) any {",
                   "\trv := reflect.ValueOf(v)",
                   "\tfor rv.Kind() == reflect.Ptr || rv.Kind() == reflect.Interface {",
@@ -978,7 +989,7 @@ class CodeGenGo:
                   "\tfor i, v := range data { buf[i] = byte(v & 0xFF) }",
                   "\treturn os.WriteFile(path, buf, 0644) == nil", "}", ""]
         if 'llm' in self._helpers:
-            self._imports.update(('os', 'net/http', 'io', 'encoding/json', 'bytes', 'fmt', 'time'))
+            self._imports.update(('os', 'net/http', 'io', 'encoding/json', 'bytes', 'fmt', 'time', 'strings'))
             self._imports.add('strconv')
             H += ["// cryoLLMPost: POST to CRYO_LLM_URL. Returns (text, kind,",
                   "// detail); kind is \"\" on success (roadmap 11.19).",
@@ -1223,7 +1234,7 @@ class CodeGenGo:
                   '\t\t\t"matching this schema exactly:\\n" + schema',
                   "\t}", "}", ""]
         if 'llmstream' in self._helpers:
-            self._imports.update(('bufio', 'strings', 'sync'))
+            self._imports.update(('bufio', 'strings', 'sync', 'os', 'net/http', 'encoding/json', 'bytes', 'fmt', 'time'))
             H += ["// ── LLM streaming (roadmap 11.17) ──",
                   "// The request runs in a goroutine feeding a channel, so the",
                   "// program sees each token as it lands instead of waiting for",
@@ -1356,7 +1367,7 @@ class CodeGenGo:
                   '\tif st == nil { return "" }',
                   "\treturn st.cur", "}", ""]
         if 'agent' in self._helpers:
-            self._imports.update(('sync', 'fmt', 'os'))
+            self._imports.update(('sync', 'fmt', 'os', 'encoding/json'))
             H += ["// ── agent loop (roadmap 11.20) ──",
                   "// Contract: POST {model, messages, tools} ->",
                   "//   {\"tool_call\": {name, arguments}}      one call",
@@ -1761,6 +1772,7 @@ class CodeGenGo:
         elif isinstance(node, ConstDecl):          self._local_const(node)
         elif isinstance(node, Assignment):         self._assign(node)
         elif isinstance(node, IndexAssignment):    self._index_assign(node)
+        elif isinstance(node, FieldAssignment):    self._field_assign(node)
         elif isinstance(node, CompoundAssignment): self._compound(node)
         elif isinstance(node, Increment):          self._incr(node)
         elif isinstance(node, Return):             self._return(node)
@@ -1798,6 +1810,8 @@ class CodeGenGo:
         self._emit(f"{tmp} := {self._expr(inner)}")
         if is_optional(t):
             self._emit(f"if {tmp} == nil {{ return nil }}")
+            if t[:-1] in _STRUCT_NAMES:
+                return tmp
             return f"(*{tmp})"
         ok = f"{gid(t)}_Ok"
         self._emit(f"if _, __ok := interface{{}}({tmp}).({ok}); !__ok {{ return {tmp} }}")
@@ -1857,6 +1871,8 @@ class CodeGenGo:
             bind(self._spawn(n.value, future_elem(vt)))
         elif n.value is not None:
             bind(self._expr_typed(n.value, vt))
+        elif vt in _STRUCT_NAMES:
+            bind(f"&{gid(vt)}{{}}", short=True)
         else:
             self._emit(f"var {name} {gt}")
         if not module:
@@ -1871,6 +1887,8 @@ class CodeGenGo:
             return self._expr(value)
         self._helpers.add('ptr')
         base = opt_type[:-1]                      # 'int?' -> 'int'
+        if base in _STRUCT_NAMES:
+            return self._expr(value)
         base_go = go_type(base)
         inner = self._expr(value)
         if base in ('int', 'number', 'string', 'bool'):
@@ -1900,6 +1918,12 @@ class CodeGenGo:
                        f"{self._expr(n.index)}, {self._expr(n.value)})")
             return
         self._emit(f"{self._expr(n.obj)}[{self._expr(n.index)}] = {self._expr(n.value)}")
+
+    def _field_assign(self, n: FieldAssignment):
+        ot = self.te.infer(n.obj)
+        base = ot[:-1] if ot.endswith('?') else ot
+        ft = self.te.struct_field(base, n.field)
+        self._emit(f"{self._expr(n.obj)}.{go_field(n.field)} = {self._expr_typed(n.value, ft)}")
 
     def _compound(self, n: CompoundAssignment):
         self._emit(f"{gid(n.name)} {n.op} {self._expr(n.value)}")
@@ -2075,6 +2099,11 @@ class CodeGenGo:
             return f"{gid(node.name)} {node.op} {self._expr(node.value)}"
         if isinstance(node, Increment):
             return f"{gid(node.name)}{node.op}"
+        if isinstance(node, FieldAssignment):
+            ot = self.te.infer(node.obj)
+            base = ot[:-1] if ot.endswith('?') else ot
+            ft = self.te.struct_field(base, node.field)
+            return f"{self._expr(node.obj)}.{go_field(node.field)} = {self._expr_typed(node.value, ft)}"
         return self._expr(node)
 
     def _switch(self, n: Switch):
@@ -2159,6 +2188,7 @@ class CodeGenGo:
             self._indent += 1
             if n.catch_body is not None:
                 self._helpers.add('str')
+                self._imports.add('reflect')
                 self._emit("if r := recover(); r != nil {")
                 self._indent += 1
                 self._emit('if reflect.TypeOf(r).String() == "*runtime.PanicNilError" { r = nil }')
@@ -2346,12 +2376,17 @@ class CodeGenGo:
                 else:
                     v_code = self._expr(v)
                 fields_code.append(f"{go_field(k)}: {v_code}")
-            return f"{gid(node.struct_name)}{{{', '.join(fields_code)}}}"
+            prefix = "&" if node.struct_name in _STRUCT_NAMES else ""
+            return f"{prefix}{gid(node.struct_name)}{{{', '.join(fields_code)}}}"
 
         if isinstance(node, CastExpr):
             return self._cast(node)
 
         if isinstance(node, UnwrapExpr):
+            ot = self.te.infer(node.operand)
+            if is_optional(ot) and ot[:-1] in _STRUCT_NAMES:
+                self._helpers.add('unwrap')
+                return f"cryoUnwrap[*({gid(ot[:-1])})](&({self._expr(node.operand)}))"
             self._helpers.add('unwrap')
             return f"cryoUnwrap({self._expr(node.operand)})"
 
@@ -2441,6 +2476,9 @@ class CodeGenGo:
         if isinstance(inner, CallExpr) and inner.callee == 'json_decode':
             self._imports.add('encoding/json')
             src = self._expr(inner.args[0]) if inner.args else '""'
+            if target in _STRUCT_NAMES:
+                return (f"func() {gt} {{ var _v {gid(target)}; "
+                        f"_ = json.Unmarshal([]byte({src}), &_v); return &_v }}()")
             return (f"func() {gt} {{ var _v {gt}; "
                     f"_ = json.Unmarshal([]byte({src}), &_v); return _v }}()")
         # llm("model", prompt) as T  ->  typed structured output (Phase 3)
@@ -2456,6 +2494,11 @@ class CodeGenGo:
             # used to be assigned to _, so any bad reply became a zero value.
             self._helpers.add('llmtyped')
             self._imports.update(('fmt', 'os'))
+            if target in _STRUCT_NAMES:
+                return (f"func() {gt} {{ var _v {gid(target)}; "
+                        f"if _e := json.Unmarshal([]byte(cryoLLMTyped({model}, {prompt}, {schema}, {opts})), &_v); _e != nil {{ "
+                        f'fmt.Fprintln(os.Stderr, "[Cryo LLM] could not read the structured reply:", _e) }}; '
+                        f"return &_v }}()")
             return (f"func() {gt} {{ var _v {gt}; "
                     f"if _e := json.Unmarshal([]byte(cryoLLMTyped({model}, {prompt}, {schema}, {opts})), &_v); _e != nil {{ "
                     f'fmt.Fprintln(os.Stderr, "[Cryo LLM] could not read the structured reply:", _e) }}; '
@@ -2489,7 +2532,7 @@ class CodeGenGo:
         if op == '&&': return f"({l} && {r})"
         if op == '||': return f"({l} || {r})"
         if op == '??':
-            if is_optional(lt):
+            if is_optional(lt) and lt[:-1] not in _STRUCT_NAMES:
                 self._helpers.add('orptr')
                 return f"cryoOrPtr({l}, {r})"
             self._helpers.add('or')
@@ -2997,8 +3040,20 @@ class CodeGenGo:
             return f"{obj}[{s}:{e}]"
         if m == 'pop_last':
             return f"{obj}[len({obj})-1]"
+        # A function-typed struct field called directly (`m.rotear(r)`): Go
+        # exports struct fields, so the field is `Rotear`, not `rotear`
+        # (ESCOPO L-16 of the EMP project).
+        if self._is_fn_field(m):
+            return f"{obj}.{go_field(m)}({', '.join(args)})"
         # fallback: unknown method
         return f"{obj}.{gid(m)}({', '.join(args)})"
+
+    def _is_fn_field(self, name: str) -> bool:
+        for fields in self.te._structs.values():
+            ft = (fields.get(name) or '').replace(' ', '')
+            if ft.startswith('fn(') or ft.startswith('(fn('):
+                return True
+        return False
 
     def _stmt_call(self, node) -> str:
         """Call in statement position (handles push -> append)."""
