@@ -10,6 +10,7 @@
 from ast_nodes import *
 from foreign import collect_imports, resolve_library_lang
 import json
+import math
 from typing import List, Dict, Set, Optional
 
 
@@ -824,7 +825,7 @@ class CodeGenGo:
             # rendered by the key's own text. Normalising structs to maps first
             # makes Marshal sort them too, so all three backends agree and the
             # rule is the one cryoStr already states: pairs ordered by key text.
-            self._imports.update(('reflect', 'strings', 'fmt'))
+            self._imports.update(('reflect', 'strings', 'fmt', 'encoding/json'))
             H += ["func cryoJSONNorm(v any) any {",
                   "\trv := reflect.ValueOf(v)",
                   "\tfor rv.Kind() == reflect.Ptr || rv.Kind() == reflect.Interface {",
@@ -978,7 +979,7 @@ class CodeGenGo:
                   "\tfor i, v := range data { buf[i] = byte(v & 0xFF) }",
                   "\treturn os.WriteFile(path, buf, 0644) == nil", "}", ""]
         if 'llm' in self._helpers:
-            self._imports.update(('os', 'net/http', 'io', 'encoding/json', 'bytes', 'fmt', 'time'))
+            self._imports.update(('os', 'net/http', 'io', 'encoding/json', 'bytes', 'fmt', 'time', 'strings'))
             self._imports.add('strconv')
             H += ["// cryoLLMPost: POST to CRYO_LLM_URL. Returns (text, kind,",
                   "// detail); kind is \"\" on success (roadmap 11.19).",
@@ -1223,7 +1224,7 @@ class CodeGenGo:
                   '\t\t\t"matching this schema exactly:\\n" + schema',
                   "\t}", "}", ""]
         if 'llmstream' in self._helpers:
-            self._imports.update(('bufio', 'strings', 'sync'))
+            self._imports.update(('bufio', 'strings', 'sync', 'os', 'net/http', 'encoding/json', 'bytes', 'fmt', 'time'))
             H += ["// ── LLM streaming (roadmap 11.17) ──",
                   "// The request runs in a goroutine feeding a channel, so the",
                   "// program sees each token as it lands instead of waiting for",
@@ -1356,7 +1357,7 @@ class CodeGenGo:
                   '\tif st == nil { return "" }',
                   "\treturn st.cur", "}", ""]
         if 'agent' in self._helpers:
-            self._imports.update(('sync', 'fmt', 'os'))
+            self._imports.update(('sync', 'fmt', 'os', 'encoding/json'))
             H += ["// ── agent loop (roadmap 11.20) ──",
                   "// Contract: POST {model, messages, tools} ->",
                   "//   {\"tool_call\": {name, arguments}}      one call",
@@ -2159,6 +2160,7 @@ class CodeGenGo:
             self._indent += 1
             if n.catch_body is not None:
                 self._helpers.add('str')
+                self._imports.add('reflect')
                 self._emit("if r := recover(); r != nil {")
                 self._indent += 1
                 self._emit('if reflect.TypeOf(r).String() == "*runtime.PanicNilError" { r = nil }')
@@ -2997,8 +2999,20 @@ class CodeGenGo:
             return f"{obj}[{s}:{e}]"
         if m == 'pop_last':
             return f"{obj}[len({obj})-1]"
+        # A function-typed struct field called directly (`m.rotear(r)`): Go
+        # exports struct fields, so the field is `Rotear`, not `rotear`
+        # (ESCOPO L-16 of the EMP project).
+        if self._is_fn_field(m):
+            return f"{obj}.{go_field(m)}({', '.join(args)})"
         # fallback: unknown method
         return f"{obj}.{gid(m)}({', '.join(args)})"
+
+    def _is_fn_field(self, name: str) -> bool:
+        for fields in self.te._structs.values():
+            ft = (fields.get(name) or '').replace(' ', '')
+            if ft.startswith('fn(') or ft.startswith('(fn('):
+                return True
+        return False
 
     def _stmt_call(self, node) -> str:
         """Call in statement position (handles push -> append)."""

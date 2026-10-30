@@ -829,7 +829,8 @@ def main() -> None:
             run         = args.run,
         )
     except LexerError     as e:
-        print("\n" + _point_at(args.input, str(e), '[Lexical Error]'),
+        # `path` is set when the error is in an imported module (L-15).
+        print("\n" + _point_at(getattr(e, 'path', None) or args.input, str(e), '[Lexical Error]'),
               file=sys.stderr); sys.exit(1)
     except ParseError     as e:
         # 11.24 — these messages already carry "Line N"; showing that line with
@@ -839,6 +840,9 @@ def main() -> None:
         # line and caret: joining them into one string would leave `_point_at`
         # underlining the first error's line under all of them, which is worse
         # than showing one error properly.
+        # The file the error is in: an imported module sets `path` (L-15);
+        # otherwise it is the file being compiled.
+        src_path = getattr(e, 'path', None) or args.input
         errs = getattr(e, 'errors', None)
         if errs:
             n = len(errs)
@@ -850,12 +854,12 @@ def main() -> None:
                     else "the parser found %d problem%s:") % (
                         n, '' if n == 1 else 's')
             parts = ["\n[Syntax Error] " + head]
-            parts += [_point_at(args.input, m, '[Syntax Error]') for m in errs]
+            parts += [_point_at(src_path, m, '[Syntax Error]') for m in errs]
             if more:
                 parts.append("[Syntax Error] " + getattr(
                     type(e), 'CAP_NOTICE', '... stopping here'))
             print("\n\n".join(parts), file=sys.stderr); sys.exit(1)
-        print("\n" + _point_at(args.input, str(e), '[Syntax Error]'),
+        print("\n" + _point_at(src_path, str(e), '[Syntax Error]'),
               file=sys.stderr); sys.exit(1)
     except ForeignError   as e:
         print(f"\n[Foreign Error] {e}", file=sys.stderr); sys.exit(1)
