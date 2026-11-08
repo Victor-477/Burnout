@@ -780,6 +780,29 @@ else:
               _r.returncode != 0
               and 'already carries' in (_r.stdout + _r.stderr))
 
+    # ONE STEP from source. Requiring a .pyro by hand made the common case
+    # — "turn this into something I can hand to a client" — a two-step with
+    # an intermediate file nobody wants to keep.
+    _app2 = os.path.join(_bdir, "fromsrc" + _EXE)
+    _r = cryoc(["bundle", _src, "-o", _app2, "--vm", _vm_bin])
+    check("bundle: a .cryo is compiled and bundled in one step",
+          _r.returncode == 0 and os.path.isfile(_app2))
+    if os.path.isfile(_app2):
+        _p = subprocess.run([_app2, "x"], capture_output=True, text=True,
+                            encoding="utf-8", errors="replace",
+                            env=_bare, timeout=120)
+        check("bundle: the one-step result runs on a bare PATH too",
+              _p.returncode == 0 and "bundled app" in _p.stdout)
+    # A program that does not compile must show the COMPILER's diagnostic.
+    # Wrapping it in a bundling error would bury the only useful line.
+    _bad = os.path.join(_bdir, "bad.cryo")
+    with open(_bad, "w", encoding="utf-8") as _f:
+        _f.write("print(naoExiste(1));" + chr(10))
+    _r = cryoc(["bundle", _bad, "-o", os.path.join(_bdir, "bad" + _EXE),
+                "--vm", _vm_bin])
+    check("bundle: a source error surfaces as the compiler's own message",
+          _r.returncode != 0
+          and "Semantic Error" in (_r.stdout + _r.stderr))
     # The plain VM must be unchanged by all of this: still wants a file.
     _p = subprocess.run([_vm_bin], capture_output=True, text=True,
                         encoding='utf-8', errors='replace', timeout=120)

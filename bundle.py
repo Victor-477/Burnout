@@ -66,10 +66,14 @@ def bundle(vm_path: str, pyro_path: str, out_path: str) -> None:
 
 
 def main(argv) -> int:
-    if len(argv) < 2:
-        print("usage: pyro bundle <program.pyro> [-o out] [--vm path]\n"
-              "  Produces one executable that runs with no Go, C or Python\n"
-              "  installed on the target machine.", file=sys.stderr)
+    # `< 1`, not `< 2`: `cryoc bundle app.cryo` with no -o is the common case
+    # and must not print usage. The output name defaults from the input.
+    if len(argv) < 1:
+        print("usage: cryoc bundle <program.cryo|program.pyro> "
+              "[-o out] [--vm path]\n"
+              "  Produces ONE executable that runs with no Go, C or Python\n"
+              "  installed on the target machine. A .cryo is compiled first.",
+              file=sys.stderr)
         return 2
 
     pyro_path = argv[0] if not argv[0].startswith('-') else None
@@ -93,7 +97,7 @@ def main(argv) -> int:
             return 2
 
     if not pyro_path:
-        print("[bundle] no .pyro given", file=sys.stderr)
+        print("[bundle] no program given", file=sys.stderr)
         return 2
     if not os.path.isfile(pyro_path):
         print(f"[bundle] not found: {pyro_path}", file=sys.stderr)
@@ -101,6 +105,36 @@ def main(argv) -> int:
 
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     exe = '.exe' if sys.platform == 'win32' else ''
+
+    # A .cryo is compiled first, so shipping is one command rather than two.
+    # Requiring the .pyro by hand made the common case — "turn this program
+    # into something I can hand to a client" — a two-step with an
+    # intermediate file nobody wants to keep.
+    #
+    # Via subprocess rather than by importing the compiler: this tool is a
+    # thin wrapper around a byte append, and reaching into compiler internals
+    # would tie it to a module that changes far more often than the bundle
+    # format does.
+    tmp_pyro = None
+    if pyro_path.endswith('.cryo'):
+        import subprocess
+        import tempfile
+        tmp_pyro = os.path.join(tempfile.mkdtemp(prefix='cryo_bundle_'),
+                                os.path.splitext(os.path.basename(pyro_path))[0]
+                                + '.pyro')
+        r = subprocess.run(
+            [sys.executable, os.path.join(root, 'Burnout', 'cryoc.py'),
+             pyro_path, '--backend', 'pyro', '-o', tmp_pyro, '--no-banner'],
+            capture_output=True, text=True, encoding='utf-8',
+            errors='replace')
+        if r.returncode != 0 or not os.path.isfile(tmp_pyro):
+            # The compiler's own diagnostic is the useful one; adding a
+            # second line about bundling on top would bury it.
+            sys.stderr.write(r.stdout + r.stderr)
+            return 1
+        if out_path is None:
+            out_path = os.path.splitext(os.path.basename(pyro_path))[0] + exe
+        pyro_path = tmp_pyro
     if vm_path is None:
         # The Go VM by default: it is the reference engine, and it links its
         # runtime statically, so the bundle it produces needs nothing beyond
