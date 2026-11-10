@@ -514,6 +514,26 @@ def compile_file(input_path: str,
         print(f"⚠ --sandbox applies to the pyro, go and node backends; "
               f"ignored for '{backend}'.", file=sys.stderr)
 
+    # ISSUES/29 — `--unsafe` does NOTHING on the pyro backend, and it used to
+    # do nothing silently. `codegen_pyro` assigns self.safe once and never
+    # reads it, so both modes produce byte-identical bytecode (verified by
+    # hash), and both VMs now check `+ - *` overflow unconditionally.
+    #
+    # Saying so rather than fixing it, because the fix is a FORMAT change: the
+    # .pyro flags byte has no safe-mode bit, and adding one that only the Go
+    # VM honours would turn a dead flag into a live DIVERGENCE — `--unsafe`
+    # skipping checks on one VM and not the other. That must land in both VMs
+    # and the self-hosted compiler at once, and the C VM cannot be built on
+    # this machine.
+    #
+    # A flag that quietly means nothing is the complaint; a flag that says it
+    # means nothing is merely a limitation.
+    if not safe and backend == 'pyro':
+        print("⚠ --unsafe has no effect on the pyro backend: the VM checks "
+              "integer overflow unconditionally and the bytecode is identical "
+              "either way (ISSUES/29). Use --backend go or c for an unchecked "
+              "build.", file=sys.stderr)
+
     # ── code generation ──
     try:
         code = compile_source(source, backend, safe, abi, base_dir=base_dir,

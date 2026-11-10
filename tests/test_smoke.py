@@ -1584,20 +1584,41 @@ check("parse_int checks the int64 limit, not just the characters",
 # test_parity runs the boundaries across backends; these are the mechanism,
 # plus the one property that makes the helpers correct at all.
 print("[C1] checked arithmetic")
+# gen_go, NOT gen_node. checked_* carries 9223372036854775807 in its own
+# body, and node now refuses an int literal past 2^53 because a JavaScript
+# number would round it (ISSUES/28). That refusal is correct, and it means
+# these helpers CANNOT work on node: at that magnitude a double has a
+# spacing of 2048, so `a > mx - b` compares two values that round together,
+# no overflow is detected, and checked_add(MX, 1) returns a number instead
+# of null. They were wrong on node from the day they landed; the literal
+# refusal is what surfaced it.
 check("checked_add is lowered",
-      '__cryo_checked_add' in gen_node('print(checked_add(1, 2) ?? 0);' + chr(10)))
+      '__cryo_checked_add' in gen_go('print(checked_add(1, 2) ?? 0);' + chr(10)))
 check("checked_mul is lowered",
-      '__cryo_checked_mul' in gen_node('print(checked_mul(1, 2) ?? 0);' + chr(10)))
+      '__cryo_checked_mul' in gen_go('print(checked_mul(1, 2) ?? 0);' + chr(10)))
 check("a user function of the same name still wins",
-      'return 7' in gen_node(
+      'return 7' in gen_go(
           'fn checked_add(int a, int b) -> int ={ return 7; }' + chr(10)
           + 'print(checked_add(1, 2));' + chr(10)))
 _ck_arity = ''
 try:
-    gen_node('print(checked_add(1) ?? 0);' + chr(10))
+    gen_go('print(checked_add(1) ?? 0);' + chr(10))
 except Exception as _e:
     _ck_arity = str(_e)
 check("they take two arguments, and say so", 'takes 2 arguments' in _ck_arity)
+# The node refusal must name the BUILTIN, not a literal the user never
+# wrote: being told about 9223372036854775807 after typing
+# checked_add(1, 2) sends someone hunting their own source for a number
+# that is not in it.
+_ck_node = ''
+try:
+    gen_node('print(checked_add(1, 2) ?? 0);' + chr(10))
+except Exception as _e:
+    _ck_node = str(_e)
+check("C1: node refuses checked_add, naming the builtin",
+      'checked_add()' in _ck_node and 'node backend' in _ck_node)
+check("C1: and does not blame a literal the user did not write",
+      '9223372036854775807' not in _ck_node)
 # NO GUARD MAY ITSELF OVERFLOW. A bound spelled `a + b > MAX` has already
 # done the thing it exists to prevent, so the helpers contain no bare
 # addition or multiplication outside the single guarded operation they end

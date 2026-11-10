@@ -1344,7 +1344,15 @@ agree("a rejected parse does not end the program",
 # ordinary input is all anybody tries.
 print("\n── C1: checked arithmetic ──")
 
-_CK = ('pyro', 'node', 'go')
+# NODE IS NOT IN THIS LIST, and the reason is the feature, not the test:
+# checked_* carries 9223372036854775807 in its own body, which a
+# JavaScript number cannot hold, so node now refuses the helpers
+# outright (ISSUES/28). Before that refusal they COMPILED on node and
+# silently failed to detect overflow — at that magnitude a double's
+# spacing is 2048, so `a > mx - b` compares two values that round
+# together. The small-value cases below passed on node while the
+# feature was broken there, which is exactly how it went unnoticed.
+_CK = ('pyro', 'go')
 _MXMN = 'int MX = 9223372036854775807;\nint MN = -9223372036854775807 - 1;\n'
 
 agree("checked_add at and past the top",
@@ -1382,6 +1390,19 @@ agree("zero short-circuits before any sign analysis",
 agree("the sign combinations",
       'print(checked_mul(-3, -4) ?? -999); print(checked_mul(3, -4) ?? -999);\nprint(checked_mul(-3, 4) ?? -999); print(checked_add(-5, -7) ?? -999);\n',
       backends=_CK, expect="12\n-12\n-12\n-12")
+
+# Pinning the REFUSAL, not just node's absence from the tuples above. An
+# absent backend proves nothing — it looks identical to nobody having got
+# round to adding it.
+_ck_work = tempfile.mkdtemp(prefix='cryo_ck_')
+_ck_r = _compile(_ck_work, 'print(checked_add(1, 2) ?? 0);' + chr(10),
+                 'node', os.path.join(_ck_work, 'p.js'))
+_ck_msg = (_ck_r.stdout + _ck_r.stderr)
+check("checked_* is refused on node rather than silently wrong",
+      _ck_r.returncode != 0 and 'checked_add()' in _ck_msg, _ck_msg[:200])
+check("…and the message names the backend, not a literal the user wrote",
+      'node backend' in _ck_msg and '9223372036854775807' not in _ck_msg,
+      _ck_msg[:200])
 
 agree("checked arithmetic reaches cpp too",
       'print(checked_add(2, 3) ?? -999); print(checked_mul(6, 7) ?? -999);\nprint(checked_mul(4611686018427387904, 2) ?? -999);\n',
