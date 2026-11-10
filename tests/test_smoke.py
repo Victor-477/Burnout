@@ -2148,5 +2148,126 @@ check("json_valid never calls json_decode (it must not abort itself)",
 check("json_valid bounds the float64 range (Go refuses 1.8e308)", '308' in _jv_src)
 check("json_valid compiles on pyro", isinstance(gen_pyro('print(json_valid("[1]"));'), (bytes, bytearray)))
 
+
+# ── graphics: colour, renderer arithmetic, and the framebuffer ──
+# THESE ARE DESUGARED, NOT NATIVE, and the distinction is the whole
+# reason the graphics layer was affordable. The parser rewrites
+# `rgb(...)` into a call to a synthetic `__cryo_rgb` before the semantic
+# analyser runs, so the name never reaches BUILTINS and costs nothing in
+# the six mirrored native tables (codegen_pyro.NATIVES, the Go VM, the C
+# runtime, selfhost codegen's nativeId, and two isBuiltin tables) — nor
+# an id against the u8 ceiling of 256 that OP_NATIVE imposes.
+#
+# So the invariant is the INVERSE of the obvious one: a desugared helper
+# must be ABSENT from BUILTINS. Finding one there would mean someone had
+# paid the six-mirror cost for something the front end already handles,
+# leaving two implementations of one name free to disagree.
+from semantic import BUILTINS
+
+for _gfx in ('rgb', 'rgba', 'color_a', 'color_r', 'color_g', 'color_b',
+             'lerp', 'clamp01', 'smoothstep', 'to_radians', 'to_degrees',
+             'dist', 'fb_new', 'fb_set', 'fb_get', 'fb_fill', 'fb_rect',
+             'fb_line', 'fb_ppm'):
+    check("%s is desugared, so it stays out of the native tables" % _gfx,
+          _gfx not in BUILTINS and _gfx in Parser._STR_HELPERS)
+
+# No helper anywhere may be a native too. Asserted over all 49 rather
+# than the 19 added here, because the next person to add one is the one
+# this catches.
+check("no desugared helper is also a native (one name, one implementation)",
+      not (set(Parser._STR_HELPERS) & set(BUILTINS)))
+
+# The natives the graphics helpers are WRITTEN OVER, though, must exist:
+# their source calls these by name, so removing one breaks every helper
+# built on it with an error pointing at generated code.
+for _dep in ('clamp', 'abs', 'hypot', 'to_string'):
+    check("the helpers' dependency '%s' is still a native" % _dep,
+          _dep in BUILTINS)
+
+check("rgb is lowered", '__cryo_rgb' in gen_go('print(rgb(1, 2, 3));' + chr(10)))
+check("fb_new is lowered",
+      '__cryo_fb_new' in gen_go('int[] p = fb_new(1, 1, 0); print(len(p));' + chr(10)))
+check("fb_ppm is lowered",
+      '__cryo_fb_ppm' in gen_go('int[] p = fb_new(1, 1, 0); print(fb_ppm(p, 1, 1));' + chr(10)))
+
+check("a user function named rgb still wins",
+      'return 7' in gen_go(
+          'fn rgb(int r, int g, int b) -> int ={ return 7; }' + chr(10)
+          + 'print(rgb(1, 2, 3));' + chr(10)))
+
+_fb_arity = ''
+try:
+    gen_go('int[] p = fb_new(2, 2, 0); fb_set(p, 2, 0, 0);' + chr(10))
+except Exception as _e:
+    _fb_arity = str(_e)
+check("fb_set takes five arguments, and says so",
+      'takes 5 arguments' in _fb_arity)
+
+# THE REGRESSION, at the static level. fb_rect and fb_line both call
+# fb_set — the first helpers to depend on another helper. The sub-parser
+# returns the nested fb_set in BOTH its synthetic_fns and its
+# statements, so it was injected twice and the program died with
+# "duplicate declaration '__cryo_fb_set'". One emission each is the
+# whole property; a count of 2 is the bug returning.
+_nested = gen_go('int[] p = fb_new(4, 4, 0);' + chr(10)
+                 + 'fb_rect(p, 4, 0, 0, 2, 2, 1);' + chr(10)
+                 + 'fb_line(p, 4, 0, 0, 3, 3, 2);' + chr(10))
+check("two helpers sharing a dependency emit it exactly once",
+      _nested.count('func __cryo_fb_set') == 1)
+check("both dependents are still emitted alongside it",
+      _nested.count('func __cryo_fb_rect') == 1
+      and _nested.count('func __cryo_fb_line') == 1)
+
+# ── the mechanisms, not just the answers ──
+# Each of these is a property an "inline it" or "mask it, it's faster"
+# change would silently break, which is why the source is asserted and
+# not only the output.
+
+_rgb_src = Parser._STR_HELPERS['rgb'][2]
+# CLAMPED, not masked. A channel that overshoots is the normal case in
+# lighting code; masking wraps a bright red to black, which reads as an
+# art bug rather than an arithmetic one.
+check("rgb clamps its channels rather than masking them",
+      'clamp(' in _rgb_src and '&' not in _rgb_src)
+# Shift-free on purpose: `<<` on a negative or oversized operand is one
+# of the places the backends differ, and this runs per pixel per frame.
+check("colour packing multiplies rather than shifting",
+      '65536' in _rgb_src and '<<' not in _rgb_src)
+check("rgb sets alpha opaque (0xFF000000)", '4278190080' in _rgb_src)
+
+_set_src = Parser._STR_HELPERS['fb_set'][2]
+# x and y are checked SEPARATELY, before the flat index is formed. One
+# bounds test on the index would let x == w land on the next row — the
+# classic framebuffer bug where a vertical line bleeds one pixel into
+# the opposite edge.
+check("fb_set bounds x against the width before forming the index",
+      'x >= w' in _set_src
+      and _set_src.index('x >= w') < _set_src.index('y * w + x'))
+check("fb_set clips instead of aborting (a rasteriser plots off-edge constantly)",
+      'return;' in _set_src and 'abort' not in _set_src)
+
+_line_src = Parser._STR_HELPERS['fb_line'][2]
+# Integer Bresenham. A float slope would differ in the last bit between
+# engines and make any image comparison useless as a test.
+check("fb_line is integer-only, so every engine lights the same pixels",
+      'number' not in _line_src and '.0' not in _line_src)
+
+_ppm_src = Parser._STR_HELPERS['fb_ppm'][2]
+# P3, not P6: binary PPM needs the byte value of each channel written
+# raw, and Cryo has no ord()/chr() — the same wall base64 and PNG hit.
+check("fb_ppm emits ASCII P3, which write_file can carry", 'P3' in _ppm_src)
+check("fb_ppm does not claim to emit binary P6", 'P6' not in _ppm_src)
+# Alpha has nowhere to go in PPM. Pinned so the omission stays a
+# decision rather than becoming a forgotten channel.
+check("fb_ppm writes three channels and drops alpha",
+      'color_r' in _ppm_src and 'color_g' in _ppm_src
+      and 'color_b' in _ppm_src and 'color_a' not in _ppm_src)
+
+check("the framebuffer helpers compile on pyro",
+      isinstance(gen_pyro('int[] p = fb_new(2, 2, rgb(1, 2, 3));' + chr(10)
+                          + 'fb_line(p, 2, 0, 0, 1, 1, 0);' + chr(10)
+                          + 'print(fb_ppm(p, 2, 2));' + chr(10)),
+                 (bytes, bytearray)))
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

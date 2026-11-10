@@ -45,6 +45,33 @@ for _stream in ('stdout', 'stderr'):
             pass
 
 
+def vm_flavour(path: str) -> str:
+    """Which engine an image actually is: 'go', 'native' or 'unknown'.
+
+    ISSUES/34: `Pyro/vm/pyrovm.exe` on this machine answers `go1.26.5` to
+    `go version` — the file under the C VM's name is a Go build. The
+    bundler could not tell, because it appends a trailer to whatever image
+    it is handed, so `--vm .../pyrovm.exe` silently produced a 10 MB
+    bundle while the caller believed they had chosen the 220 KB one.
+
+    Detected by the Go build-info blob rather than by size or filename,
+    because that is the thing `go version` itself reads and the only one
+    of the three that cannot be made to lie by a copy.
+    """
+    # 14 bytes Go writes into every binary ahead of its build info.
+    GO_BUILDINF = b'\xff Go buildinf:'
+    try:
+        with open(path, 'rb') as f:
+            image = f.read()
+    except OSError:
+        return 'unknown'
+    if GO_BUILDINF in image:
+        return 'go'
+    if image[:2] in (b'MZ', b'\x7fE') or image[:4] == b'\xcf\xfa\xed\xfe':
+        return 'native'
+    return 'unknown'
+
+
 def bundle(vm_path: str, pyro_path: str, out_path: str) -> None:
     with open(vm_path, 'rb') as f:
         vm = f.read()
@@ -163,10 +190,24 @@ def main(argv) -> int:
         base = os.path.splitext(os.path.basename(pyro_path))[0]
         out_path = base + exe
 
+    # Name the engine that actually went in, not the one the path
+    # suggests. ISSUES/34: the two differ by a factor of fifty in size,
+    # and a copied binary makes the filename worthless as evidence.
+    flavour = vm_flavour(vm_path)
     bundle(vm_path, pyro_path, out_path)
     size = os.path.getsize(out_path)
+    engine = {'go': 'Go VM', 'native': 'native VM',
+              'unknown': 'unrecognised image'}[flavour]
     print(f"✓ bundled: {out_path}  ({size:,} bytes, "
           f"{os.path.getsize(pyro_path):,} of it bytecode)")
+    print(f"  engine: {engine} — {os.path.basename(vm_path)}")
+    if flavour == 'unknown':
+        # Not fatal: an engine this does not recognise may still be a
+        # perfectly good VM, and refusing would make the bundler the
+        # judge of what a VM is. But saying nothing would let a text
+        # file be shipped as an executable in silence.
+        print("  warning: this does not look like an executable image",
+              file=sys.stderr)
     print("  runs with no Go, C or Python installed")
     return 0
 

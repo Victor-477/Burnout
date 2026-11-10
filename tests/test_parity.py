@@ -1855,6 +1855,199 @@ shutil.rmtree(_l07_work, ignore_errors=True)
 # and asserting any of them here would be asserting one of those four as
 # correct before anyone has decided which. ISSUES/33.
 
+
+# ── graphics: colour, the renderer arithmetic, and the framebuffer ──
+#
+# These exist because the graphics helpers are the first group where a
+# helper calls another helper (fb_rect and fb_line call fb_set), which
+# broke the shared injection path. The last check in this block is that
+# regression; the rest pin the behaviour the helpers promise.
+
+agree("GFX-01: rgb packs ARGB and the channel accessors invert it",
+      'int c = rgb(10, 20, 30);\n'
+      'print(color_a(c));\n'
+      'print(color_r(c));\n'
+      'print(color_g(c));\n'
+      'print(color_b(c));\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="255\n10\n20\n30")
+
+# CLAMPED, not masked. A channel that overshoots is the normal case in
+# lighting code, and masking would wrap a bright red to black — which
+# looks like an art bug, not an arithmetic one.
+agree("GFX-02: out-of-range colour components clamp rather than wrap",
+      'int c = rgb(300, -40, 255);\n'
+      'print(color_r(c));\n'
+      'print(color_g(c));\n'
+      'print(color_b(c));\n'
+      'int t = rgba(0, 0, 0, 999);\n'
+      'print(color_a(t));\n',
+      expect="255\n0\n255\n255")
+
+agree("GFX-03: rgba round-trips a transparent colour, alpha included",
+      'int c = rgba(1, 2, 3, 128);\n'
+      'print(color_a(c));\n'
+      'print(color_r(c));\n'
+      'print(color_g(c));\n'
+      'print(color_b(c));\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="128\n1\n2\n3")
+
+agree("GFX-04: lerp interpolates, and extrapolates past the ends unclamped",
+      'print(lerp(0.0, 10.0, 0.5));\n'
+      'print(lerp(0.0, 10.0, 0.0));\n'
+      'print(lerp(0.0, 10.0, 1.0));\n'
+      'print(lerp(0.0, 10.0, 2.0));\n'
+      'print(lerp(0.0, 10.0, -1.0));\n',
+      expect="5\n0\n10\n20\n-10")
+
+agree("GFX-05: clamp01 bounds a number to the unit interval",
+      'print(clamp01(0.25));\nprint(clamp01(-3.0));\nprint(clamp01(7.0));\n',
+      expect="0.25\n0\n1")
+
+agree("GFX-06: smoothstep is 0 below, 1 above, and 0.5 at the midpoint",
+      'print(smoothstep(0.0, 1.0, -1.0));\n'
+      'print(smoothstep(0.0, 1.0, 0.5));\n'
+      'print(smoothstep(0.0, 1.0, 2.0));\n',
+      expect="0\n0.5\n1")
+
+# The degenerate interval. e0 == e1 makes the division zero-over-zero,
+# which aborts on every engine rather than returning a nonsense
+# gradient. 0 below the edge and 1 at or above it is the limit of the
+# function as the interval closes, so it is the answer, not a fudge.
+agree("GFX-07: smoothstep with a zero-width interval does not divide by zero",
+      'print(smoothstep(5.0, 5.0, 4.0));\n'
+      'print(smoothstep(5.0, 5.0, 5.0));\n'
+      'print(smoothstep(5.0, 5.0, 6.0));\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="0\n1\n1")
+
+agree("GFX-08: angle conversion round-trips and dist measures a 3-4-5 triangle",
+      'print(to_degrees(to_radians(180.0)));\n'
+      'print(dist(0.0, 0.0, 3.0, 4.0));\n'
+      'print(dist(1.0, 1.0, 1.0, 1.0));\n',
+      expect="180\n5\n0")
+
+# ── the framebuffer ──
+
+agree("GFX-09: fb_new sizes the buffer and fills it with the clear colour",
+      'int[] px = fb_new(3, 2, 7);\n'
+      'print(len(px));\n'
+      'print(fb_get(px, 3, 0, 0));\n'
+      'print(fb_get(px, 3, 2, 1));\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="6\n7\n7")
+
+agree("GFX-10: fb_set writes through a call and fb_get reads it back",
+      'int[] px = fb_new(4, 4, 0);\n'
+      'fb_set(px, 4, 1, 2, 99);\n'
+      'print(fb_get(px, 4, 1, 2));\n'
+      'print(fb_get(px, 4, 2, 1));\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="99\n0")
+
+# THE ROW-WRAP GUARD. x and y are checked separately, before the flat
+# index is formed. A single `i < len(px)` test would let x == w land on
+# the next row — the classic framebuffer bug where a vertical line
+# bleeds one pixel into the opposite edge. Plotting at x == w must be a
+# no-op, and pixel (0, y+1) must stay untouched.
+agree("GFX-11: plotting at x == w is dropped, not wrapped onto the next row",
+      'int[] px = fb_new(4, 4, 0);\n'
+      'fb_set(px, 4, 4, 0, 5);\n'
+      'print(fb_get(px, 4, 0, 1));\n'
+      'fb_set(px, 4, -1, 0, 5);\n'
+      'fb_set(px, 4, 0, -1, 5);\n'
+      'fb_set(px, 4, 0, 99, 5);\n'
+      'print(fb_get(px, 4, 0, 0));\n'
+      'print(fb_get(px, 4, 3, 3));\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="0\n0\n0")
+
+agree("GFX-12: reading outside the buffer returns 0 rather than aborting",
+      'int[] px = fb_new(2, 2, 4);\n'
+      'print(fb_get(px, 2, 5, 0));\n'
+      'print(fb_get(px, 2, 0, 5));\n'
+      'print(fb_get(px, 2, -1, -1));\n',
+      expect="0\n0\n0")
+
+agree("GFX-13: fb_fill repaints every pixel",
+      'int[] px = fb_new(2, 2, 1);\n'
+      'fb_set(px, 2, 0, 0, 9);\n'
+      'fb_fill(px, 3);\n'
+      'print(fb_get(px, 2, 0, 0));\n'
+      'print(fb_get(px, 2, 1, 1));\n',
+      expect="3\n3")
+
+# fb_rect CALLS fb_set — the nested-helper path. It is also clipped by
+# construction: the loops bound the rectangle and fb_set drops whatever
+# is still outside, so an origin off the top-left corner costs nothing.
+agree("GFX-14: fb_rect fills its extent and clips a rectangle hanging off the edge",
+      'int[] px = fb_new(4, 4, 0);\n'
+      'fb_rect(px, 4, 1, 1, 2, 2, 6);\n'
+      'print(fb_get(px, 4, 1, 1));\n'
+      'print(fb_get(px, 4, 2, 2));\n'
+      'print(fb_get(px, 4, 0, 0));\n'
+      'print(fb_get(px, 4, 3, 3));\n'
+      'fb_rect(px, 4, -1, -1, 3, 3, 8);\n'
+      'print(fb_get(px, 4, 0, 0));\n'
+      'print(fb_get(px, 4, 1, 1));\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="6\n6\n0\n0\n8\n8")
+
+# Integer Bresenham, so the same pixels are lit on every backend. A line
+# drawn with a float slope would differ in the last bit between engines
+# and make any image comparison useless as a test.
+agree("GFX-15: fb_line draws an exact integer diagonal on every engine",
+      'int[] px = fb_new(4, 4, 0);\n'
+      'fb_line(px, 4, 0, 0, 3, 3, 2);\n'
+      'int y = 0;\n'
+      'while (y < 4) {\n'
+      '    string row = "";\n'
+      '    int x = 0;\n'
+      '    while (x < 4) {\n'
+      '        row = row + to_string(fb_get(px, 4, x, y));\n'
+      '        x = x + 1;\n'
+      '    }\n'
+      '    print(row);\n'
+      '    y = y + 1;\n'
+      '}\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="2000\n0200\n0020\n0002")
+
+agree("GFX-16: fb_line draws a single-pixel line and a horizontal run",
+      'int[] px = fb_new(3, 2, 0);\n'
+      'fb_line(px, 3, 1, 0, 1, 0, 5);\n'
+      'print(fb_get(px, 3, 1, 0));\n'
+      'fb_line(px, 3, 0, 1, 2, 1, 7);\n'
+      'print(fb_get(px, 3, 0, 1));\n'
+      'print(fb_get(px, 3, 1, 1));\n'
+      'print(fb_get(px, 3, 2, 1));\n',
+      expect="5\n7\n7\n7")
+
+# P3 is decimal text precisely so a test can diff the image. Note the
+# ALPHA IS ABSENT from the output — PPM has nowhere to put it, so a
+# renderer compositing transparency must flatten first.
+agree("GFX-17: fb_ppm emits a valid P3 image, alpha dropped",
+      'int[] px = fb_new(2, 2, rgba(1, 2, 3, 200));\n'
+      'print(fb_ppm(px, 2, 2));\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="P3\n2 2\n255\n1 2 3 1 2 3\n1 2 3 1 2 3\n")
+
+# THE REGRESSION. fb_rect and fb_line are the first helpers to call
+# another helper, and the sub-parser returned the nested fb_set in both
+# its synthetic_fns and its statements — so it was injected twice and
+# the program died with "duplicate declaration '__cryo_fb_set'". Two
+# helpers sharing one dependency in a single program is the shape that
+# broke, and a plain compile is the whole assertion.
+agree("GFX-18: two helpers depending on a third compile without a duplicate declaration",
+      'int[] px = fb_new(8, 8, 0);\n'
+      'fb_rect(px, 8, 0, 0, 2, 2, 1);\n'
+      'fb_line(px, 8, 0, 0, 7, 7, 2);\n'
+      'fb_fill(px, 3);\n'
+      'print(fb_get(px, 8, 4, 4));\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="3")
+
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))
 sys.exit(1 if _failed else 0)
