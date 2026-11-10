@@ -73,6 +73,9 @@ def opt_base(t: str) -> str:
     return t[:-1] if is_optional(t) else t
 
 
+_STRUCT_NAMES: Set[str] = set()
+
+
 def c_type(t: str) -> str:
     if t and t.endswith('?'):
         base = t[:-1]
@@ -112,6 +115,8 @@ def c_type(t: str) -> str:
             "--backend go, node or pyro.")
     if t and t.endswith('[]'):
         return 'CryoArray*'
+    if t in _STRUCT_NAMES:
+        return f"{t}*"
     return C_TYPE.get(t, t)          # struct types pass directly
 
 def elem_type(arr_t: str) -> str:
@@ -343,6 +348,7 @@ class CodeGenC:
     # ── main entry ────────────────────────────────────
 
     def generate(self, program: Program) -> str:
+        _STRUCT_NAMES.clear()
         self._pre_scan(program.statements)
         self._imported_langs = collect_imports(program)
 
@@ -377,6 +383,13 @@ class CodeGenC:
         for n in stmts:
             if isinstance(n, StructDecl):
                 self.te.reg_struct(n.name, {f.name: f.field_type for f in n.fields})
+                _STRUCT_NAMES.add(n.name)
+                self._type_decls.append(f"typedef struct {n.name} {n.name};")
+        if self._type_decls:
+            self._type_decls.append("")
+        for n in stmts:
+            if isinstance(n, StructDecl):
+                pass
             elif isinstance(n, EnumDecl):
                 self.te.reg_enum(n.name)
                 for m in n.members:
@@ -454,6 +467,8 @@ class CodeGenC:
         elif isinstance(node, ForeignBlock):        self._foreign(node)
         elif isinstance(node, IndexAssignment):
             self._index_assign(node)
+        elif isinstance(node, FieldAssignment):
+            self._field_assign(node)
         elif isinstance(node, (MapLiteral, CastExpr, UnwrapExpr, MatchStatement)):
             raise CodeGenError(
                 f"'{type(node).__name__}' (map/JSON/optional/match) is not yet "
@@ -468,10 +483,15 @@ class CodeGenC:
             self._emit(f"/* UNSUPPORTED: {type(node).__name__} */")
 
     def _struct(self, n: StructDecl):
-        self._emit(f"typedef struct {{")
+        self._emit(f"typedef struct {n.name} {{")
         for f in n.fields:
             self._emit(f"    {c_type(f.field_type)} {f.name};")
         self._emit(f"}} {n.name};")
+        self._emit(f"static inline {n.name}* __cryo_new_{n.name}({n.name} v) {{")
+        self._emit(f"    {n.name}* p = ({n.name}*)malloc(sizeof({n.name}));")
+        self._emit("    *p = v;")
+        self._emit("    return p;")
+        self._emit("}")
         self._emit()
 
     def _enum(self, n: EnumDecl):
@@ -511,8 +531,11 @@ class CodeGenC:
             et = elem_type(n.var_type)
             self._emit(f"{t} {n.name} = cryo_array_new();")
             for elem in n.value.elements:
-                fn = _PUSH_FN.get(et, 'cryo_array_push')
-                self._emit(f"{fn}({n.name}, {self._expr(elem)});")
+                if et in _STRUCT_NAMES:
+                    self._emit(f"cryo_array_push({n.name}, (uint64_t)(uintptr_t)({self._expr(elem)}));")
+                else:
+                    fn = _PUSH_FN.get(et, 'cryo_array_push')
+                    self._emit(f"{fn}({n.name}, {self._expr(elem)});")
         elif is_map(n.var_type) and (n.value is None
                                      or isinstance(n.value, MapLiteral)):
             # 11.27 — a map literal is built with statements, like an array
@@ -554,8 +577,11 @@ class CodeGenC:
             et = elem_type(n.var_type)
             self._emit(f"{n.name} = cryo_array_new();")
             for elem in n.value.elements:
-                fn = _PUSH_FN.get(et, 'cryo_array_push')
-                self._emit(f"{fn}({n.name}, {self._expr(elem)});")
+                if et in _STRUCT_NAMES:
+                    self._emit(f"cryo_array_push({n.name}, (uint64_t)(uintptr_t)({self._expr(elem)}));")
+                else:
+                    fn = _PUSH_FN.get(et, 'cryo_array_push')
+                    self._emit(f"{fn}({n.name}, {self._expr(elem)});")
         elif is_map(n.var_type) and isinstance(n.value, MapLiteral):
             # The `isinstance(n.value, MapLiteral)` guard is the fix for a
             # SILENT WRONG ANSWER. `_var` above has it; this branch did not,
@@ -610,8 +636,14 @@ class CodeGenC:
                 "backend: strings are immutable. Build a new string with "
                 "substr()/+ instead")
         et = elem_type(ot)
+        if et in _STRUCT_NAMES:
+            self._emit(f"cryo_array_set({obj}, {self._expr(n.index)}, (uint64_t)(uintptr_t)({self._expr(n.value)}));")
+            return
         fn = _SET_FN.get(et, 'cryo_array_set')
         self._emit(f"{fn}({obj}, {self._expr(n.index)}, {self._expr(n.value)});")
+
+    def _field_assign(self, n: FieldAssignment):
+        self._emit(f"({self._expr(n.obj)})->{n.field} = {self._expr(n.value)};")
 
     def _assign(self, n: Assignment):
         self._emit(f"{n.name} = {self._expr(n.value)};")
@@ -711,7 +743,10 @@ class CodeGenC:
         self._indent += 1
         self.te.push()
         self.te.set(n.var_name, et)
-        self._emit(f"{c_type(et)} {n.var_name} = {get}({arr}, {idx});")
+        if et in _STRUCT_NAMES:
+            self._emit(f"{c_type(et)} {n.var_name} = ({c_type(et)})(uintptr_t)cryo_array_get({arr}, {idx});")
+        else:
+            self._emit(f"{c_type(et)} {n.var_name} = {get}({arr}, {idx});")
         self._loop_depth += 1
         for s in n.body: self._gen(s)
         self._loop_depth -= 1
@@ -849,6 +884,8 @@ class CodeGenC:
             return f"{node.name} {node.op} {self._expr(node.value)}"
         if isinstance(node, Increment):
             return f"{node.name}{node.op}"
+        if isinstance(node, FieldAssignment):
+            return f"({self._expr(node.obj)})->{node.field} = {self._expr(node.value)}"
         return self._expr(node)
 
     def _try(self, n: TryCatch):
@@ -970,8 +1007,8 @@ class CodeGenC:
             if node.field == 'length':
                 # array length
                 return f"(({obj})->length)"
-            # struct field: pointer or value?
-            return f"{obj}.{node.field}"
+            # struct field: structs are heap-allocated pointers for reference semantics
+            return f"({obj})->{node.field}"
 
         if isinstance(node, IndexAccess):
             obj = self._expr(node.obj)
@@ -992,6 +1029,8 @@ class CodeGenC:
                 # with the VM's text.
                 return f"cryo_str_index({obj}, {idx})"
             et  = elem_type(at)
+            if et in _STRUCT_NAMES:
+                return f"(({c_type(et)})(uintptr_t)cryo_array_get({obj}, {idx}))"
             fn  = _GET_FN.get(et, 'cryo_array_get')
             return f"{fn}({obj}, {idx})"
 
@@ -999,9 +1038,10 @@ class CodeGenC:
             return "/* inline-array */"
 
         if isinstance(node, StructInit):
-            # C99 compound literal: (TypeName){ .field = val, ... }
+            # Heap-allocated via __cryo_new_<Type>((Type){ .field = val, ... })
             fields = ', '.join(f".{k} = {self._expr(v)}" for k, v in node.fields)
-            return f"({node.struct_name}){{{fields}}}"
+            body = fields if fields else "0"
+            return f"__cryo_new_{node.struct_name}(({node.struct_name}){{{body}}})"
 
         return f"/* UNKNOWN_EXPR({type(node).__name__}) */"
 
@@ -1303,6 +1343,8 @@ class CodeGenC:
         m    = node.method
 
         if m == 'push':
+            if et in _STRUCT_NAMES:
+                return f"cryo_array_push({obj}, (uint64_t)(uintptr_t)({args[0] if args else '0'}))"
             fn = _PUSH_FN.get(et, 'cryo_array_push')
             return f"{fn}({obj}, {args[0] if args else '0'})"
         if m in ('length', 'size'):

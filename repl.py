@@ -77,10 +77,12 @@ def _persists(node):
     necessary to keep the session's state."""
     from ast_nodes import (VarDecl, ConstDecl, Assignment, CompoundAssignment,
                            Increment, FunctionDecl, StructDecl, EnumDecl,
-                           ModuleImport, Import, Library, IndexAssignment)
+                           ModuleImport, Import, Library, IndexAssignment, FieldAssignment,
+                           FieldAssignment)
     return isinstance(node, (VarDecl, ConstDecl, Assignment, CompoundAssignment,
-                             Increment, IndexAssignment, FunctionDecl,
-                             StructDecl, EnumDecl, ModuleImport, Import, Library))
+                             Increment, IndexAssignment, FieldAssignment,
+                             FunctionDecl, StructDecl, EnumDecl, ModuleImport,
+                             Import, Library))
 
 
 def _is_value_expression(node):

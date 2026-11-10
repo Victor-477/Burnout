@@ -206,6 +206,13 @@ def compute_diagnostics(uri, text):
     except ModuleError as e:
         diags.append(_diag(0, 0, 1, f"module: {e}"))
         resolved = ast
+    except Exception as e:
+        # A syntax error inside an IMPORTED module: report it here, naming
+        # the module, instead of letting it escape (EMP ESCOPO L-15).
+        where = getattr(e, 'path', None)
+        first = (getattr(e, 'errors', None) or [str(e)])[0]
+        diags.append(_diag(0, 0, 1, f"error in imported module {os.path.basename(where) if where else ''}: {first}"))
+        resolved = ast
     # semantics
     try:
         for line, msg in semantic.findings(resolved):

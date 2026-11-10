@@ -258,6 +258,29 @@ def test_validation(work):
     check("every documented option is accepted together", rc == 0, log[-250:])
 
 
+def test_standalone_imports(work):
+    """Regression test for Problem 1: `llm(...)` without `print(r)` (so the `str`
+    helper does not pull in `"strings"` on its own) must still compile and run
+    cleanly on `--backend go` without `CRYO_LLM_URL` set."""
+    print("\n── standalone llm() without print compiles and runs on go ──")
+    src = ('string r = llm("gpt-4o-mini", "Capital da França?", {\n'
+           '    "temperature": 0.0,\n'
+           '    "seed": 42,\n'
+           '    "max_tokens": 20\n'
+           '});\n')
+    rc, log, exe = build(src, work, 'repro_no_print')
+    check("llm() without print compiles on go (includes import \"strings\")",
+          rc == 0, log[-250:])
+    if rc == 0:
+        env = dict(os.environ)
+        env.pop('CRYO_LLM_URL', None)
+        p = subprocess.run([exe], capture_output=True, text=True, env=env,
+                           timeout=60, errors='replace')
+        check("llm() without CRYO_LLM_URL runs and exits 0",
+              p.returncode == 0 and p.stdout.strip() == '',
+              f"rc={p.returncode} stdout={p.stdout!r} stderr={p.stderr!r}")
+
+
 def main():
     work = tempfile.mkdtemp(prefix='cryo_llm_')
     srv = HTTPServer(('127.0.0.1', 0), Handler)
@@ -269,6 +292,7 @@ def main():
         test_structured(work, url)
         test_timeout(work, url)
         test_validation(work)
+        test_standalone_imports(work)
     finally:
         srv.shutdown()
         shutil.rmtree(work, ignore_errors=True)

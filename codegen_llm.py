@@ -25,7 +25,7 @@ from typing import Any, Dict, List, Optional, Tuple, Set
 from ast_nodes import (
     Node, Program, StructDecl, StructField, FunctionDecl, SkillDecl,
     EnumDecl, MatchStatement, MatchCase,
-    VarDecl, ConstDecl, Assignment, IndexAssignment, CompoundAssignment,
+    VarDecl, ConstDecl, Assignment, IndexAssignment, FieldAssignment, CompoundAssignment,
     Increment, Block, Return, If, While, For, DoWhile, ForEach,
     TryCatch, Break, Continue, Switch, SwitchCase, Assert,
     ForeignBlock, BinaryExpr, TernaryExpr, CastExpr, UnwrapExpr,
@@ -247,6 +247,9 @@ class CodeGenLLM:
         if isinstance(stmt, IndexAssignment):
             obj = getattr(stmt, 'obj', None) or getattr(stmt, 'array', 'arr')
             return f"{ind}• STEP [UPDATE] -> Set element `{self._expr(obj)}[{self._expr(stmt.index)}]` = {self._expr(stmt.value)}"
+
+        if isinstance(stmt, FieldAssignment):
+            return f"{ind}• STEP [UPDATE_FIELD] -> Set `{self._expr(stmt.obj)}.{stmt.field}` = {self._expr(stmt.value)}"
 
         if isinstance(stmt, CompoundAssignment):
             return f"{ind}• STEP [MUTATE] -> Modify `{stmt.name}` with operator {stmt.op}: {self._expr(stmt.value)}"

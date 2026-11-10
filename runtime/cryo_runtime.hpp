@@ -326,11 +326,59 @@ inline double to_num(const std::string& s) {
 
 // ── strings ──
 
-inline std::string upper(std::string s) {
+inline uint32_t cp_case(uint32_t cp, bool up) {
+    if (up) {
+        if (cp >= 'a' && cp <= 'z') return cp - 32;
+        if ((cp >= 0x00E0 && cp <= 0x00F6) || (cp >= 0x00F8 && cp <= 0x00FE)) return cp - 0x20;
+        if (cp == 0x00FF) return 0x0178;
+        if ((cp >= 0x0100 && cp <= 0x012F) || (cp >= 0x0132 && cp <= 0x0137) || (cp >= 0x014A && cp <= 0x0177)) return (cp & 1) ? cp - 1 : cp;
+        if ((cp >= 0x0139 && cp <= 0x0148) || (cp >= 0x0179 && cp <= 0x017E)) return (cp & 1) ? cp : cp - 1;
+        if ((cp >= 0x03B1 && cp <= 0x03C1) || (cp >= 0x03C3 && cp <= 0x03CB)) return cp - 0x20;
+        if (cp == 0x03C2) return 0x03A3;
+        if (cp >= 0x0430 && cp <= 0x044F) return cp - 0x20;
+        if (cp == 0x0451) return 0x0401;
+    } else {
+        if (cp >= 'A' && cp <= 'Z') return cp + 32;
+        if ((cp >= 0x00C0 && cp <= 0x00D6) || (cp >= 0x00D8 && cp <= 0x00DE)) return cp + 0x20;
+        if (cp == 0x0178) return 0x00FF;
+        if ((cp >= 0x0100 && cp <= 0x012F) || (cp >= 0x0132 && cp <= 0x0137) || (cp >= 0x014A && cp <= 0x0177)) return (cp & 1) ? cp : cp + 1;
+        if ((cp >= 0x0139 && cp <= 0x0148) || (cp >= 0x0179 && cp <= 0x017E)) return (cp & 1) ? cp + 1 : cp;
+        if ((cp >= 0x0391 && cp <= 0x03A1) || (cp >= 0x03A3 && cp <= 0x03AB)) return cp + 0x20;
+        if (cp >= 0x0410 && cp <= 0x042F) return cp + 0x20;
+        if (cp == 0x0401) return 0x0451;
+    }
+    return cp;
+}
+
+inline std::string str_case(const std::string& s, bool up) {
+    std::string out;
+    out.reserve(s.size());
+    for (size_t i = 0; i < s.size(); ) {
+        unsigned char b0 = static_cast<unsigned char>(s[i]);
+        if ((b0 & 0x80) == 0) {
+            out.push_back(static_cast<char>(cp_case(b0, up)));
+            i += 1;
+        } else if ((b0 & 0xE0) == 0xC0 && i + 1 < s.size() && (static_cast<unsigned char>(s[i + 1]) & 0xC0) == 0x80) {
+            uint32_t cp = ((static_cast<uint32_t>(b0 & 0x1F) << 6) | static_cast<uint32_t>(static_cast<unsigned char>(s[i + 1]) & 0x3F));
+            cp = cp_case(cp, up);
+            out.push_back(static_cast<char>(0xC0 | (cp >> 6)));
+            out.push_back(static_cast<char>(0x80 | (cp & 0x3F)));
+            i += 2;
+        } else {
+            out.push_back(static_cast<char>(b0));
+            i += 1;
+        }
+    }
+    return out;
+}
+
+inline std::string upper(std::string s) { return str_case(s, true); }
+inline std::string _unused_upper(std::string s) {
     for (size_t i = 0; i < s.size(); ++i) s[i] = std::toupper((unsigned char)s[i]);
     return s;
 }
-inline std::string lower(std::string s) {
+inline std::string lower(std::string s) { return str_case(s, false); }
+inline std::string _unused_lower(std::string s) {
     for (size_t i = 0; i < s.size(); ++i) s[i] = std::tolower((unsigned char)s[i]);
     return s;
 }

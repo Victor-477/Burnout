@@ -843,6 +843,24 @@ check("resolve: cycle detectado", _mod_err('import "ciclo_a.cryo"'))
 check("resolve: colisao de name detectada",
       _mod_err('import "util.cryo" import "colide.cryo"'))
 check("resolve: module missing", _mod_err('import "nao_existe.cryo"'))
+
+# L-15 (EMP): a syntax error INSIDE an imported module carries the module's
+# path, so the CLI, `cryoc test` and the LSP point at the right file. It used
+# to be rendered against the importer (its name, its line, its caret).
+from parser import ParseError as _PE15
+_w("quebrado15.cryo", 'pub fn a() -> int ={\n    return 1 +;\n}\n')
+_w("meio15.cryo", 'import "quebrado15.cryo" as q;\npub fn b() -> int ={ return q::a(); }\n')
+def _parse_err_path(src):
+    try:
+        resolve_modules(ast_of(src), _tmp); return None
+    except _PE15 as e:
+        return getattr(e, 'path', None) or ''
+_p15 = _parse_err_path('import "quebrado15.cryo" as q;\nprint(q::a());')
+check("L-15: syntax error in an imported module names that module",
+      bool(_p15) and _p15.endswith('quebrado15.cryo'))
+_p15b = _parse_err_path('import "meio15.cryo" as m;\nprint(m::b());')
+check("L-15: nested import names the innermost module",
+      bool(_p15b) and _p15b.endswith('quebrado15.cryo'))
 check("resolve: colisao with o program principal",
       _mod_err('import "util.cryo" fn double(int x) -> int ={ return x; }'))
 # codegen ponta-a-ponta with module (via compile_source do compiler)
@@ -1566,20 +1584,41 @@ check("parse_int checks the int64 limit, not just the characters",
 # test_parity runs the boundaries across backends; these are the mechanism,
 # plus the one property that makes the helpers correct at all.
 print("[C1] checked arithmetic")
+# gen_go, NOT gen_node. checked_* carries 9223372036854775807 in its own
+# body, and node now refuses an int literal past 2^53 because a JavaScript
+# number would round it (ISSUES/28). That refusal is correct, and it means
+# these helpers CANNOT work on node: at that magnitude a double has a
+# spacing of 2048, so `a > mx - b` compares two values that round together,
+# no overflow is detected, and checked_add(MX, 1) returns a number instead
+# of null. They were wrong on node from the day they landed; the literal
+# refusal is what surfaced it.
 check("checked_add is lowered",
-      '__cryo_checked_add' in gen_node('print(checked_add(1, 2) ?? 0);' + chr(10)))
+      '__cryo_checked_add' in gen_go('print(checked_add(1, 2) ?? 0);' + chr(10)))
 check("checked_mul is lowered",
-      '__cryo_checked_mul' in gen_node('print(checked_mul(1, 2) ?? 0);' + chr(10)))
+      '__cryo_checked_mul' in gen_go('print(checked_mul(1, 2) ?? 0);' + chr(10)))
 check("a user function of the same name still wins",
-      'return 7' in gen_node(
+      'return 7' in gen_go(
           'fn checked_add(int a, int b) -> int ={ return 7; }' + chr(10)
           + 'print(checked_add(1, 2));' + chr(10)))
 _ck_arity = ''
 try:
-    gen_node('print(checked_add(1) ?? 0);' + chr(10))
+    gen_go('print(checked_add(1) ?? 0);' + chr(10))
 except Exception as _e:
     _ck_arity = str(_e)
 check("they take two arguments, and say so", 'takes 2 arguments' in _ck_arity)
+# The node refusal must name the BUILTIN, not a literal the user never
+# wrote: being told about 9223372036854775807 after typing
+# checked_add(1, 2) sends someone hunting their own source for a number
+# that is not in it.
+_ck_node = ''
+try:
+    gen_node('print(checked_add(1, 2) ?? 0);' + chr(10))
+except Exception as _e:
+    _ck_node = str(_e)
+check("C1: node refuses checked_add, naming the builtin",
+      'checked_add()' in _ck_node and 'node backend' in _ck_node)
+check("C1: and does not blame a literal the user did not write",
+      '9223372036854775807' not in _ck_node)
 # NO GUARD MAY ITSELF OVERFLOW. A bound spelled `a + b > MAX` has already
 # done the thing it exists to prevent, so the helpers contain no bare
 # addition or multiplication outside the single guarded operation they end
@@ -2073,5 +2112,41 @@ except _SemErr as e:
 check("semantics: s[i] = v rejected with immutable message", "strings are immutable" in _err25)
 
 # ── result ───────────────────────────────────────────────
+# -- L-16 (EMP): a function-typed struct field called directly --
+# `m.f(21)` reads the field and calls the value. pyro refused it ("method not
+# supported"), go emitted `m.f` where the exported field is `F`, and the
+# self-host compiled it to OP_LEN (covered in test_selfhost [fnfields]).
+print("[L-16] calling a function-typed struct field")
+_f16 = ('struct M { string nome; fn(int)->int f; }\n'
+        'fn dbl(int x) -> int ={ return x * 2; }\n'
+        'M m = M { nome: "m", f: dbl };\nprint(m.f(21));\n')
+_ops16 = _pyro_code_ops(_f16)
+check("pyro: m.f(x) reads the field and CALL_VALUEs it",
+      "CALL_VALUE" in _ops16 and "INDEX" in _ops16)
+check("go: m.f(x) calls the exported field M.F", "m.F(" in gen_go(_f16))
+check("node: m.f(x) calls the field", "m.f(" in gen_node(_f16))
+expect_pyro_err('struct M { int n; }\nM m = M { n: 1 };\nprint(m.nada(1));\n',
+                "pyro: a method that is not a function-typed field is still refused")
+
+# -- L-05 (EMP): json_valid(s) guards json_decode, which aborts uncatchably --
+# Cryo/examples/example_json_valid.cryo runs it on every backend (test_examples);
+# these cover the mechanism. The property that matters — json_valid approves
+# only what Go's encoding/json (the strictest engine) accepts — was checked by
+# fuzzing 400 mutated documents against encoding/json: 0 approved-but-refused.
+print("[L-05] json_valid")
+check("json_valid is lowered, not left unknown",
+      '__cryo_json_valid' in gen_node('print(json_valid("{}"));' + chr(10)))
+check("json_valid: the helper is emitted once however many calls",
+      gen_node('print(json_valid("1")); print(json_valid("2"));' + chr(10))
+      .count('function __cryo_json_valid') == 1)
+check("json_valid: a user function of the same name still wins",
+      'return false' in gen_node('fn json_valid(string s) -> bool ={ return false; }' + chr(10)
+                                 + 'print(json_valid("{}"));' + chr(10)))
+_jv_src = Parser._STR_HELPERS['json_valid'][2]
+check("json_valid never calls json_decode (it must not abort itself)",
+      'json_decode' not in _jv_src)
+check("json_valid bounds the float64 range (Go refuses 1.8e308)", '308' in _jv_src)
+check("json_valid compiles on pyro", isinstance(gen_pyro('print(json_valid("[1]"));'), (bytes, bytearray)))
+
 print(f"\n{_passed} passed, {_failed} failed")
 sys.exit(1 if _failed else 0)

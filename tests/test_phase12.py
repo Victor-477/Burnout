@@ -305,11 +305,19 @@ print(to_string(arr[10]));
 
     # 12.16: Testrunner --backend cpp and --backend csharp
     test_cryo = os.path.join(ROOT, 'Cryo', 'examples', 'test_phase12.cryo')
+    sys.path.insert(0, os.path.join(ROOT, 'Burnout'))
+    import compiler as _compiler
+    _has_cxx = _compiler.find_cxx()[0] is not None
     r_cpp = subprocess.run([sys.executable, CRYOC, 'test', test_cryo, '--backend', 'cpp'],
                            capture_output=True, text=True)
-    check("testrunner: cryoc test on --backend cpp (12.16)",
-          r_cpp.returncode == 0 and "4 passed, 0 failed" in r_cpp.stdout,
-          f"rc={r_cpp.returncode}, out={r_cpp.stdout}, err={r_cpp.stderr}")
+    if _has_cxx:
+        check("testrunner: cryoc test on --backend cpp (12.16)",
+              r_cpp.returncode == 0 and "4 passed, 0 failed" in r_cpp.stdout,
+              f"rc={r_cpp.returncode}, out={r_cpp.stdout}, err={r_cpp.stderr}")
+    else:
+        check("testrunner: cryoc test on --backend cpp without C++ toolchain reports clean error (12.16)",
+              r_cpp.returncode == 2 and "no C++ toolchain found" in r_cpp.stderr,
+              f"rc={r_cpp.returncode}, out={r_cpp.stdout}, err={r_cpp.stderr}")
 
     r_cs = subprocess.run([sys.executable, CRYOC, 'test', test_cryo, '--backend', 'csharp'],
                           capture_output=True, text=True)
