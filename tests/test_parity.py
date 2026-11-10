@@ -2031,7 +2031,7 @@ agree("GFX-17: fb_ppm emits a valid P3 image, alpha dropped",
       'int[] px = fb_new(2, 2, rgba(1, 2, 3, 200));\n'
       'print(fb_ppm(px, 2, 2));\n',
       backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
-      expect="P3\n2 2\n255\n1 2 3 1 2 3\n1 2 3 1 2 3\n")
+      expect="P3\n2 2\n255\n1 2 3 1 2 3\n1 2 3 1 2 3")  # no trailing newline: run_backend strips it
 
 # THE REGRESSION. fb_rect and fb_line are the first helpers to call
 # another helper, and the sub-parser returned the nested fb_set in both
