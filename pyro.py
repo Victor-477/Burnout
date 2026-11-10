@@ -101,8 +101,13 @@ def emit_c(pyro_path):
 def build_native(inp, out, safe=True, sandbox=False, verbose=False, assets=None):
     cc_name, build = find_cc()
     if build is None:
+        # The Go toolchain reaches the same destination — a self-contained
+        # native binary — and is worth naming here, because "install a C
+        # compiler" is the wrong advice for someone who already has Go.
+        alt = ("\n        `pyro build --target host` reaches the same thing "
+               "through Go, which you have" if shutil.which("go") else "")
         _err("no C toolchain found (need gcc/clang/cc/zig/cl) — "
-             "use `pyro vm` or `pyro c` instead")
+             f"use `pyro vm` or `pyro c` instead{alt}")
     pyro_path, tmp = to_pyro(inp, safe, sandbox, assets)
     try:
         c_src = emit_c(pyro_path)
@@ -126,6 +131,22 @@ def build_native(inp, out, safe=True, sandbox=False, verbose=False, assets=None)
 
 def cmd_build(a):
     base = os.path.splitext(os.path.basename(a.input))[0]
+    # 14.6 — `--target` means another operating system, which the AOT C route
+    # below cannot reach: it calls the local cc, and a C cross build needs the
+    # target's libc and headers. Hand those over to crossbuild, which goes
+    # through Go. Without a --target this stays exactly as it was.
+    if getattr(a, 'target', None):
+        import crossbuild
+        argv = [a.input, '-o', a.output or 'dist']
+        for t in a.target:
+            argv += ['--target', t]
+        if a.unsafe:
+            argv.append('--unsafe')
+        if a.sandbox:
+            argv.append('--sandbox')
+        if getattr(a, 'assets', None):
+            argv += ['--assets', a.assets]
+        sys.exit(crossbuild.main(argv))
     out = a.output or (base + EXE)
     build_native(a.input, os.path.abspath(out), safe=not a.unsafe,
                  sandbox=a.sandbox, verbose=True, assets=getattr(a, 'assets', None))
@@ -245,7 +266,14 @@ def main():
             p.add_argument("args", nargs="*", help="arguments passed to the program")
 
     pb = sub.add_parser("build", help="compile to a native binary")
-    common(pb); pb.add_argument("-o", "--output", help="output binary path")
+    common(pb); pb.add_argument("-o", "--output",
+                                help="output binary path (with --target: the "
+                                     "directory the binaries go in)")
+    # 14.6 — cross-compile. Same spellings as `cryoc build --target`.
+    pb.add_argument("--target", "-t", action="append", metavar="T", default=[],
+                    help="build for another system: windows | linux | macos | "
+                         "all | linux-arm64 ... (repeatable). Needs Go here, "
+                         "nothing on the target machine")
     # 11.9 — one executable with its assets inside it
     pb.add_argument("--assets", metavar="DIR",
                     help="embed every file under DIR into the binary; read them "

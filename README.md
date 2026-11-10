@@ -89,6 +89,34 @@ python Burnout/cryoc.py test Cryo/examples/example_testing.cryo --list
 python Burnout/cryoc.py repl
 ```
 
+### Cross-compiling: `cryoc build`
+
+Everything above builds for the machine running it. `build` builds for the
+other operating systems too — six targets, one machine, one Go toolchain and
+nothing on the target machines:
+
+```bash
+python Burnout/cryoc.py build app.cryo --target all
+python Burnout/cryoc.py build app.cryo --target linux,macos-arm64
+python Burnout/cryoc.py build --list-targets
+```
+
+Targets are `windows-x64`, `windows-arm64`, `linux-x64`, `linux-arm64`,
+`macos-x64`, `macos-arm64`; a bare `windows`, `linux` or `macos` means both
+architectures of that system, `all` means all six, `host` means this machine
+(the default). The binaries land in `dist/` as `<name>-<target>[.exe]`, with a
+`SHA256SUMS` beside them.
+
+`--via native` compiles through the Go backend (~1.6 MB for hello world);
+`--via bundle` appends the bytecode to a cross-built Pyro VM (~6.9 MB, the
+reference engine's full language, and the only route that can carry `--assets`
+or a `--sign` signature). The default is `native` falling back to `bundle` for
+a program the Go backend does not cover.
+
+Neither route generates new code: that is why cross-compiling cannot break
+Pyro parity. `--target` is not offered on the C or C++ routes, because a C
+cross build needs the target's libc and headers.
+
 ### The unified `pyro` command
 
 ```bash
@@ -97,7 +125,9 @@ python Burnout/pyro.py test app_tests.cryo
 python Burnout/pyro.py repl
 ```
 
-`build` produces a standalone native binary, `run` runs natively (falling back to
+`build` produces a standalone native binary — for this machine through the AOT
+C route, or for another one with `--target` (`pyro build app.cryo --target
+linux-x64`), which hands over to `cryoc build` above. `run` runs natively (falling back to
 the VM when no C toolchain is present), `vm` interprets the bytecode, `c`
 emits the AOT C source, `test` runs the test framework suite (`test fn`), and
 `repl` starts the interactive Cryo REPL. Each accepts `.cryo` or `.pyro`.

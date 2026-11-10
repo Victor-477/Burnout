@@ -45,6 +45,14 @@ if __name__ == '__main__':
         # 12.3 — cryo.toml / cryo.lock. Not a compile at all, so a subcommand.
         import pkg as _pkg
         sys.exit(_pkg.main(sys.argv[2:]))
+    elif len(sys.argv) > 1 and sys.argv[1] == 'build':
+        # 14.6 — native executables for Windows, Linux and macOS from ONE
+        # machine. A subcommand rather than a flag on the normal compile line:
+        # it produces SEVERAL artifacts in a directory, where `cryoc file.cryo`
+        # produces one at -o, and bending that contract to fit would make the
+        # common single-file case worse.
+        import crossbuild
+        sys.exit(crossbuild.main(sys.argv[2:]))
     elif len(sys.argv) > 1 and sys.argv[1] == 'bundle':
         # One executable that needs no toolchain: the VM binary with the
         # bytecode appended. A subcommand rather than a flag because it

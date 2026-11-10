@@ -32,6 +32,18 @@ import sys
 MAGIC = b'PYROBND1'
 TRAILER = 8 + len(MAGIC)
 
+# `python Burnout/bundle.py app.cryo` died in cp1252 on the ✓ of its own
+# success line — after writing the executable, so the bundle was fine and the
+# tool reported a traceback. Via cryoc it never happened: compiler.py does
+# this at import time, and bundle only ran as a subcommand of it.
+for _stream in ('stdout', 'stderr'):
+    _s = getattr(sys, _stream, None)
+    if _s is not None and hasattr(_s, 'reconfigure'):
+        try:
+            _s.reconfigure(encoding='utf-8')
+        except Exception:
+            pass
+
 
 def bundle(vm_path: str, pyro_path: str, out_path: str) -> None:
     with open(vm_path, 'rb') as f:
