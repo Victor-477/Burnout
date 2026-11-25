@@ -122,6 +122,11 @@ PROGRAMS = [
                  'try { a = risky(-3); } catch (string e) { print("caught:" + e); a = -99; } print(a); '
                  'try { throw("boom"); } catch (string e) { print(e); } finally { print("fin"); } '
                  'try { assert(false, "nope"); } catch (string e) { print(e); }'),
+    ("structassign", 'struct Sensor { int id; number valor; } '
+                     'fn bump(Sensor s) -> void ={ s.id++; s.valor += 3.4; } '
+                     'Sensor s = Sensor { id: 1, valor: 36.6 }; '
+                     's.valor = 40.0; print(s.valor); '
+                     'bump(s); print(s.id); print(s.valor);'),
 ]
 
 def compile_pyro(src, tag):

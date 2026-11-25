@@ -29,7 +29,7 @@ from ast_nodes import (
     BinaryExpr, UnaryExpr, TernaryExpr, CallExpr, Identifier, Literal,
     # 11.28 — the constructs the self-hosted parser gained
     For, ForEach, Break, Continue, CompoundAssignment, Increment,
-    ArrayLiteral, IndexAccess, IndexAssignment, FieldAccess,
+    ArrayLiteral, IndexAccess, IndexAssignment, FieldAccess, FieldAssignment,
     StructDecl, StructInit, EnumDecl, MatchStatement, Block,
     # 12.6 — the desugarings and remaining shapes
     TryCatch, Switch, SwitchCase, Lambda, MapLiteral, CastExpr,
@@ -135,6 +135,8 @@ def ser(n):
         return f"(incr {n.op} {n.name})"
     if isinstance(n, IndexAssignment):
         return f"(setidx {ser(n.obj)} {ser(n.index)} {ser(n.value)})"
+    if isinstance(n, FieldAssignment):
+        return f"(setfield {ser(n.obj)} {n.field} {ser(n.value)})"
     if isinstance(n, ArrayLiteral):
         return "(arr" + "".join(" " + ser(e) for e in n.elements) + ")"
     if isinstance(n, IndexAccess):
@@ -481,6 +483,8 @@ SAMPLES_133 = [
      'int a = 1; int b = 2; print(a < b);'),
     ("a non-generic declaration is unchanged",
      'fn f(int a) -> int ={ return a; }'),
+    ("struct field assignment (plain, compound, increment, chained, indexed)",
+     'struct P { int x; } P p = new P{x: 1}; p.x = 2; p.x += 3; p.x++; a.b.c = 4; xs[0].x = 5;'),
 ]
 
 for _label, _src in SAMPLES_1128 + SAMPLES_126 + SAMPLES_133:
@@ -619,12 +623,15 @@ check_selfhost('map<string,int> m = {"x": 1, "y": 2}; print(m["x"]); print(m["y"
                'print(len(m));',
                "maps", lines_fn=_out_lines)
 
-# structs: new S{...} -> map; field reads (Cryo has no field-assignment syntax)
+# structs: new S{...} -> map; field reads and field writes (L-07)
 check_selfhost('struct Point { int x; int y; } '
                'Point p = new Point{ x: 3, y: 4 }; print(p.x); print(p.y); '
+               'p.x = 10; p.y += 6; p.x++; print(p.x); print(p.y); '
                'print(p.x + p.y); '
                'struct Box { int w; int h; } fn area(Box b) -> int ={ return b.w * b.h; } '
-               'Box bx = new Box{ w: 5, h: 6 }; print(area(bx));',
+               'fn grow(Box b, int dw) -> void ={ b.w = b.w + dw; } '
+               'Box bx = new Box{ w: 5, h: 6 }; print(area(bx)); '
+               'grow(bx, 3); print(area(bx));',
                "structs", lines_fn=_out_lines)
 
 # for loops: C-style (init; cond; upd) and for-each (T x in coll)
@@ -730,6 +737,19 @@ check_selfhost('fn dbl(int x) -> int ={ return x * 2; } '
                'g = inc; print(g(50)); '                             # 51
                'fn(int)->int c = pick(true); print(c(10));',         # 20
                "funcvalues", lines_fn=_out_lines)
+
+# a function-typed struct field called directly (EMP ESCOPO L-16): `m.f(21)`
+# must read the field and CALL_VALUE it. The self-host used to compile every
+# method other than push to OP_LEN, so this printed the map's size. The value
+# is built with a MAP literal: the self-host does not lower struct literals
+# (`M { ... }`) yet, and a struct is a map on the VM either way.
+check_selfhost('struct M { string nome; fn(int)->int f; } '
+               'fn dbl(int x) -> int ={ return x * 2; } '
+               'M m = {"nome": "m", "f": dbl}; '
+               'print(m.f(21)); '                                    # 42
+               'int[] xs = [1, 2]; xs.push(3); print(xs.length); '   # 3 (push/length untouched)
+               'print(xs.size());',                                  # 3
+               "fnfields", lines_fn=_out_lines)
 
 # exponent literals: both lexers must agree on where a number ends. `2e` is NOT
 # an exponent (no digit follows), so it stays INT_LIT 2 + IDENT e, and the `e`

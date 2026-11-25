@@ -250,9 +250,9 @@ def test_c_conversions(work):
 
     # A string argument has no parse helper in the C runtime; it used to read
     # the pointer as a number. Refusing is the honest answer.
-    rc, log = compile_to('print(to_int("42"));\n', work, 'c', 's.c')
-    check("to_int(string) is refused rather than emitted wrong",
-          rc != 0 and 'not supported in the C backend' in log, log[-200:])
+    rc, log = compile_to('print(to_int("42"));\nprint(to_number("3.5"));\n', work, 'c', 's.c')
+    check("to_int(string) and to_number(string) compile on C backend (Issue #27)",
+          rc == 0 and os.path.isfile(os.path.join(work, 's.c')), log[-200:])
 
 
 # ── the self-hosted compiler ─────────────────────────────────

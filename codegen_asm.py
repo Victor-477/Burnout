@@ -324,6 +324,10 @@ class CodeGenAsm:
         elif isinstance(node, SafetyBlock):        self._safety(node)
         elif isinstance(node, CallExpr):
             self._eval_call(node); # discarded result
+        elif isinstance(node, FieldAssignment):
+            raise CodeGenAsmError(
+                "struct field assignment is not supported in the assembly backend "
+                "(use --backend go, c, node or pyro).")
         else:
             raise CodeGenAsmError(
                 f"'{type(node).__name__}' not supported in assembly backend "

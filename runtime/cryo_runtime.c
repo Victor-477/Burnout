@@ -498,13 +498,64 @@ char* cryo_str_index(const char* s, int64_t i) {
     return out;
 }
 
-char* cryo_str_upper(const char* s) {
+static uint32_t _cryo_cp_case(uint32_t cp, int up) {
+    if (up) {
+        if (cp >= 'a' && cp <= 'z') return cp - 32;
+        if ((cp >= 0x00E0 && cp <= 0x00F6) || (cp >= 0x00F8 && cp <= 0x00FE)) return cp - 0x20;
+        if (cp == 0x00FF) return 0x0178;
+        if ((cp >= 0x0100 && cp <= 0x012F) || (cp >= 0x0132 && cp <= 0x0137) || (cp >= 0x014A && cp <= 0x0177)) return (cp & 1) ? cp - 1 : cp;
+        if ((cp >= 0x0139 && cp <= 0x0148) || (cp >= 0x0179 && cp <= 0x017E)) return (cp & 1) ? cp : cp - 1;
+        if ((cp >= 0x03B1 && cp <= 0x03C1) || (cp >= 0x03C3 && cp <= 0x03CB)) return cp - 0x20;
+        if (cp == 0x03C2) return 0x03A3;
+        if (cp >= 0x0430 && cp <= 0x044F) return cp - 0x20;
+        if (cp == 0x0451) return 0x0401;
+    } else {
+        if (cp >= 'A' && cp <= 'Z') return cp + 32;
+        if ((cp >= 0x00C0 && cp <= 0x00D6) || (cp >= 0x00D8 && cp <= 0x00DE)) return cp + 0x20;
+        if (cp == 0x0178) return 0x00FF;
+        if ((cp >= 0x0100 && cp <= 0x012F) || (cp >= 0x0132 && cp <= 0x0137) || (cp >= 0x014A && cp <= 0x0177)) return (cp & 1) ? cp : cp + 1;
+        if ((cp >= 0x0139 && cp <= 0x0148) || (cp >= 0x0179 && cp <= 0x017E)) return (cp & 1) ? cp + 1 : cp;
+        if ((cp >= 0x0391 && cp <= 0x03A1) || (cp >= 0x03A3 && cp <= 0x03AB)) return cp + 0x20;
+        if (cp >= 0x0410 && cp <= 0x042F) return cp + 0x20;
+        if (cp == 0x0401) return 0x0451;
+    }
+    return cp;
+}
+
+static char* _cryo_str_case(const char* s, int up) {
+    if (!s) s = "";
+    size_t len = strlen(s);
+    char* out = (char*)malloc(len * 2 + 1);
+    size_t pos = 0;
+    for (size_t i = 0; i < len; ) {
+        unsigned char b0 = (unsigned char)s[i];
+        if ((b0 & 0x80) == 0) {
+            out[pos++] = (char)_cryo_cp_case(b0, up);
+            i += 1;
+        } else if ((b0 & 0xE0) == 0xC0 && i + 1 < len && ((unsigned char)s[i + 1] & 0xC0) == 0x80) {
+            uint32_t cp = ((uint32_t)(b0 & 0x1F) << 6) | (uint32_t)((unsigned char)s[i + 1] & 0x3F);
+            cp = _cryo_cp_case(cp, up);
+            out[pos++] = (char)(0xC0 | (cp >> 6));
+            out[pos++] = (char)(0x80 | (cp & 0x3F));
+            i += 2;
+        } else {
+            out[pos++] = (char)b0;
+            i += 1;
+        }
+    }
+    out[pos] = '\0';
+    return out;
+}
+
+char* cryo_str_upper(const char* s) { return _cryo_str_case(s, 1); }
+static char* _unused_upper(const char* s) {
     char* out = strdup(s);
     for (char* p = out; *p; p++) *p = (char)toupper((unsigned char)*p);
     return out;
 }
 
-char* cryo_str_lower(const char* s) {
+char* cryo_str_lower(const char* s) { return _cryo_str_case(s, 0); }
+static char* _unused_lower(const char* s) {
     char* out = strdup(s);
     for (char* p = out; *p; p++) *p = (char)tolower((unsigned char)*p);
     return out;
@@ -706,11 +757,11 @@ char* cryo_str_join(CryoArray* a, const char* sep) {
 
 /* ---------- Print ---------- */
 
-void cryo_print_str(const char* s)  { puts(s ? s : "(null)"); }
-void cryo_print_i64(int64_t n)      { printf("%" PRId64 "\n", n); }
-void cryo_print_f64(double n)       { printf("%g\n", n); }
-void cryo_print_bool(bool b)        { puts(b ? "true" : "false"); }
-void cryo_print_newline(void)       { putchar('\n'); }
+void cryo_print_str(const char* s)  { puts(s ? s : "(null)"); fflush(stdout); }
+void cryo_print_i64(int64_t n)      { printf("%" PRId64 "\n", n); fflush(stdout); }
+void cryo_print_f64(double n)       { printf("%g\n", n); fflush(stdout); }
+void cryo_print_bool(bool b)        { puts(b ? "true" : "false"); fflush(stdout); }
+void cryo_print_newline(void)       { putchar('\n'); fflush(stdout); }
 
 /* ---------- Input ---------- */
 
@@ -762,6 +813,14 @@ double cryo_input_num(const char* prompt) {
  * Every wrapper leaves the POSIX build untouched: there a path is bytes and
  * fopen already takes UTF-8. */
 #if defined(_WIN32)
+static char* _cryo_utf8(const wchar_t* w) {
+    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+    if (n <= 0) return NULL;
+    char* s = (char*)malloc((size_t)n);
+    if (!s) return NULL;
+    if (WideCharToMultiByte(CP_UTF8, 0, w, -1, s, n, NULL, NULL) <= 0) { free(s); return NULL; }
+    return s;
+}
 static wchar_t* _cryo_wpath(const char* s) {
     int n = MultiByteToWideChar(CP_UTF8, 0, s, -1, NULL, 0);
     if (n <= 0) return NULL;
@@ -843,21 +902,28 @@ CryoArray* cryo_list_dir(const char* path) {
     CryoArray* out = cryo_array_new();
     if (!path) return out;
 #if defined(_WIN32)
-    char pattern[MAX_PATH];
-    snprintf(pattern, sizeof(pattern), "%s\\*", path);
-    WIN32_FIND_DATAA fd;
-    HANDLE h = FindFirstFileA(pattern, &fd);
+    size_t plen = strlen(path);
+    char* pat = (char*)malloc(plen + 3);
+    if (!pat) return out;
+    memcpy(pat, path, plen); pat[plen] = '\\'; pat[plen + 1] = '*'; pat[plen + 2] = '\0';
+    wchar_t* wp = _cryo_wpath(pat); free(pat);
+    if (!wp) return out;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW(wp, &fd); free(wp);
+    // wide pattern handled above
+    // WIN32_FIND_DATAW handled above
+    // FindFirstFileW handled above
     if (h == INVALID_HANDLE_VALUE) return out;
     char** names = NULL;
     int n = 0, cap = 0;
     do {
-        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) continue;
         if (n == cap) {
             cap = cap ? cap * 2 : 16;
             names = (char**)realloc(names, (size_t)cap * sizeof(char*));
         }
-        names[n++] = cryo_strdup(fd.cFileName);
-    } while (FindNextFileA(h, &fd));
+        char* u8 = _cryo_utf8(fd.cFileName); if (u8) names[n++] = u8;
+    } while (FindNextFileW(h, &fd));
     FindClose(h);
     if (names) {
         qsort(names, (size_t)n, sizeof(char*), _cryo_name_cmp);

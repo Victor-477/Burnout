@@ -36,7 +36,7 @@ public static class Cryo {
         // 2.0 prints as "2", not "2.0": the VM renders a float with no
         // fractional part as an integer, and test_parity asserts
         // `print([1.5, 2.0])` as "[1.5, 2]".
-        if (d == System.Math.Floor(d) && System.Math.Abs(d) < 1e15)
+        if (d == 0.0 && BitConverter.DoubleToInt64Bits(d) < 0) return "-0"; if (d == System.Math.Floor(d) && System.Math.Abs(d) < 1e15)
             return ((long)d).ToString(CultureInfo.InvariantCulture);
         return d.ToString("R", CultureInfo.InvariantCulture);
     }

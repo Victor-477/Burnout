@@ -1344,7 +1344,15 @@ agree("a rejected parse does not end the program",
 # ordinary input is all anybody tries.
 print("\n── C1: checked arithmetic ──")
 
-_CK = ('pyro', 'node', 'go')
+# NODE IS NOT IN THIS LIST, and the reason is the feature, not the test:
+# checked_* carries 9223372036854775807 in its own body, which a
+# JavaScript number cannot hold, so node now refuses the helpers
+# outright (ISSUES/28). Before that refusal they COMPILED on node and
+# silently failed to detect overflow — at that magnitude a double's
+# spacing is 2048, so `a > mx - b` compares two values that round
+# together. The small-value cases below passed on node while the
+# feature was broken there, which is exactly how it went unnoticed.
+_CK = ('pyro', 'go')
 _MXMN = 'int MX = 9223372036854775807;\nint MN = -9223372036854775807 - 1;\n'
 
 agree("checked_add at and past the top",
@@ -1383,6 +1391,19 @@ agree("the sign combinations",
       'print(checked_mul(-3, -4) ?? -999); print(checked_mul(3, -4) ?? -999);\nprint(checked_mul(-3, 4) ?? -999); print(checked_add(-5, -7) ?? -999);\n',
       backends=_CK, expect="12\n-12\n-12\n-12")
 
+# Pinning the REFUSAL, not just node's absence from the tuples above. An
+# absent backend proves nothing — it looks identical to nobody having got
+# round to adding it.
+_ck_work = tempfile.mkdtemp(prefix='cryo_ck_')
+_ck_r = _compile(_ck_work, 'print(checked_add(1, 2) ?? 0);' + chr(10),
+                 'node', os.path.join(_ck_work, 'p.js'))
+_ck_msg = (_ck_r.stdout + _ck_r.stderr)
+check("checked_* is refused on node rather than silently wrong",
+      _ck_r.returncode != 0 and 'checked_add()' in _ck_msg, _ck_msg[:200])
+check("…and the message names the backend, not a literal the user wrote",
+      'node backend' in _ck_msg and '9223372036854775807' not in _ck_msg,
+      _ck_msg[:200])
+
 agree("checked arithmetic reaches cpp too",
       'print(checked_add(2, 3) ?? -999); print(checked_mul(6, 7) ?? -999);\nprint(checked_mul(4611686018427387904, 2) ?? -999);\n',
       backends=('pyro', 'cpp'), expect="5\n42\n-999")
@@ -1401,7 +1422,7 @@ agree("checked arithmetic reaches cpp too",
 # rather than silently producing different mojibake.
 print("\n── text helpers on non-ASCII input ──")
 
-_U8 = ('pyro', 'node', 'go')
+_U8 = ('pyro', 'node', 'go', 'c', 'cpp')
 
 agree("reverse_str reverses characters, not bytes",
       u'print(reverse_str("Ação"));\n',
@@ -1663,11 +1684,369 @@ agree("round reaches c and cpp with the same rule",
       'print(round(2.5)); print(round(-2.5)); print(round(-0.5));\n',
       backends=('pyro', 'c', 'cpp'), expect="3\n-3\n-1")
 
+# ── L-07: struct field assignment across all backends & engines ──
+print("\n── L-07: struct field assignment (s.campo = expr) ──")
+
+_L07_SIMPLE = (
+    'struct Sensor { int id; number valor; }\n'
+    'Sensor s = Sensor { id: 1, valor: 36.6 };\n'
+    's.valor = 40.0;\n'
+    'print(s.valor);\n'
+)
+agree("L-07: simple struct field assignment (Sensor s; s.valor = 40.0)",
+      _L07_SIMPLE,
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="40")
+
+# Also verify C VM and AOT native on the canonical Sensor reproducer
+_C_VM = os.path.join(ROOT, 'build', 'pyrovm' + EXE)
+_PYRO_CLI = os.path.join(ROOT, 'Burnout', 'pyro.py')
+_l07_work = tempfile.mkdtemp(prefix='cryo_l07_')
+if os.path.isfile(_C_VM):
+    _p_out = os.path.join(_l07_work, 'sensor.pyro')
+    if _compile(_l07_work, _L07_SIMPLE, 'pyro', _p_out).returncode == 0:
+        _r_cvm = subprocess.run([_C_VM, _p_out], capture_output=True, text=True,
+                                encoding='utf-8', errors='replace', timeout=60)
+        check("L-07: C VM prints 40 on Sensor reproducer",
+              _r_cvm.returncode == 0 and _r_cvm.stdout.strip() == "40",
+              _r_cvm.stdout + _r_cvm.stderr)
+if shutil.which('gcc'):
+    _s_cryo = os.path.join(_l07_work, 'sensor.cryo')
+    with open(_s_cryo, 'w', encoding='utf-8') as _f:
+        _f.write(_L07_SIMPLE)
+    _aot_exe = os.path.join(_l07_work, 'sensor_aot' + EXE)
+    _b_aot = subprocess.run([sys.executable, _PYRO_CLI, 'build', _s_cryo, '-o', _aot_exe],
+                            capture_output=True, text=True, encoding='utf-8',
+                            errors='replace', timeout=300)
+    if _b_aot.returncode == 0 and os.path.isfile(_aot_exe):
+        _r_aot = subprocess.run([_aot_exe], capture_output=True, text=True,
+                                encoding='utf-8', errors='replace', timeout=60)
+        check("L-07: AOT native binary prints 40 on Sensor reproducer",
+              _r_aot.returncode == 0 and _r_aot.stdout.strip() == "40",
+              _r_aot.stdout + _r_aot.stderr)
+    else:
+        check("L-07: AOT native binary builds for Sensor reproducer", False,
+              (_b_aot.stdout + _b_aot.stderr)[-300:])
+
+agree("L-07: compound assignments (+=, -=, *=, /=, %=) and ++/-- on fields",
+      'struct Counter { int n; number v; }\n'
+      'Counter c = Counter { n: 10, v: 5.0 };\n'
+      'c.n += 5; print(c.n);\n'
+      'c.n -= 3; print(c.n);\n'
+      'c.n *= 2; print(c.n);\n'
+      'c.n /= 4; print(c.n);\n'
+      'c.n %= 4; print(c.n);\n'
+      'c.n++; c.n++; c.n--; print(c.n);\n'
+      'c.v += 2.5; c.v *= 2.0; print(c.v);\n'
+      'int sum = 0;\n'
+      'for (c.n = 0; c.n < 4; c.n++) { sum += c.n; }\n'
+      'print(sum);\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="15\n12\n24\n6\n2\n3\n15\n6")
+
+agree("L-07: struct passed as parameter mutates in-place (reference semantics)",
+      'struct Sensor { int id; number valor; }\n'
+      'fn recalibrate(Sensor x, number v) -> void ={\n'
+      '    x.valor = v;\n'
+      '    x.id += 10;\n'
+      '}\n'
+      'Sensor s = Sensor { id: 1, valor: 36.6 };\n'
+      'recalibrate(s, 42.5);\n'
+      'print(s.id);\n'
+      'print(s.valor);\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="11\n42.5")
+
+agree("L-07: this.campo = x inside impl methods",
+      'struct Account { string owner; int balance; }\n'
+      'impl Account {\n'
+      '    fn deposit(int amount) -> void ={\n'
+      '        this.balance += amount;\n'
+      '    }\n'
+      '    fn rename(string new_owner) -> void ={\n'
+      '        this.owner = new_owner;\n'
+      '    }\n'
+      '    fn info() -> string ={\n'
+      '        return this.owner + ":" + to_string(this.balance);\n'
+      '    }\n'
+      '}\n'
+      'Account acc = Account { owner: "Ana", balance: 100 };\n'
+      'acc.deposit(50);\n'
+      'acc.rename("Bia");\n'
+      'print(acc.info());\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="Bia:150")
+
+agree("L-07: nested structs (a.b.c = x) and struct arrays (arr[i].campo = x)",
+      'struct Inner { int x; }\n'
+      'struct Mid { Inner inner; }\n'
+      'struct Outer { Mid mid; }\n'
+      'Outer o = Outer { mid: Mid { inner: Inner { x: 1 } } };\n'
+      'o.mid.inner.x = 10;\n'
+      'o.mid.inner.x += 5;\n'
+      'o.mid.inner.x++;\n'
+      'print(o.mid.inner.x);\n'
+      'Inner[] arr = [Inner { x: 10 }, Inner { x: 20 }];\n'
+      'arr[0].x = 99;\n'
+      'arr[1].x += 5;\n'
+      'arr[1].x++;\n'
+      'print(arr[0].x);\n'
+      'print(arr[1].x);\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="16\n99\n26")
+
+# Semantic errors: non-existent field (with caret + did-you-mean) and non-struct target
+_bad_field = _compile(_l07_work,
+                      'struct Sensor { int id; number valor; }\n'
+                      'Sensor s = Sensor { id: 1, valor: 36.6 };\n'
+                      's.valr = 40.0;\n',
+                      'pyro', os.path.join(_l07_work, 'bad1.pyro'))
+_bad_field_out = (_bad_field.stdout or '') + (_bad_field.stderr or '')
+check("L-07: assigning to non-existent field is a semantic error with caret and hint",
+      _bad_field.returncode != 0
+      and "has no field 'valr'" in _bad_field_out
+      and "did you mean `valor`?" in _bad_field_out
+      and "^" in _bad_field_out,
+      _bad_field_out)
+
+_bad_nonstruct = _compile(_l07_work,
+                          'int x = 10;\nx.valor = 20;\n',
+                          'pyro', os.path.join(_l07_work, 'bad2.pyro'))
+_bad_nonstruct_out = (_bad_nonstruct.stdout or '') + (_bad_nonstruct.stderr or '')
+check("L-07: assigning to a field on a non-struct is a semantic error",
+      _bad_nonstruct.returncode != 0
+      and "cannot assign to field 'valor' on non-struct" in _bad_nonstruct_out,
+      _bad_nonstruct_out)
+
+# Backend refusal on asm and wasm
+for _unsup in ('asm', 'wasm'):
+    _res_u = _compile(_l07_work, 'struct S { int x; }\nS s = S { x: 1 };\ns.x = 2;\n', _unsup, os.path.join(_l07_work, 'u.' + _unsup))
+    _u_out = (_res_u.stdout or '') + (_res_u.stderr or '')
+    check(f"L-07: --backend {_unsup} refuses explicitly with 'use --backend'",
+          _res_u.returncode != 0 and "use --backend" in _u_out,
+          _u_out)
+# Verify C, C++, and AOT C codegen emit pointer/handle field assignments even if gcc/g++ is absent
+sys.path.insert(0, os.path.join(ROOT, 'Burnout'))
+sys.path.insert(0, os.path.join(ROOT, 'Cryo'))
+import compiler as _comp_l07, aot_pyro as _aot_l07
+_c_gen = _comp_l07.compile_source(_L07_SIMPLE, 'c', True, 'win64')
+_cpp_gen = _comp_l07.compile_source(_L07_SIMPLE, 'cpp', True, 'win64')
+_aot_gen = _aot_l07.compile_to_c(_comp_l07.compile_source(_L07_SIMPLE, 'pyro', True, 'win64'))
+check("L-07: C backend generates heap-pointer struct field assignment (s->valor = 40.0)",
+      "__cryo_new_Sensor" in _c_gen and "(s)->valor = 40.0;" in _c_gen, _c_gen)
+check("L-07: C++ backend generates shared_ptr struct field assignment (s->valor = 40.0)",
+      "std::make_shared<Sensor>" in _cpp_gen and "s->valor = 40.0;" in _cpp_gen, _cpp_gen)
+check("L-07: AOT native C translation emits index_set for struct field assignment",
+      "index_set(" in _aot_gen, _aot_gen[:300])
+agree("upper and lower handle non-ASCII Latin text (ISSUES/31)",
+      u'print(upper("ação"));\nprint(lower("AÇÃO"));\n',
+      backends=_U8, expect=u"AÇÃO\nação")
+
+agree("negative zero (-0.0) and 0.0 - 0.0 agree across all backends (ISSUES/33)",
+      'number z = -1.0;\nnumber w = 0.0;\nprint(z * w);\nprint(0.0 - 0.0);\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="-0\n0")
+
+shutil.rmtree(_l07_work, ignore_errors=True)
+
 # round(-0.0) is DELIBERATELY ABSENT. It disagrees four ways across the
 # backends for a reason that has nothing to do with rounding — node prints
 # -0 as 0 while pyro/go/c print -0, and pyro folds `0.0 - 0.0` to -0 —
 # and asserting any of them here would be asserting one of those four as
 # correct before anyone has decided which. ISSUES/33.
+
+
+# ── graphics: colour, the renderer arithmetic, and the framebuffer ──
+#
+# These exist because the graphics helpers are the first group where a
+# helper calls another helper (fb_rect and fb_line call fb_set), which
+# broke the shared injection path. The last check in this block is that
+# regression; the rest pin the behaviour the helpers promise.
+
+agree("GFX-01: rgb packs ARGB and the channel accessors invert it",
+      'int c = rgb(10, 20, 30);\n'
+      'print(color_a(c));\n'
+      'print(color_r(c));\n'
+      'print(color_g(c));\n'
+      'print(color_b(c));\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="255\n10\n20\n30")
+
+# CLAMPED, not masked. A channel that overshoots is the normal case in
+# lighting code, and masking would wrap a bright red to black — which
+# looks like an art bug, not an arithmetic one.
+agree("GFX-02: out-of-range colour components clamp rather than wrap",
+      'int c = rgb(300, -40, 255);\n'
+      'print(color_r(c));\n'
+      'print(color_g(c));\n'
+      'print(color_b(c));\n'
+      'int t = rgba(0, 0, 0, 999);\n'
+      'print(color_a(t));\n',
+      expect="255\n0\n255\n255")
+
+agree("GFX-03: rgba round-trips a transparent colour, alpha included",
+      'int c = rgba(1, 2, 3, 128);\n'
+      'print(color_a(c));\n'
+      'print(color_r(c));\n'
+      'print(color_g(c));\n'
+      'print(color_b(c));\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="128\n1\n2\n3")
+
+agree("GFX-04: lerp interpolates, and extrapolates past the ends unclamped",
+      'print(lerp(0.0, 10.0, 0.5));\n'
+      'print(lerp(0.0, 10.0, 0.0));\n'
+      'print(lerp(0.0, 10.0, 1.0));\n'
+      'print(lerp(0.0, 10.0, 2.0));\n'
+      'print(lerp(0.0, 10.0, -1.0));\n',
+      expect="5\n0\n10\n20\n-10")
+
+agree("GFX-05: clamp01 bounds a number to the unit interval",
+      'print(clamp01(0.25));\nprint(clamp01(-3.0));\nprint(clamp01(7.0));\n',
+      expect="0.25\n0\n1")
+
+agree("GFX-06: smoothstep is 0 below, 1 above, and 0.5 at the midpoint",
+      'print(smoothstep(0.0, 1.0, -1.0));\n'
+      'print(smoothstep(0.0, 1.0, 0.5));\n'
+      'print(smoothstep(0.0, 1.0, 2.0));\n',
+      expect="0\n0.5\n1")
+
+# The degenerate interval. e0 == e1 makes the division zero-over-zero,
+# which aborts on every engine rather than returning a nonsense
+# gradient. 0 below the edge and 1 at or above it is the limit of the
+# function as the interval closes, so it is the answer, not a fudge.
+agree("GFX-07: smoothstep with a zero-width interval does not divide by zero",
+      'print(smoothstep(5.0, 5.0, 4.0));\n'
+      'print(smoothstep(5.0, 5.0, 5.0));\n'
+      'print(smoothstep(5.0, 5.0, 6.0));\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="0\n1\n1")
+
+agree("GFX-08: angle conversion round-trips and dist measures a 3-4-5 triangle",
+      'print(to_degrees(to_radians(180.0)));\n'
+      'print(dist(0.0, 0.0, 3.0, 4.0));\n'
+      'print(dist(1.0, 1.0, 1.0, 1.0));\n',
+      expect="180\n5\n0")
+
+# ── the framebuffer ──
+
+agree("GFX-09: fb_new sizes the buffer and fills it with the clear colour",
+      'int[] px = fb_new(3, 2, 7);\n'
+      'print(len(px));\n'
+      'print(fb_get(px, 3, 0, 0));\n'
+      'print(fb_get(px, 3, 2, 1));\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="6\n7\n7")
+
+agree("GFX-10: fb_set writes through a call and fb_get reads it back",
+      'int[] px = fb_new(4, 4, 0);\n'
+      'fb_set(px, 4, 1, 2, 99);\n'
+      'print(fb_get(px, 4, 1, 2));\n'
+      'print(fb_get(px, 4, 2, 1));\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="99\n0")
+
+# THE ROW-WRAP GUARD. x and y are checked separately, before the flat
+# index is formed. A single `i < len(px)` test would let x == w land on
+# the next row — the classic framebuffer bug where a vertical line
+# bleeds one pixel into the opposite edge. Plotting at x == w must be a
+# no-op, and pixel (0, y+1) must stay untouched.
+agree("GFX-11: plotting at x == w is dropped, not wrapped onto the next row",
+      'int[] px = fb_new(4, 4, 0);\n'
+      'fb_set(px, 4, 4, 0, 5);\n'
+      'print(fb_get(px, 4, 0, 1));\n'
+      'fb_set(px, 4, -1, 0, 5);\n'
+      'fb_set(px, 4, 0, -1, 5);\n'
+      'fb_set(px, 4, 0, 99, 5);\n'
+      'print(fb_get(px, 4, 0, 0));\n'
+      'print(fb_get(px, 4, 3, 3));\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="0\n0\n0")
+
+agree("GFX-12: reading outside the buffer returns 0 rather than aborting",
+      'int[] px = fb_new(2, 2, 4);\n'
+      'print(fb_get(px, 2, 5, 0));\n'
+      'print(fb_get(px, 2, 0, 5));\n'
+      'print(fb_get(px, 2, -1, -1));\n',
+      expect="0\n0\n0")
+
+agree("GFX-13: fb_fill repaints every pixel",
+      'int[] px = fb_new(2, 2, 1);\n'
+      'fb_set(px, 2, 0, 0, 9);\n'
+      'fb_fill(px, 3);\n'
+      'print(fb_get(px, 2, 0, 0));\n'
+      'print(fb_get(px, 2, 1, 1));\n',
+      expect="3\n3")
+
+# fb_rect CALLS fb_set — the nested-helper path. It is also clipped by
+# construction: the loops bound the rectangle and fb_set drops whatever
+# is still outside, so an origin off the top-left corner costs nothing.
+agree("GFX-14: fb_rect fills its extent and clips a rectangle hanging off the edge",
+      'int[] px = fb_new(4, 4, 0);\n'
+      'fb_rect(px, 4, 1, 1, 2, 2, 6);\n'
+      'print(fb_get(px, 4, 1, 1));\n'
+      'print(fb_get(px, 4, 2, 2));\n'
+      'print(fb_get(px, 4, 0, 0));\n'
+      'print(fb_get(px, 4, 3, 3));\n'
+      'fb_rect(px, 4, -1, -1, 3, 3, 8);\n'
+      'print(fb_get(px, 4, 0, 0));\n'
+      'print(fb_get(px, 4, 1, 1));\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="6\n6\n0\n0\n8\n8")
+
+# Integer Bresenham, so the same pixels are lit on every backend. A line
+# drawn with a float slope would differ in the last bit between engines
+# and make any image comparison useless as a test.
+agree("GFX-15: fb_line draws an exact integer diagonal on every engine",
+      'int[] px = fb_new(4, 4, 0);\n'
+      'fb_line(px, 4, 0, 0, 3, 3, 2);\n'
+      'int y = 0;\n'
+      'while (y < 4) {\n'
+      '    string row = "";\n'
+      '    int x = 0;\n'
+      '    while (x < 4) {\n'
+      '        row = row + to_string(fb_get(px, 4, x, y));\n'
+      '        x = x + 1;\n'
+      '    }\n'
+      '    print(row);\n'
+      '    y = y + 1;\n'
+      '}\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="2000\n0200\n0020\n0002")
+
+agree("GFX-16: fb_line draws a single-pixel line and a horizontal run",
+      'int[] px = fb_new(3, 2, 0);\n'
+      'fb_line(px, 3, 1, 0, 1, 0, 5);\n'
+      'print(fb_get(px, 3, 1, 0));\n'
+      'fb_line(px, 3, 0, 1, 2, 1, 7);\n'
+      'print(fb_get(px, 3, 0, 1));\n'
+      'print(fb_get(px, 3, 1, 1));\n'
+      'print(fb_get(px, 3, 2, 1));\n',
+      expect="5\n7\n7\n7")
+
+# P3 is decimal text precisely so a test can diff the image. Note the
+# ALPHA IS ABSENT from the output — PPM has nowhere to put it, so a
+# renderer compositing transparency must flatten first.
+agree("GFX-17: fb_ppm emits a valid P3 image, alpha dropped",
+      'int[] px = fb_new(2, 2, rgba(1, 2, 3, 200));\n'
+      'print(fb_ppm(px, 2, 2));\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="P3\n2 2\n255\n1 2 3 1 2 3\n1 2 3 1 2 3")  # no trailing newline: run_backend strips it
+
+# THE REGRESSION. fb_rect and fb_line are the first helpers to call
+# another helper, and the sub-parser returned the nested fb_set in both
+# its synthetic_fns and its statements — so it was injected twice and
+# the program died with "duplicate declaration '__cryo_fb_set'". Two
+# helpers sharing one dependency in a single program is the shape that
+# broke, and a plain compile is the whole assertion.
+agree("GFX-18: two helpers depending on a third compile without a duplicate declaration",
+      'int[] px = fb_new(8, 8, 0);\n'
+      'fb_rect(px, 8, 0, 0, 2, 2, 1);\n'
+      'fb_line(px, 8, 0, 0, 7, 7, 2);\n'
+      'fb_fill(px, 3);\n'
+      'print(fb_get(px, 8, 4, 4));\n',
+      backends=('pyro', 'node', 'go', 'c', 'cpp', 'csharp'),
+      expect="3")
 
 print(f"\n{_passed} passed, {_failed} failed"
       + (f", {_skipped} backend runs skipped" if _skipped else ""))

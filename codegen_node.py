@@ -486,6 +486,13 @@ class CodeGenNode:
 
     # ── functions ─────────────────────────────────────────────
     def _function(self, n: FunctionDecl):
+        # Remembered only so the int-literal refusal below can name the
+        # function a literal came from. A front-end helper such as
+        # checked_add carries 9223372036854775807 in its own body, and
+        # telling the user about a literal they never wrote sends them
+        # looking through their own source for it.
+        prev_fn = getattr(self, "_in_fn", None)
+        self._in_fn = n.name
         params = ', '.join(jsid(p[1]) for p in n.params)
         self._emit(f"function {jsid(n.name)}({params}) {{")
         self._t.push()
@@ -495,6 +502,7 @@ class CodeGenNode:
         self._block(n.body)
         self._indent -= 1
         self._t.pop()
+        self._in_fn = prev_fn
         self._emit("}")
         self._emit("")
 
@@ -543,6 +551,8 @@ class CodeGenNode:
                            f"{self._expr(n.value)});")
             else:
                 self._emit(f"{self._expr(n.obj)}[{self._expr(n.index)}] = {self._expr(n.value)};")
+        elif isinstance(n, FieldAssignment):
+            self._emit(f"{self._expr(n.obj)}.{n.field} = {self._expr(n.value)};")
         elif isinstance(n, CompoundAssignment):
             self._emit(f"{jsid(n.name)} {n.op} {self._expr(n.value)};")
         elif isinstance(n, Increment):
@@ -727,6 +737,8 @@ class CodeGenNode:
             return f"{jsid(n.name)} {n.op} {self._expr(n.value)}"
         if isinstance(n, Increment):
             return f"{jsid(n.name)}{n.op}"
+        if isinstance(n, FieldAssignment):
+            return f"{self._expr(n.obj)}.{n.field} = {self._expr(n.value)}"
         return self._expr(n)
 
     # ── expressions ──────────────────────────────────────────
@@ -826,6 +838,25 @@ class CodeGenNode:
         ind = '  ' * self._indent
         return f"(({params}) => {{\n{body}\n{ind}}})"
 
+    # A JavaScript number is an IEEE-754 double, exact only to 2^53, so an
+    # `int` literal past that becomes a DIFFERENT NUMBER with nothing to say
+    # so: 9007199254740993 emits as 9007199254740992 and
+    # 9223372036854775807 as 9223372036854776000. No arithmetic is involved —
+    # a literal assigned and printed is already wrong.
+    #
+    # The limit was documented (test_cli's "conversions" case excludes node
+    # and says why) but not ENFORCED, which is the gap: a comment in a test
+    # does not help someone who writes `int id = 9007199254740993;` and
+    # compiles for node.
+    #
+    # Refused rather than rounded, which is the same call c and cpp already
+    # make for what they cannot represent. A program valid on four backends
+    # and refused here is a worse look than a wrong number only until you
+    # have had to find the wrong number. ISSUES/28 holds the decision about
+    # whether node should instead carry BigInt; this does not pre-empt it,
+    # it removes the silent case meanwhile.
+    _JS_SAFE_INT = (1 << 53) - 1
+
     def _literal(self, n: Literal) -> str:
         if n.kind == 'string':
             return json.dumps(n.value, ensure_ascii=False)
@@ -833,6 +864,25 @@ class CodeGenNode:
             return 'true' if n.value else 'false'
         if n.kind == 'null':
             return 'null'
+        if n.kind == 'int' and isinstance(n.value, int) \
+                and abs(n.value) > self._JS_SAFE_INT:
+            where = getattr(self, "_in_fn", None)
+            if where and where.startswith("__cryo_"):
+                # The literal is inside a front-end desugaring, not in
+                # anything the user typed. Name the BUILTIN.
+                self._err(
+                    f"{where[7:]}() needs 64-bit integers and cannot work "
+                    f"on the node backend: a JavaScript number is exact "
+                    f"only to {self._JS_SAFE_INT}, so the limit it "
+                    f"compares against is not representable and an "
+                    f"overflow would go undetected. Use --backend go, "
+                    f"pyro or c. See ISSUES/28.")
+            self._err(
+                f"the integer {n.value} does not fit in a JavaScript number "
+                f"(exact only to {self._JS_SAFE_INT}), so the node backend "
+                f"would emit a different value silently; use --backend go, "
+                f"pyro or c, or keep the value within "
+                f"±{self._JS_SAFE_INT}. See ISSUES/28.")
         return str(n.value)   # int / float
 
     def _binary(self, n: BinaryExpr) -> str:

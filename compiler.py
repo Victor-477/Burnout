@@ -514,6 +514,26 @@ def compile_file(input_path: str,
         print(f"⚠ --sandbox applies to the pyro, go and node backends; "
               f"ignored for '{backend}'.", file=sys.stderr)
 
+    # ISSUES/29 — `--unsafe` does NOTHING on the pyro backend, and it used to
+    # do nothing silently. `codegen_pyro` assigns self.safe once and never
+    # reads it, so both modes produce byte-identical bytecode (verified by
+    # hash), and both VMs now check `+ - *` overflow unconditionally.
+    #
+    # Saying so rather than fixing it, because the fix is a FORMAT change: the
+    # .pyro flags byte has no safe-mode bit, and adding one that only the Go
+    # VM honours would turn a dead flag into a live DIVERGENCE — `--unsafe`
+    # skipping checks on one VM and not the other. That must land in both VMs
+    # and the self-hosted compiler at once, and the C VM cannot be built on
+    # this machine.
+    #
+    # A flag that quietly means nothing is the complaint; a flag that says it
+    # means nothing is merely a limitation.
+    if not safe and backend == 'pyro':
+        print("⚠ --unsafe has no effect on the pyro backend: the VM checks "
+              "integer overflow unconditionally and the bytecode is identical "
+              "either way (ISSUES/29). Use --backend go or c for an unchecked "
+              "build.", file=sys.stderr)
+
     # ── code generation ──
     try:
         code = compile_source(source, backend, safe, abi, base_dir=base_dir,
@@ -829,7 +849,8 @@ def main() -> None:
             run         = args.run,
         )
     except LexerError     as e:
-        print("\n" + _point_at(args.input, str(e), '[Lexical Error]'),
+        # `path` is set when the error is in an imported module (L-15).
+        print("\n" + _point_at(getattr(e, 'path', None) or args.input, str(e), '[Lexical Error]'),
               file=sys.stderr); sys.exit(1)
     except ParseError     as e:
         # 11.24 — these messages already carry "Line N"; showing that line with
@@ -839,6 +860,9 @@ def main() -> None:
         # line and caret: joining them into one string would leave `_point_at`
         # underlining the first error's line under all of them, which is worse
         # than showing one error properly.
+        # The file the error is in: an imported module sets `path` (L-15);
+        # otherwise it is the file being compiled.
+        src_path = getattr(e, 'path', None) or args.input
         errs = getattr(e, 'errors', None)
         if errs:
             n = len(errs)
@@ -850,12 +874,12 @@ def main() -> None:
                     else "the parser found %d problem%s:") % (
                         n, '' if n == 1 else 's')
             parts = ["\n[Syntax Error] " + head]
-            parts += [_point_at(args.input, m, '[Syntax Error]') for m in errs]
+            parts += [_point_at(src_path, m, '[Syntax Error]') for m in errs]
             if more:
                 parts.append("[Syntax Error] " + getattr(
                     type(e), 'CAP_NOTICE', '... stopping here'))
             print("\n\n".join(parts), file=sys.stderr); sys.exit(1)
-        print("\n" + _point_at(args.input, str(e), '[Syntax Error]'),
+        print("\n" + _point_at(src_path, str(e), '[Syntax Error]'),
               file=sys.stderr); sys.exit(1)
     except ForeignError   as e:
         print(f"\n[Foreign Error] {e}", file=sys.stderr); sys.exit(1)

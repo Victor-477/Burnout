@@ -147,6 +147,16 @@ def _run_single(path, args):
     except ModuleError as e:
         print(f"\n{e}", file=sys.stderr)
         return 1
+    except (LexerError, ParseError) as e:
+        # A syntax error in an IMPORTED module escaped as a Python traceback.
+        # Render it against the module it is in (`path`, set by modules.py).
+        import compiler
+        tag = '[Lexical Error]' if isinstance(e, LexerError) else '[Syntax Error]'
+        where = getattr(e, 'path', None) or path
+        msgs = getattr(e, 'errors', None) or [str(e)]
+        print("\n" + "\n\n".join(compiler._point_at(where, m, tag) for m in msgs),
+              file=sys.stderr)
+        return 1
 
     print(f"[cryoc test] {path} — {len(tests)} test(s) on --backend {args.backend}\n")
     # The suite writes to this terminal from a CHILD process, which does not
@@ -224,7 +234,7 @@ def _run(code, backend, work):
         import compiler
         cxx, cxx_dir = compiler.find_cxx()
         if cxx is None:
-            cxx, cxx_dir = 'g++', None
+            print("[cryoc test] no C++ toolchain found", file=sys.stderr); return 2
         exe = os.path.join(work, 'suite' + ('.exe' if sys.platform == 'win32' else ''))
         rt_dir = os.path.join(_here, 'runtime')
         cmd = [cxx, '-std=c++14', '-O2', '-I', rt_dir, out, '-o', exe]
