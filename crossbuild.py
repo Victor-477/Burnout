@@ -30,6 +30,14 @@
 #  it runs everywhere else. A cross build can change which CPU
 #  executes the program. It cannot change what the program means.
 #
+#  Which holds for a FIXED route, and that is the honest version of
+#  the sentence. Choosing a route chooses an ENGINE, so where the go
+#  backend and the VM already disagree, the two routes disagree too —
+#  `try`/`catch` around a division by zero recovers on one and kills
+#  the program on the other (ISSUES/37). `auto` is at least
+#  deterministic: it leaves `native` only when the Go backend refuses
+#  the program outright.
+#
 #  Usage:
 #      cryoc build app.cryo                      # host only
 #      cryoc build app.cryo --target all         # six binaries
@@ -537,7 +545,9 @@ def main(argv=None):
                     help="'native' compiles through the Go backend; 'bundle' "
                          "ships the Pyro VM carrying the bytecode; 'auto' "
                          "(default) is native, falling back to bundle for a "
-                         "program the Go backend does not cover")
+                         "program the Go backend does not cover. Picking a "
+                         "route picks an ENGINE: where the two already "
+                         "disagree the binaries do too (ISSUES/37)")
     ap.add_argument('--unsafe', action='store_true',
                     help='turn off safety instrumentation')
     ap.add_argument('--sandbox', action='store_true',
